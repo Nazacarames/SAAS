@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build output
+dist/
+build/
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Public uploads
+public/uploads/*
+!public/uploads/.gitkeep
+
+# WhatsApp sessions
+baileys_store/
+*.json
+
+# Testing
+coverage/
+.nyc_output/
