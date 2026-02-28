@@ -10,6 +10,7 @@ import Message from "../models/Message";
 import Whatsapp from "../models/Whatsapp";
 import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
+import { generateConversationalReply } from "../services/AIServices/ConversationOrchestrator";
 
 const aiRoutes = Router();
 
@@ -799,6 +800,22 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
     return fail(`tool no soportada: ${tool}`);
   } catch (error: any) {
     return res.status(500).json({ ok: false, error: error?.message || "tool execution error" });
+  }
+});
+
+aiRoutes.post('/respond', isAuth, async (req: any, res) => {
+  const { companyId } = req.user;
+  const text = String(req.body?.text || '').trim();
+  const contactId = Number(req.body?.contactId || 0) || undefined;
+  const ticketId = Number(req.body?.ticketId || 0) || undefined;
+
+  if (!text) return res.status(400).json({ ok: false, error: 'text requerido' });
+
+  try {
+    const result = await generateConversationalReply({ companyId, text, contactId, ticketId });
+    return res.json({ ok: true, ...result });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error?.message || 'ai_respond_error' });
   }
 });
 
@@ -1874,5 +1891,4 @@ aiRoutes.get('/link-preview', isAuth, async (req: any, res: any) => {
 });
 
 export default aiRoutes;
-
 
