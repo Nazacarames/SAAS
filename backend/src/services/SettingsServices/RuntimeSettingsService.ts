@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import { QueryTypes } from "sequelize";
+import sequelize from "../../database";
 
 export interface RuntimeSettings {
   waCloudVerifyToken: string;
@@ -162,5 +164,55 @@ export const saveRuntimeSettings = (patch: Partial<RuntimeSettings>) => {
     waOutboundDedupeTtlSeconds: clampInt((patch as any).waOutboundDedupeTtlSeconds ?? current.waOutboundDedupeTtlSeconds ?? 120, 120, 30, 900)
   };
   writeFileSettings(next);
+  return next;
+};
+
+const ensureCompanyRuntimeSettingsTable = async () => {
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS company_runtime_settings (
+    company_id INTEGER PRIMARY KEY,
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+};
+
+export const getRuntimeSettingsForCompany = async (companyId: number): Promise<RuntimeSettings> => {
+  const base = getRuntimeSettings();
+  if (!companyId || Number.isNaN(companyId)) return base;
+
+  try {
+    await ensureCompanyRuntimeSettingsTable();
+    const [row]: any = await sequelize.query(
+      `SELECT settings_json FROM company_runtime_settings WHERE company_id = :companyId LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+    if (!row?.settings_json) return base;
+    const tenantSettings = JSON.parse(String(row.settings_json || '{}')) || {};
+    return { ...base, ...tenantSettings } as RuntimeSettings;
+  } catch {
+    return base;
+  }
+};
+
+export const saveRuntimeSettingsForCompany = async (companyId: number, patch: Partial<RuntimeSettings>) => {
+  if (!companyId || Number.isNaN(companyId)) return saveRuntimeSettings(patch);
+
+  await ensureCompanyRuntimeSettingsTable();
+  const current = await getRuntimeSettingsForCompany(companyId);
+  const next = { ...current, ...patch } as RuntimeSettings;
+
+  await sequelize.query(
+    `INSERT INTO company_runtime_settings (company_id, settings_json, updated_at)
+     VALUES (:companyId, :settingsJson, NOW())
+     ON CONFLICT (company_id)
+     DO UPDATE SET settings_json = EXCLUDED.settings_json, updated_at = NOW()`,
+    {
+      replacements: {
+        companyId,
+        settingsJson: JSON.stringify(next || {})
+      },
+      type: QueryTypes.INSERT
+    }
+  );
+
   return next;
 };

@@ -1468,15 +1468,20 @@ const fetchLeadgenDetails = async (companyId: number, leadgenId: string): Promis
   if (conn?.access_token) tokens.push(String(conn.access_token));
 
   for (const accessToken of tokens) {
-    try {
-      const url = new URL(`https://graph.facebook.com/${graphApiVersion}/${encodeURIComponent(leadgenId)}`);
-      url.searchParams.set('fields', 'id,created_time,field_data,form_id,ad_id,campaign_id,adset_id');
-      url.searchParams.set('access_token', accessToken);
-      const resp = await fetch(url.toString());
-      const data: any = await resp.json().catch(() => ({}));
-      if (resp.ok && data?.id) return data;
-    } catch {
-      // try next token
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const url = new URL(`https://graph.facebook.com/${graphApiVersion}/${encodeURIComponent(leadgenId)}`);
+        url.searchParams.set('fields', 'id,created_time,field_data,form_id,ad_id,campaign_id,adset_id');
+        url.searchParams.set('access_token', accessToken);
+        const resp = await fetch(url.toString());
+        const data: any = await resp.json().catch(() => ({}));
+        if (resp.ok && data?.id) return data;
+        const retryable = Number(resp.status) >= 500 || Number(resp.status) === 429;
+        if (!retryable || attempt === 3) break;
+      } catch {
+        if (attempt === 3) break;
+      }
+      await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
     }
   }
   return null;
@@ -1502,7 +1507,7 @@ const extractMetaLeadEvents = async (body: any, companyId: number): Promise<any[
           leadgen_id: leadgenId,
           ad_id: String(value?.ad_id || leadDetails?.ad_id || ''),
           campaign_id: String(value?.campaign_id || leadDetails?.campaign_id || ''),
-          adset_id: String(value?.adset_id || value?.adgroup_id || leadDetails?.adgroup_id || ''),
+          adset_id: String(value?.adset_id || value?.adgroup_id || leadDetails?.adset_id || ''),
           field_data: leadDetails?.field_data || [],
           _rawPayload: body
         });
@@ -1525,7 +1530,7 @@ const processMetaLeadEvent = async (body: any) => {
   };
 
   const companyId = Number(body.companyId || 0);
-  if (!companyId || Number.isNaN(companyId)) return { ok: false, ingested: false, outreach: false, reason: " missing_company_id\ };
+  if (!companyId || Number.isNaN(companyId)) return { ok: false, ingested: false, outreach: false, reason: "missing_company_id" };
   const replayKey = buildMetaLeadReplayKey(companyId, body);
   const accepted = await reserveMetaLeadReplayKey(replayKey, META_LEAD_REPLAY_TTL_SECONDS);
   if (!accepted) return { ok: true, ingested: false, outreach: false, reason: 'replay_blocked' };
@@ -1629,7 +1634,7 @@ aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
   await ensureMetaLeadTables();
   const rootBody = req.body || {};
   const companyId = Number(rootBody.companyId || 0);
- if (!companyId || Number.isNaN(companyId)) return res.status(400).json({ ok: false, error: \companyId is required\ });
+  if (!companyId || Number.isNaN(companyId)) return res.status(400).json({ ok: false, error: "companyId is required" });
   const events = await extractMetaLeadEvents(rootBody, companyId);
   const results = [] as any[];
   for (const ev of events) {
