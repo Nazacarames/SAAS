@@ -31,7 +31,6 @@ public/uploads/*
 
 # WhatsApp sessions
 baileys_store/
-*.json
 
 # Testing
 coverage/
