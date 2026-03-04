@@ -1524,7 +1524,8 @@ const processMetaLeadEvent = async (body: any) => {
     return fieldData[k] || '';
   };
 
-  const companyId = Number(body.companyId || 1);
+  const companyId = Number(body.companyId || 0);
+  if (!companyId || Number.isNaN(companyId)) return { ok: false, ingested: false, outreach: false, reason: " missing_company_id\ };
   const replayKey = buildMetaLeadReplayKey(companyId, body);
   const accepted = await reserveMetaLeadReplayKey(replayKey, META_LEAD_REPLAY_TTL_SECONDS);
   if (!accepted) return { ok: true, ingested: false, outreach: false, reason: 'replay_blocked' };
@@ -1627,7 +1628,8 @@ const processMetaLeadEvent = async (body: any) => {
 aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
   await ensureMetaLeadTables();
   const rootBody = req.body || {};
-  const companyId = Number(rootBody.companyId || 1);
+  const companyId = Number(rootBody.companyId || 0);
+ if (!companyId || Number.isNaN(companyId)) return res.status(400).json({ ok: false, error: \companyId is required\ });
   const events = await extractMetaLeadEvents(rootBody, companyId);
   const results = [] as any[];
   for (const ev of events) {

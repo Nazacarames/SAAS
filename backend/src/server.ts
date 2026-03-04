@@ -9,6 +9,13 @@ import CheckInactiveContactsService from "./services/ContactServices/CheckInacti
 
 dotenv.config();
 
+const requiredEnv = ["JWT_SECRET", "JWT_REFRESH_SECRET"];
+const missing = requiredEnv.filter((k) => !String(process.env[k] || "").trim());
+if (missing.length) {
+  console.error("✗ Missing required environment variables:", missing.join(", "));
+  process.exit(1);
+}
+
 const PORT = process.env.PORT || 4000;
 
 const server = http.createServer(app);

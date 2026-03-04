@@ -3,6 +3,7 @@ import cors from "cors";
 import "express-async-errors";
 import errorHandler from "./middleware/errorHandler";
 import { getMessageStats } from "./utils/messageStats";
+import { requestContext } from "./middleware/requestContext";
 
 const app: Application = express();
 
@@ -14,6 +15,7 @@ app.use(cors({
 
 app.use(express.json({ verify: (req: any, _res, buf) => { (req as any).rawBody = buf?.toString("utf8") || ""; } }));
 app.use(express.urlencoded({ extended: true }));
+app.use(requestContext);
 
 // Static files
 app.use("/public", express.static("public"));

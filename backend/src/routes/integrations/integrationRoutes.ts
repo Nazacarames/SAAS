@@ -5,12 +5,10 @@ import SendOutboundTextService from "../../services/IntegrationServices/SendOutb
 
 const integrationRoutes = Router();
 
-// All integration endpoints are protected by x-api-key
 integrationRoutes.use(integrationAuth);
 
-// Create lead from external platform
 integrationRoutes.post("/leads", async (req: any, res) => {
-  const companyId = 1; // single-tenant MVP
+  const companyId = Number(req.integrationCompanyId);
 
   const {
     whatsappId,
@@ -36,9 +34,8 @@ integrationRoutes.post("/leads", async (req: any, res) => {
   return res.status(201).json(result);
 });
 
-// Send message (outbound) from external platform
 integrationRoutes.post("/messages", async (req: any, res) => {
-  const companyId = 1; // single-tenant MVP
+  const companyId = Number(req.integrationCompanyId);
 
   const { whatsappId, to, text, contactName } = req.body || {};
 
