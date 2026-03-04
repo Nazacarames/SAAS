@@ -1,6 +1,7 @@
 import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/Auth/AuthContext';
 import Login from '../pages/Login';
+import Register from '../pages/Register';
 import Dashboard from '../pages/Dashboard';
 import Conversations from '../pages/Conversations';
 import Contacts from '../pages/Contacts';
@@ -15,6 +16,8 @@ import Agenda from '../pages/Agenda';
 import Funnel from '../pages/Funnel';
 import Templates from '../pages/Templates';
 import Reports from '../pages/Reports';
+import Billing from '../pages/Billing';
+import LandingB from '../pages/LandingB';
 import MainLayout from '../layout/MainLayout';
 
 const PrivateRoute = ({ children }: { children: JSX.Element }) => {
@@ -32,7 +35,9 @@ const Routes = () => {
 
   return (
     <RouterRoutes>
+      <Route path='/landing' element={<LandingB />} />
       <Route path='/login' element={isAuth ? <Navigate to='/' /> : <Login />} />
+      <Route path='/register' element={isAuth ? <Navigate to='/' /> : <Register />} />
 
       <Route
         path='/'
@@ -59,6 +64,7 @@ const Routes = () => {
         <Route path='webhooks' element={<Navigate to='/integrations' replace />} />
         <Route path='templates' element={<Templates />} />
         <Route path='reports' element={<Reports />} />
+        <Route path='billing' element={<Billing />} />
       </Route>
 
       <Route path='*' element={<Navigate to='/' />} />

@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /login
+Disallow: /register
+Disallow: /settings
+Disallow: /users
+Disallow: /integrations
+Disallow: /billing
+
+Sitemap: https://login.charlott.ai/sitemap.xml
