@@ -64,6 +64,9 @@ whatsappCloudRoutes.post("/webhook", async (req: any, res) => {
 whatsappCloudRoutes.post("/test-send", isAuth, isAdmin, async (req: any, res) => {
   const to = String(req.body?.to || "").replace(/\D/g, "");
   const text = String(req.body?.text || "").trim();
+  const idempotencyFromHeader = String(req.headers?.["x-idempotency-key"] || "").trim();
+  const idempotencyFromBody = String(req.body?.idempotencyKey || "").trim();
+  const idempotencyKey = String(idempotencyFromHeader || idempotencyFromBody || "").trim();
 
   if (!to || to.length < 8) return res.status(400).json({ error: "Missing/invalid 'to'" });
   if (!text) return res.status(400).json({ error: "Missing 'text'" });
@@ -78,7 +81,8 @@ whatsappCloudRoutes.post("/test-send", isAuth, isAdmin, async (req: any, res) =>
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer " + settings.waCloudAccessToken
+      Authorization: "Bearer " + settings.waCloudAccessToken,
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {})
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",

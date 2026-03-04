@@ -15,13 +15,22 @@ messageRoutes.get("/:conversationId", isAuth, async (req: any, res) => {
 
 // Send message to conversation contact via WhatsApp
 messageRoutes.post("/", isAuth, async (req: any, res) => {
-  const { body, conversationId, contactId } = req.body;
+  const { body, conversationId, contactId, idempotencyKey } = req.body;
+  const idempotencyFromHeader = String(req.headers?.["x-idempotency-key"] || "").trim();
+  const effectiveIdempotencyKey = String(idempotencyFromHeader || idempotencyKey || "").trim();
   const { id: userId } = req.user;
+
+  const settings = (require("../services/SettingsServices/RuntimeSettingsService") as any).getRuntimeSettings();
+  const retryRequiresIdempotency = Boolean(settings?.waOutboundRetryRequireIdempotencyKey);
+  if (retryRequiresIdempotency && !effectiveIdempotencyKey) {
+    return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required" });
+  }
 
   const message = await SendMessageService({
     body,
     contactId: Number(contactId || conversationId),
-    userId
+    userId,
+    idempotencyKey: effectiveIdempotencyKey || undefined
   });
 
   return res.status(201).json(message);

@@ -20,6 +20,7 @@ interface SendMessageRequest {
   mediaUrl?: string;
   mediaType?: "image" | "video" | "audio" | "document";
   caption?: string;
+  idempotencyKey?: string;
 }
 
 const mapMetaError = (data: any, fallback = "Error al enviar mensaje") => {
@@ -58,7 +59,8 @@ const sendViaCloudTemplate = async (
   toRaw: string,
   templateName: string,
   languageCode = "es_AR",
-  bodyParams: string[] = []
+  bodyParams: string[] = [],
+  idempotencyKey?: string
 ): Promise<string> => {
   const to = String(toRaw || "").replace(/\D/g, "");
   const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
@@ -75,7 +77,8 @@ const sendViaCloudTemplate = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${accessToken}`,
+      ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {})
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
@@ -94,7 +97,7 @@ const sendViaCloudTemplate = async (
   return data?.messages?.[0]?.id || `meta-${Date.now()}`;
 };
 
-const sendViaCloudText = async (companyId: number | undefined, toRaw: string, text: string): Promise<string> => {
+const sendViaCloudText = async (companyId: number | undefined, toRaw: string, text: string, idempotencyKey?: string): Promise<string> => {
   const to = String(toRaw || "").replace(/\D/g, "");
   const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
 
@@ -106,7 +109,8 @@ const sendViaCloudText = async (companyId: number | undefined, toRaw: string, te
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${accessToken}`,
+      ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {})
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
@@ -127,7 +131,8 @@ const sendViaCloudMedia = async (
   toRaw: string,
   mediaUrl: string,
   mediaType: "image" | "video" | "audio" | "document" = "image",
-  caption = ""
+  caption = "",
+  idempotencyKey?: string
 ): Promise<string> => {
   const to = String(toRaw || "").replace(/\D/g, "");
   const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
@@ -151,7 +156,8 @@ const sendViaCloudMedia = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${accessToken}`,
+      ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {})
     },
     body: JSON.stringify(payload)
   });
@@ -162,7 +168,7 @@ const sendViaCloudMedia = async (
   return data?.messages?.[0]?.id || `meta-${Date.now()}`;
 };
 
-const SendMessageService = async ({ body, ticketId, contactId, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption }: SendMessageRequest): Promise<Message> => {
+const SendMessageService = async ({ body, ticketId, contactId, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption, idempotencyKey }: SendMessageRequest): Promise<Message> => {
   let ticket: any = null;
   if (ticketId) ticket = await Ticket.findByPk(ticketId, {
     include: [
@@ -204,17 +210,18 @@ const SendMessageService = async ({ body, ticketId, contactId, templateName, lan
         const vars = Array.isArray(templateVariables) && templateVariables.length
           ? templateVariables
           : [/hola/i.test(String(templateName || "")) ? firstName : ""].filter(Boolean);
-        msgId = await sendViaCloudTemplate((ticket as any).companyId, (ticket as any).contact.number, String(templateName).trim(), String(languageCode || "es_AR"), vars);
+        msgId = await sendViaCloudTemplate((ticket as any).companyId, (ticket as any).contact.number, String(templateName).trim(), String(languageCode || "es_AR"), vars, idempotencyKey);
       } else if (isMedia) {
         msgId = await sendViaCloudMedia(
           (ticket as any).companyId,
           (ticket as any).contact.number,
           String(mediaUrl || "").trim(),
           (mediaType || "image") as any,
-          String(caption || "").trim()
+          String(caption || "").trim(),
+          idempotencyKey
         );
       } else {
-        msgId = await sendViaCloudText((ticket as any).companyId, (ticket as any).contact.number, cleanBody);
+        msgId = await sendViaCloudText((ticket as any).companyId, (ticket as any).contact.number, cleanBody, idempotencyKey);
       }
     } catch (cloudErr: any) {
       if (!wbot) throw cloudErr;
