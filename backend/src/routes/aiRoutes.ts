@@ -1653,14 +1653,42 @@ aiRoutes.post('/meta-leads/webhook', featureGate('meta_leads'), async (req: any,
 
 
 
+aiRoutes.post('/metrics/ai-rag/event', isAuth, async (req: any, res) => {
+  await ensureAiMetricTables();
+  const companyId = Number(req.user?.companyId || 0);
+  const source = String(req.body?.source || 'ai').slice(0, 40);
+  const tokensIn = Math.max(0, Number(req.body?.tokensIn || 0));
+  const tokensOut = Math.max(0, Number(req.body?.tokensOut || 0));
+  const costUsd = Math.max(0, Number(req.body?.costUsd || 0));
+  const latencyMs = Math.max(0, Number(req.body?.latencyMs || 0));
+  const qualityScore = req.body?.qualityScore == null ? null : Number(req.body.qualityScore);
+
+  await sequelize.query(
+    `INSERT INTO ai_metric_events (company_id, source, tokens_in, tokens_out, cost_usd, latency_ms, quality_score, created_at)
+     VALUES (:companyId, :source, :tokensIn, :tokensOut, :costUsd, :latencyMs, :qualityScore, NOW())`,
+    { replacements: { companyId, source, tokensIn, tokensOut, costUsd, latencyMs, qualityScore }, type: QueryTypes.INSERT }
+  );
+
+  await incrementUsage(companyId, 'ai.tokens_in', tokensIn);
+  await incrementUsage(companyId, 'ai.tokens_out', tokensOut);
+  return res.json({ ok: true });
+});
+
 aiRoutes.get('/metrics/ai-rag', isAuth, async (req: any, res) => {
   const companyId = Number(req.user?.companyId || 0);
   const month = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
+  await ensureAiMetricTables();
   const rows: any = await sequelize.query(
     `SELECT metric_code, metric_value FROM usage_counters WHERE company_id = :companyId AND period_ym = :month AND metric_code LIKE 'ai.%' ORDER BY metric_code`,
     { replacements: { companyId, month }, type: QueryTypes.SELECT }
   );
-  return res.json({ ok: true, month, metrics: rows });
+  const [agg]: any = await sequelize.query(
+    `SELECT COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(AVG(NULLIF(quality_score,0)),0) AS avg_quality, COALESCE(AVG(NULLIF(latency_ms,0)),0) AS avg_latency_ms
+     FROM ai_metric_events
+     WHERE company_id = :companyId AND TO_CHAR(created_at, 'YYYY-MM') = :month`,
+    { replacements: { companyId, month }, type: QueryTypes.SELECT }
+  );
+  return res.json({ ok: true, month, metrics: rows, aggregate: agg || {} });
 });
 
 aiRoutes.get('/meta-leads/context/:phone', isAuth, async (req: any, res) => {
@@ -1673,6 +1701,24 @@ aiRoutes.get('/meta-leads/context/:phone', isAuth, async (req: any, res) => {
     ORDER BY id DESC LIMIT 1`, { replacements: { companyId, phone }, type: QueryTypes.SELECT });
   return res.json(row || null);
 });
+
+
+let aiMetricTablesReady = false;
+const ensureAiMetricTables = async () => {
+  if (aiMetricTablesReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_metric_events (
+    id SERIAL PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    source VARCHAR(40) NOT NULL DEFAULT 'ai',
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    cost_usd NUMERIC(10,6) NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    quality_score NUMERIC(5,2),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+  aiMetricTablesReady = true;
+};
 
 let crmFeatureTablesReady = false;
 const ensureCrmFeatureTables = async () => {
