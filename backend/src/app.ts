@@ -48,6 +48,7 @@ import integrationRoutes from "./routes/integrations/integrationRoutes";
 import settingsRoutes from "./routes/settingsRoutes";
 import aiRoutes from "./routes/aiRoutes";
 import savedReplyRoutes from "./routes/savedReplyRoutes";
+import billingRoutes from "./routes/billingRoutes";
 import Webhook from "./models/Webhook";
 
 app.use("/api/auth", authRoutes);
@@ -64,6 +65,7 @@ app.use("/api/integrations", integrationRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/saved-replies", savedReplyRoutes);
+app.use("/api/billing", billingRoutes);
 
 
 // Temporary endpoint to sync webhooks table (development only)

@@ -3,6 +3,8 @@ import { QueryTypes } from "sequelize";
 import crypto from "crypto";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
+import featureGate from "../middleware/featureGate";
+import { incrementUsage } from "../services/BillingServices/BillingService";
 import sequelize from "../database";
 import Contact from "../models/Contact";
 import Ticket from "../models/Ticket";
@@ -1630,7 +1632,7 @@ const processMetaLeadEvent = async (body: any) => {
   };
 };
 
-aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
+aiRoutes.post('/meta-leads/webhook', featureGate('meta_leads'), async (req: any, res) => {
   await ensureMetaLeadTables();
   const rootBody = req.body || {};
   const companyId = Number(rootBody.companyId || 0);
@@ -1644,7 +1646,21 @@ aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
       results.push({ ok: false, error: String(e?.message || e || 'event_failed') });
     }
   }
+  const ingestedCount = results.filter((r) => r?.ingested).length;
+  if (ingestedCount > 0) await incrementUsage(companyId, "meta_leads.ingested", ingestedCount);
   return res.json({ ok: true, ingested: results.some((r) => r?.ingested), events: results.length, results });
+});
+
+
+
+aiRoutes.get('/metrics/ai-rag', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const month = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
+  const rows: any = await sequelize.query(
+    `SELECT metric_code, metric_value FROM usage_counters WHERE company_id = :companyId AND period_ym = :month AND metric_code LIKE 'ai.%' ORDER BY metric_code`,
+    { replacements: { companyId, month }, type: QueryTypes.SELECT }
+  );
+  return res.json({ ok: true, month, metrics: rows });
 });
 
 aiRoutes.get('/meta-leads/context/:phone', isAuth, async (req: any, res) => {

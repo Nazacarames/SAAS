@@ -9,6 +9,7 @@ import Message from "../../models/Message";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
 import { getIO } from "../../libs/socket";
 import sequelize from "../../database";
+import { assertSafeWebhookUrl } from "../../utils/networkSafety";
 
 const safeJson = async (res: any) => {
   try {
@@ -226,11 +227,16 @@ const CheckInactiveContactsService = async () => {
         };
 
         try {
-          const res = await fetch((webhook as any).url, {
+          const safeUrl = await assertSafeWebhookUrl(String((webhook as any).url || ""));
+          const ctl = new AbortController();
+          const t = setTimeout(() => ctl.abort(), 8000);
+          const res = await fetch(safeUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: ctl.signal
           });
+          clearTimeout(t);
           await safeJson(res);
           await (c as any).update({ lastInactivityFiredAt: new Date() } as any);
           console.log(`[inactivity] fired webhook ${webhookId} for contact ${c.id}`);
