@@ -1489,20 +1489,44 @@ const fetchLeadgenDetails = async (companyId: number, leadgenId: string): Promis
   return null;
 };
 
-const extractMetaLeadEvents = async (body: any, companyId: number): Promise<any[]> => {
+const resolveCompanyIdByMetaPageId = async (pageIdRaw: string): Promise<number | null> => {
+  const pageId = String(pageIdRaw || '').trim();
+  if (!pageId) return null;
+
+  try {
+    const [row]: any = await sequelize.query(
+      `SELECT company_id
+         FROM company_runtime_settings
+        WHERE (COALESCE(NULLIF(settings_json, ''), '{}')::jsonb ->> 'metaLeadAdsPageId') = :pageId
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      { replacements: { pageId }, type: QueryTypes.SELECT }
+    );
+    const companyId = Number(row?.company_id || 0);
+    return companyId > 0 ? companyId : null;
+  } catch {
+    return null;
+  }
+};
+
+const extractMetaLeadEvents = async (body: any, fallbackCompanyId?: number): Promise<any[]> => {
   if (body?.object === 'page' && Array.isArray(body?.entry)) {
     const events: any[] = [];
     for (const entry of body.entry) {
       const pageId = String(entry?.id || '').trim();
+      const entryCompanyId = Number(fallbackCompanyId || 0) > 0
+        ? Number(fallbackCompanyId)
+        : Number(await resolveCompanyIdByMetaPageId(pageId) || 0);
       const changes = Array.isArray(entry?.changes) ? entry.changes : [];
       for (const ch of changes) {
         const field = String(ch?.field || '').toLowerCase();
         const value = ch?.value || {};
         const leadgenId = String(value?.leadgen_id || value?.lead?.id || '').trim();
         if (field !== 'leadgen' && !leadgenId) continue;
-        const leadDetails = await fetchLeadgenDetails(companyId, leadgenId);
+        const effectiveCompanyId = entryCompanyId > 0 ? entryCompanyId : Number(fallbackCompanyId || 0);
+        const leadDetails = effectiveCompanyId > 0 ? await fetchLeadgenDetails(effectiveCompanyId, leadgenId) : null;
         events.push({
-          companyId,
+          companyId: effectiveCompanyId,
           event_id: String(value?.event_id || `${pageId}:${leadgenId}:${String(value?.created_time || '')}`),
           page_id: String(value?.page_id || pageId),
           form_id: String(value?.form_id || leadDetails?.form_id || ''),
@@ -1519,6 +1543,7 @@ const extractMetaLeadEvents = async (body: any, companyId: number): Promise<any[
   }
   return [body || {}];
 };
+
 
 const processMetaLeadEvent = async (body: any) => {
   const fieldData = body?.form_fields || body?.field_data || body?.lead?.field_data || {};
@@ -1635,19 +1660,33 @@ const processMetaLeadEvent = async (body: any) => {
 aiRoutes.post('/meta-leads/webhook', featureGate('meta_leads'), async (req: any, res) => {
   await ensureMetaLeadTables();
   const rootBody = req.body || {};
-  const companyId = Number(rootBody.companyId || 0);
-  if (!companyId || Number.isNaN(companyId)) return res.status(400).json({ ok: false, error: "companyId is required" });
-  const events = await extractMetaLeadEvents(rootBody, companyId);
+  const fallbackCompanyId = Number(rootBody.companyId || 0);
+  const events = await extractMetaLeadEvents(rootBody, fallbackCompanyId > 0 ? fallbackCompanyId : undefined);
   const results = [] as any[];
+  const ingestedPerCompany: Record<number, number> = {};
+
   for (const ev of events) {
+    if (!Number(ev?.companyId || 0)) {
+      results.push({ ok: false, ingested: false, outreach: false, reason: 'missing_company_id_for_page', page_id: String(ev?.page_id || '') });
+      continue;
+    }
+
     try {
-      results.push(await processMetaLeadEvent(ev));
+      const r = await processMetaLeadEvent(ev);
+      results.push(r);
+      if (r?.ingested) {
+        const cid = Number(ev.companyId);
+        ingestedPerCompany[cid] = Number(ingestedPerCompany[cid] || 0) + 1;
+      }
     } catch (e: any) {
       results.push({ ok: false, error: String(e?.message || e || 'event_failed') });
     }
   }
-  const ingestedCount = results.filter((r) => r?.ingested).length;
-  if (ingestedCount > 0) await incrementUsage(companyId, "meta_leads.ingested", ingestedCount);
+
+  for (const [cid, count] of Object.entries(ingestedPerCompany)) {
+    if (Number(count) > 0) await incrementUsage(Number(cid), "meta_leads.ingested", Number(count));
+  }
+
   return res.json({ ok: true, ingested: results.some((r) => r?.ingested), events: results.length, results });
 });
 

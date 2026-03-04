@@ -110,7 +110,10 @@ settingsRoutes.get('/meta/webhook-status', isAuth, async (req: any, res) => {
   const s = await getRuntimeSettingsForCompany(companyId);
   const callback = String(process.env.BACKEND_URL || 'https://login.charlott.ai') + '/api/ai/meta-leads/webhook';
   return res.json({
-    verifyTokenConfigured: Boolean(s.metaLeadAdsWebhookVerifyToken),
+    verifyTokenConfigured: Boolean(String(s.metaLeadAdsWebhookVerifyToken || '').trim()),
+    appIdConfigured: Boolean(String(s.metaLeadAdsAppId || '').trim()),
+    appSecretConfigured: Boolean(String(s.metaLeadAdsAppSecret || '').trim()),
+    pageIdConfigured: Boolean(String(s.metaLeadAdsPageId || '').trim()),
     callbackUrl: callback
   });
 });
