@@ -34,7 +34,6 @@ integrationRoutes.post("/leads", featureGate("integrations_api"), async (req: an
   });
 
   await incrementUsage(companyId, "integrations.leads_created", 1);
-  await incrementUsage(companyId, "integrations.messages_sent", 1);
   return res.status(201).json(result);
 });
 
@@ -51,7 +50,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     contactName
   });
 
-  await incrementUsage(companyId, integrations.messages_sent, 1);
+  await incrementUsage(companyId, "integrations.messages_sent", 1);
   return res.status(201).json(result);
 });
 
