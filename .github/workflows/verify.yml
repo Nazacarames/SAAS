@@ -1,0 +1,46 @@
+name: verify
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Verify backend (if present)
+        if: ${{ hashFiles('backend/package.json') != '' }}
+        working-directory: backend
+        run: |
+          npm ci
+          npm run typecheck --if-present
+          npm run lint --if-present
+          npm test --if-present
+          npm run build --if-present
+
+      - name: Warn if backend manifest missing
+        if: ${{ hashFiles('backend/package.json') == '' }}
+        run: echo "backend/package.json missing - backend verification skipped"
+
+      - name: Verify frontend
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck --if-present
+          npm run lint --if-present
+          npm test --if-present
+          npm run build --if-present
