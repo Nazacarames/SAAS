@@ -7,253 +7,774 @@ import { getIO } from "../../libs/socket";
 import crypto from "crypto";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
 import sequelize from "../../database";
-import { Op, QueryTypes } from "sequelize";
+import { QueryTypes } from "sequelize";
 
-interface SendMessageRequest {
-  body?: string;
-  contactId?: number;
-  ticketId?: number;
-  userId: number;
+let outboundDedupeTableReady = false;
+let outboundDedupeLastPruneAt = 0;
+const OUTBOUND_DEDUPE_TTL_SECONDS = 120;
+const OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS = 60 * 1000;
+const emergencyOutboundDedupe = new Map<string, number>();
+const resolveOutboundDedupeTtlSeconds = () => {
+  const n = Number(getRuntimeSettings().waOutboundDedupeTtlSeconds || OUTBOUND_DEDUPE_TTL_SECONDS);
+  if (!Number.isFinite(n)) return OUTBOUND_DEDUPE_TTL_SECONDS;
+  return Math.max(30, Math.min(900, Math.round(n)));
+};
+
+const resolveOutboundDedupeFailClosed = () => Boolean((getRuntimeSettings() as any).waOutboundDedupeFailClosed);
+
+const HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
+const hardeningSignalBuckets = new Map<string, number[]>();
+const hardeningMetricCounters = new Map<string, number>();
+const hardeningMetricLastAt = new Map<string, string>();
+
+const bumpHardeningMetric = (metric: string, by = 1) => {
+  const next = (hardeningMetricCounters.get(metric) || 0) + by;
+  hardeningMetricCounters.set(metric, next);
+  hardeningMetricLastAt.set(metric, new Date().toISOString());
+};
+
+export const getSendHardeningMetrics = () => ({
+  counters: Object.fromEntries(Array.from(hardeningMetricCounters.entries()).sort((a, b) => a[0].localeCompare(b[0]))),
+  lastSeenAt: Object.fromEntries(Array.from(hardeningMetricLastAt.entries()).sort((a, b) => a[0].localeCompare(b[0])))
+});
+
+export const getSendHardeningAlertSnapshot = () => {
+  const now = Date.now();
+  const pendingAlerts = Array.from(hardeningSignalBuckets.entries())
+    .map(([signal, hits]) => ({
+      signal,
+      count: hits.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS).length
+    }))
+    .filter((item) => item.count > 0)
+    .sort((a, b) => b.count - a.count || a.signal.localeCompare(b.signal));
+
+  return {
+    windowMs: HARDENING_ALERT_WINDOW_MS,
+    pendingAlerts
+  };
+};
+
+const pushHardeningSignal = (signal: string, threshold: number, context?: Record<string, unknown>) => {
+  bumpHardeningMetric(`signal.${signal}`);
+  const now = Date.now();
+  const prev = hardeningSignalBuckets.get(signal) || [];
+  const next = prev.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS);
+  next.push(now);
+  hardeningSignalBuckets.set(signal, next);
+
+  if (next.length >= threshold) {
+    bumpHardeningMetric(`alert.${signal}`);
+    console.warn("[wa-hardening][alert] threshold reached", {
+      signal,
+      count: next.length,
+      windowMs: HARDENING_ALERT_WINDOW_MS,
+      ...context
+    });
+    hardeningSignalBuckets.set(signal, []);
+  }
+};
+
+const normalizeForDedupe = (text: string) => {
+  const raw = String(text || "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "") // zero-width chars often used to bypass dedupe
+    .toLowerCase();
+
+  const folded = raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // fold accents (ej: "mañana" ~= "manana")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (folded) return folded.slice(0, 160);
+
+  // fallback: avoid collapsing all-symbol messages (e.g. 👍 vs ❤️) into the same dedupe key
+  return raw.replace(/\s+/g, " ").trim().slice(0, 160);
+};
+
+const normalizeMediaUrlForDedupe = (rawUrl: string): string => {
+  const input = String(rawUrl || "").trim();
+  if (!input) return "";
+
+  try {
+    const u = new URL(input);
+    // signed CDN links rotate query params often; dedupe by stable resource identity
+    const host = u.hostname.toLowerCase();
+    const path = decodeURIComponent(u.pathname || "").replace(/\/+/g, "/");
+    return `${host}${path}`.slice(0, 240);
+  } catch {
+    // non-URL payloads (file ids, opaque refs)
+    return input.split("?")[0].split("#")[0].trim().slice(0, 240);
+  }
+};
+
+const normalizeTemplateLocaleForDedupe = (rawLocale: string): string => {
+  const locale = String(rawLocale || "es_AR")
+    .trim()
+    .replace(/-/g, "_")
+    .replace(/[^A-Za-z_]/g, "");
+  if (!locale) return "es_AR";
+
+  const [lang = "es", country = "AR"] = locale.split("_");
+  const cleanLang = (lang || "es").toLowerCase().slice(0, 8);
+  const cleanCountry = (country || "AR").toUpperCase().slice(0, 8);
+  return `${cleanLang}_${cleanCountry}`;
+};
+
+const normalizeTemplateVariableForDedupe = (rawValue: unknown): string => {
+  return String(rawValue ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+};
+
+type OutboundMode = "text" | "template" | "media";
+type OutboundMediaType = "image" | "video" | "audio" | "document";
+
+type OutboundPayload = {
+  mode: OutboundMode;
+  text?: string;
   templateName?: string;
   languageCode?: string;
   templateVariables?: string[];
   mediaUrl?: string;
-  mediaType?: "image" | "video" | "audio" | "document";
+  mediaType?: OutboundMediaType;
   caption?: string;
+  idempotencyKey?: string;
+};
+
+const normalizeClientIdempotencyKey = (rawKey: string): string => {
+  const cleaned = String(rawKey || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_\-.]/g, "")
+    .slice(0, 120);
+  return cleaned;
+};
+
+const stableStringify = (value: any): string => {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const buildOutboundDedupeKey = (
+  ticketId: number,
+  toRaw: string,
+  payload: OutboundPayload,
+  clientIdempotencyKey?: string,
+  tenantScopeRaw?: string
+) => {
+  const to = String(toRaw || "").replace(/\D/g, "");
+  const tenantScope = String(tenantScopeRaw || "global").trim().toLowerCase().replace(/[^a-z0-9:_\-.]/g, "").slice(0, 80) || "global";
+  const semanticPayload = payload.mode === "text"
+    ? {
+        mode: "text",
+        text: normalizeForDedupe(String(payload.text || ""))
+      }
+    : payload.mode === "template"
+      ? {
+          mode: "template",
+          templateName: String(payload.templateName || "").trim().toLowerCase(),
+          languageCode: normalizeTemplateLocaleForDedupe(String(payload.languageCode || "es_AR")),
+          templateVariables: Array.isArray(payload.templateVariables)
+            ? payload.templateVariables.map((x) => normalizeTemplateVariableForDedupe(x)).filter(Boolean)
+            : []
+        }
+      : {
+          mode: "media",
+          mediaType: String(payload.mediaType || "image").toLowerCase(),
+          mediaUrl: normalizeMediaUrlForDedupe(String(payload.mediaUrl || "")),
+          caption: normalizeForDedupe(String(payload.caption || ""))
+        };
+
+  const semanticHash = crypto.createHash("sha1").update(stableStringify(semanticPayload)).digest("hex");
+  const normalizedClientKey = normalizeClientIdempotencyKey(String(clientIdempotencyKey || ""));
+  const base = normalizedClientKey
+    // client idempotency key must survive ticket re-open/recreate flows to avoid duplicate outbound retries
+    ? `${tenantScope}:${to}:client:${normalizedClientKey}`
+    // hardening: fallback payload dedupe is contact-scoped (not ticket-scoped) to block duplicates after ticket reopen/recreate races
+    : `${tenantScope}:${to}:payload:${semanticHash}`;
+  return `wa-out:${crypto.createHash("sha1").update(base).digest("hex")}`;
+};
+
+const ensureOutboundDedupeTable = async () => {
+  if (outboundDedupeTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_dedupe (id SERIAL PRIMARY KEY, dedupe_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_dedupe_key ON ai_outbound_dedupe(dedupe_key)`);
+  outboundDedupeTableReady = true;
+};
+
+const pruneOutboundDedupeIfDue = async (ttlSeconds: number) => {
+  const now = Date.now();
+  if (now - outboundDedupeLastPruneAt < OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS) return;
+  outboundDedupeLastPruneAt = now;
+  await sequelize.query(`DELETE FROM ai_outbound_dedupe WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`, {
+    replacements: { ttlSeconds },
+    type: QueryTypes.DELETE
+  });
+};
+
+const reserveOutboundDedupe = async (dedupeKey: string, ttlSeconds = OUTBOUND_DEDUPE_TTL_SECONDS): Promise<boolean> => {
+  await ensureOutboundDedupeTable();
+  await pruneOutboundDedupeIfDue(ttlSeconds);
+  const rows: any[] = await sequelize.query(
+    `INSERT INTO ai_outbound_dedupe (dedupe_key, created_at)
+     VALUES (:dedupeKey, NOW())
+     ON CONFLICT (dedupe_key) DO NOTHING
+     RETURNING dedupe_key`,
+    { replacements: { dedupeKey }, type: QueryTypes.SELECT }
+  );
+  return Boolean(rows[0]?.dedupe_key);
+};
+
+const releaseOutboundDedupe = async (dedupeKey: string) => {
+  await sequelize.query(`DELETE FROM ai_outbound_dedupe WHERE dedupe_key = :dedupeKey`, {
+    replacements: { dedupeKey },
+    type: QueryTypes.DELETE
+  });
+};
+
+const reserveOutboundDedupeEmergency = (dedupeKey: string, ttlSeconds = OUTBOUND_DEDUPE_TTL_SECONDS): boolean => {
+  const now = Date.now();
+  const ttlMs = Math.max(30, ttlSeconds) * 1000;
+
+  for (const [key, expiresAt] of emergencyOutboundDedupe.entries()) {
+    if (expiresAt <= now) emergencyOutboundDedupe.delete(key);
+  }
+
+  const currentExpiry = emergencyOutboundDedupe.get(dedupeKey);
+  if (currentExpiry && currentExpiry > now) return false;
+
+  emergencyOutboundDedupe.set(dedupeKey, now + ttlMs);
+  return true;
+};
+
+interface SendMessageRequest {
+  body?: string;
+  ticketId?: number;
+  userId: number;
+  contactId?: number;
+  templateName?: string;
+  languageCode?: string;
+  templateVariables?: string[];
+  mediaUrl?: string;
+  mediaType?: OutboundMediaType;
+  caption?: string;
+  idempotencyKey?: string;
 }
 
-const mapMetaError = (data: any, fallback = "Error al enviar mensaje") => {
-  const code = Number(data?.error?.code || 0);
-  const msg = String(data?.error?.message || fallback);
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  if (code === 131031) return new AppError("Meta bloqueó/restringió la cuenta de WhatsApp (131031)", 409);
-  if (code === 190) return new AppError("Token de Meta vencido o inválido (190). Reconectá OAuth.", 401);
-  if (code === 100) return new AppError("Configuración inválida de Phone Number ID o permisos (100)", 400);
+const parseRetryAfterMs = (retryAfterHeader?: string | null): number | null => {
+  if (!retryAfterHeader) return null;
+  const seconds = Number(retryAfterHeader);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
 
-  return new AppError(msg, 500);
+  const dateMs = Date.parse(retryAfterHeader);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    return delta > 0 ? delta : null;
+  }
+  return null;
 };
 
-const resolveCloudCredentials = async (companyId?: number) => {
-  const runtime = getRuntimeSettings();
-
-  const [conn]: any = await sequelize.query(
-    `SELECT phone_number_id, access_token
-     FROM meta_connections
-     ${companyId ? "WHERE company_id = :companyId" : ""}
-     ORDER BY id DESC LIMIT 1`,
-    {
-      replacements: companyId ? { companyId } : {},
-      type: QueryTypes.SELECT
-    }
-  );
-
-  const phoneNumberId = String(conn?.phone_number_id || runtime.waCloudPhoneNumberId || "").trim();
-  const accessToken = String(conn?.access_token || runtime.waCloudAccessToken || "").trim();
-
-  return { phoneNumberId, accessToken };
+const resolveOutboundRetryMaxDelayMs = (): number => {
+  const n = Number(getRuntimeSettings().waOutboundRetryMaxDelayMs || 15000);
+  if (!Number.isFinite(n)) return 15000;
+  return Math.max(500, Math.min(60000, Math.round(n)));
 };
 
-const sendViaCloudTemplate = async (
-  companyId: number | undefined,
+const resolveOutboundRequestTimeoutMs = (): number => {
+  const n = Number(getRuntimeSettings().waOutboundRequestTimeoutMs || 12000);
+  if (!Number.isFinite(n)) return 12000;
+  return Math.max(1000, Math.min(45000, Math.round(n)));
+};
+
+const resolveOutboundRetryOnTimeout = (hasClientIdempotencyKey: boolean): boolean => {
+  // timeout retries are the highest duplicate-risk path; require explicit opt-in + client idempotency key
+  if (!Boolean((getRuntimeSettings() as any).waOutboundRetryOnTimeout)) return false;
+  return hasClientIdempotencyKey;
+};
+
+const resolveOutboundRetryRequireIdempotencyKey = (): boolean => {
+  const raw = (getRuntimeSettings() as any).waOutboundRetryRequireIdempotencyKey;
+  // hardening default: retries without explicit idempotency key are duplicate-prone
+  if (raw === undefined || raw === null || String(raw).trim() === "") return true;
+  return ["1", "true", "yes", "on"].includes(String(raw).toLowerCase());
+};
+
+const applyRetryJitter = (ms: number, maxDelayMs: number): number => {
+  if (ms <= 0) return 0;
+  const multiplier = 0.9 + (Math.random() * 0.2); // ±10%
+  const jittered = Math.round(ms * multiplier);
+  return Math.max(200, Math.min(jittered, maxDelayMs));
+};
+
+const computeBackoffMs = (attempt: number, retryAfterMs?: number | null): number => {
+  const maxDelayMs = resolveOutboundRetryMaxDelayMs();
+  if (retryAfterMs && retryAfterMs > 0) {
+    // cap provider hints with runtime ceiling to avoid worker starvation on extreme Retry-After values
+    return applyRetryJitter(Math.min(retryAfterMs, maxDelayMs), maxDelayMs);
+  }
+  const base = 400 * Math.pow(2, attempt - 1); // 400, 800, 1600...
+  return applyRetryJitter(base, maxDelayMs); // de-sync concurrent retries
+};
+
+const isRetryableCloudFailure = (status?: number, code?: number): boolean => {
+  if (!status) return true; // network/unknown error
+  // 409 can be emitted after race/conflict situations where blind retries risk duplicate outbound.
+  if (status === 408 || status === 429) return true;
+  if (status >= 500) return true;
+  // WhatsApp Cloud transient codes observed in rate/throughput spikes
+  if (code === 131016 || code === 131048 || code === 131056) return true;
+  return false;
+};
+
+const isRetryableWbotFailure = (err: any): boolean => {
+  const status = Number(err?.statusCode || err?.status || 0);
+  if (status && isRetryableCloudFailure(status)) return true;
+  const message = String(err?.message || err || "").toLowerCase();
+  return /timed?out|timeout|econnreset|econnrefused|socket|temporar|rate limit|too many requests|disconnected|not connected/.test(message);
+};
+
+const shouldReleaseDedupeAfterProviderFailure = (err: any): boolean => {
+  const status = Number(err?.statusCode || err?.status || 0);
+  if (!status) return false; // unknown/network errors are ambiguous: keep dedupe to prevent duplicates
+  if (status === 408 || status === 409 || status === 429) return false;
+  if (status >= 500) return false;
+  return status >= 400 && status < 500;
+};
+
+const sendViaWbot = async (
+  wbot: any,
   toRaw: string,
-  templateName: string,
-  languageCode = "es_AR",
-  bodyParams: string[] = []
+  payload: OutboundPayload,
+  hasClientIdempotencyKey = false
 ): Promise<string> => {
-  const to = String(toRaw || "").replace(/\D/g, "");
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
-
-  if (!to || !phoneNumberId || !accessToken) {
-    throw new AppError("WhatsApp Cloud no conectado", 404);
+  if (payload.mode !== "text") {
+    throw new AppError("Template/media requiere canal WhatsApp Cloud", 400);
   }
 
-  const components = bodyParams.length
-    ? [{ type: "body", parameters: bodyParams.map((v) => ({ type: "text", text: String(v || "") })) }]
-    : undefined;
+  const contactNumber = `${String(toRaw || "").replace(/\D/g, "")}@s.whatsapp.net`;
+  const text = String(payload.text || "");
+  const maxAttempts = Math.max(1, Math.min(6, Number(getRuntimeSettings().waOutboundRetryMaxAttempts || 3)));
+  const allowRetry = !resolveOutboundRetryRequireIdempotencyKey() || hasClientIdempotencyKey;
+  const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+  let lastErr: any;
 
-  const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "template",
-      template: {
-        name: templateName,
-        language: { code: languageCode },
-        ...(components ? { components } : {})
+  for (let attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
+    try {
+      const sentMessage: any = await wbot.sendMessage(contactNumber, { text });
+      bumpHardeningMetric("outbound.wbot_send_ok");
+      return sentMessage?.key?.id || `wbot-${Date.now()}`;
+    } catch (err: any) {
+      lastErr = err;
+      const retryable = isRetryableWbotFailure(err);
+
+      if (!retryable || attempt === effectiveMaxAttempts) {
+        if (retryable && !allowRetry) {
+          bumpHardeningMetric("outbound.wbot_retry_blocked_missing_idempotency_key");
+          pushHardeningSignal("outbound_wbot_retry_blocked_missing_idempotency_key", 3, {
+            status: Number(err?.statusCode || err?.status) || undefined
+          });
+        }
+        if (attempt === effectiveMaxAttempts && effectiveMaxAttempts > 1) {
+          pushHardeningSignal("outbound_wbot_retry_exhausted", 3, { attempt, status: Number(err?.statusCode || err?.status) || undefined });
+        }
+        break;
       }
-    })
-  });
-
-  const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw mapMetaError(data, "Error al enviar template");
-  return data?.messages?.[0]?.id || `meta-${Date.now()}`;
-};
-
-const sendViaCloudText = async (companyId: number | undefined, toRaw: string, text: string): Promise<string> => {
-  const to = String(toRaw || "").replace(/\D/g, "");
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
-
-  if (!to || !phoneNumberId || !accessToken) {
-    throw new AppError("WhatsApp Cloud no conectado", 404);
+      bumpHardeningMetric("outbound.wbot_retry_attempt");
+      pushHardeningSignal("outbound_wbot_retry", 6, { attempt });
+      await sleep(computeBackoffMs(attempt));
+    }
   }
 
-  const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text }
-    })
-  });
-
-  const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw mapMetaError(data);
-
-  return data?.messages?.[0]?.id || `meta-${Date.now()}`;
+  bumpHardeningMetric("outbound.wbot_send_failed");
+  throw lastErr instanceof AppError ? lastErr : new AppError(lastErr?.message || "Error al enviar mensaje", 500);
 };
 
-const sendViaCloudMedia = async (
-  companyId: number | undefined,
+const resolveTemplateVariables = (templateName: string, contactName: string, contactNeeds: string, incoming?: string[]): string[] => {
+  const provided = Array.isArray(incoming) ? incoming.map((x) => String(x || "").trim()).filter(Boolean) : [];
+  if (provided.length) return provided;
+
+  const firstName = String(contactName || "").trim().split(/\s+/)[0] || "";
+  const t = String(templateName || "").toLowerCase();
+  const needs = String(contactNeeds || "").toLowerCase();
+
+  if (/hola/.test(t) && firstName) return [firstName];
+  if (/(lote|terreno)/.test(t)) return [firstName || "cliente", "lotes", needs || "tu búsqueda"];
+  if (/(depto|departamento)/.test(t)) return [firstName || "cliente", "departamentos", needs || "tu búsqueda"];
+  if (/(casa|casas)/.test(t)) return [firstName || "cliente", "casas", needs || "tu búsqueda"];
+  if (/(inversion|inversi[oó]n)/.test(t)) return [firstName || "cliente", "inversión", needs || "tu búsqueda"];
+
+  return firstName ? [firstName] : [];
+};
+
+const sendViaCloud = async (
   toRaw: string,
-  mediaUrl: string,
-  mediaType: "image" | "video" | "audio" | "document" = "image",
-  caption = ""
+  payload: OutboundPayload,
+  contactName = "",
+  contactNeeds = "",
+  hasClientIdempotencyKey = false
 ): Promise<string> => {
   const to = String(toRaw || "").replace(/\D/g, "");
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
+  const settings = getRuntimeSettings();
 
-  if (!to || !phoneNumberId || !accessToken) {
-    throw new AppError("WhatsApp Cloud no conectado", 404);
+  if (!to || !settings.waCloudPhoneNumberId || !settings.waCloudAccessToken) {
+    throw new AppError("WhatsApp no conectado", 404);
   }
 
-  const payload: any = {
-    messaging_product: "whatsapp",
-    to,
-    type: mediaType,
-    [mediaType]: {
-      link: String(mediaUrl || "").trim()
+  const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  let lastErr: any;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const controller = new AbortController();
+      const requestTimeoutMs = resolveOutboundRequestTimeoutMs();
+      const timeoutHandle = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+      const resp = await fetch(`https://graph.facebook.com/v21.0/${settings.waCloudPhoneNumberId}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${settings.waCloudAccessToken}`
+        },
+        body: JSON.stringify(
+          payload.mode === "template"
+            ? {
+                messaging_product: "whatsapp",
+                to,
+                type: "template",
+                template: {
+                  name: String(payload.templateName || "").trim(),
+                  language: { code: String(payload.languageCode || "es_AR").trim() },
+                  ...(() => {
+                    const vars = resolveTemplateVariables(
+                      String(payload.templateName || ""),
+                      String(contactName || ""),
+                      String(contactNeeds || ""),
+                      payload.templateVariables
+                    );
+                    if (!vars.length) return {};
+                    return {
+                      components: [
+                        {
+                          type: "body",
+                          parameters: vars.map((v) => ({ type: "text", text: String(v) }))
+                        }
+                      ]
+                    };
+                  })()
+                }
+              }
+            : payload.mode === "media"
+              ? {
+                  messaging_product: "whatsapp",
+                  to,
+                  type: payload.mediaType || "image",
+                  [payload.mediaType || "image"]: {
+                    link: String(payload.mediaUrl || "").trim(),
+                    ...(payload.caption ? { caption: String(payload.caption) } : {})
+                  }
+                }
+              : {
+                  messaging_product: "whatsapp",
+                  to,
+                  type: "text",
+                  text: { body: String(payload.text || "") }
+                }
+        ),
+        signal: controller.signal
+      }).finally(() => clearTimeout(timeoutHandle));
+
+      const data: any = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        bumpHardeningMetric("outbound.cloud_send_ok");
+        return data?.messages?.[0]?.id || `meta-${Date.now()}`;
+      }
+
+      const cloudCode = Number(data?.error?.code);
+      if (!isRetryableCloudFailure(resp.status, cloudCode) || attempt === maxAttempts) {
+        if (attempt === maxAttempts) {
+          pushHardeningSignal("outbound_retry_exhausted", 3, { status: resp.status, cloudCode });
+        }
+        throw new AppError(data?.error?.message || "Error al enviar mensaje", resp.status || 500);
+      }
+
+      if (resolveOutboundRetryRequireIdempotencyKey() && !hasClientIdempotencyKey) {
+        bumpHardeningMetric("outbound.cloud_retry_blocked_missing_idempotency_key");
+        pushHardeningSignal("outbound_cloud_retry_blocked_missing_idempotency_key", 3, { status: resp.status, cloudCode, attempt });
+        throw new AppError("Reintento bloqueado por hardening: falta Idempotency-Key", resp.status || 502);
+      }
+
+      const retryAfterMs = parseRetryAfterMs(resp.headers.get("retry-after"));
+      bumpHardeningMetric("outbound.cloud_retry_attempt");
+      if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.cloud_retry_after_header_used");
+      pushHardeningSignal("outbound_retry", 8, { status: resp.status, cloudCode, attempt });
+      await sleep(computeBackoffMs(attempt, retryAfterMs));
+      continue;
+    } catch (err: any) {
+      lastErr = err;
+      const isAbortTimeout = err?.name === "AbortError";
+      if (isAbortTimeout) {
+        bumpHardeningMetric("outbound.cloud_request_timeout");
+        pushHardeningSignal("outbound_cloud_request_timeout", 4, { attempt });
+
+        if (!resolveOutboundRetryOnTimeout(hasClientIdempotencyKey)) {
+          bumpHardeningMetric("outbound.cloud_timeout_not_retried");
+          pushHardeningSignal("outbound_cloud_timeout_not_retried", 3, { attempt });
+          throw new AppError("Timeout enviando a WhatsApp Cloud; no se reintenta para evitar duplicados", 504);
+        }
+      }
+
+      if (attempt === maxAttempts) {
+        pushHardeningSignal("outbound_retry_exhausted", 3, {
+          status: Number(err?.statusCode || err?.status) || undefined,
+          reason: isAbortTimeout ? "timeout" : undefined
+        });
+        break;
+      }
+      const status = Number(err?.statusCode || err?.status);
+      if (!isAbortTimeout && !isRetryableCloudFailure(status)) throw err;
+
+      if (resolveOutboundRetryRequireIdempotencyKey() && !hasClientIdempotencyKey) {
+        bumpHardeningMetric("outbound.cloud_retry_blocked_missing_idempotency_key");
+        pushHardeningSignal("outbound_cloud_retry_blocked_missing_idempotency_key", 3, {
+          status: status || undefined,
+          attempt,
+          reason: isAbortTimeout ? "timeout" : undefined
+        });
+        throw new AppError("Reintento bloqueado por hardening: falta Idempotency-Key", isAbortTimeout ? 504 : (status || 502));
+      }
+
+      const retryAfterMs = parseRetryAfterMs(err?.response?.headers?.["retry-after"] || err?.headers?.["retry-after"]);
+      bumpHardeningMetric("outbound.cloud_retry_attempt");
+      if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.cloud_retry_after_header_used");
+      pushHardeningSignal("outbound_retry", 8, { status, attempt, reason: isAbortTimeout ? "timeout" : undefined });
+      await sleep(computeBackoffMs(attempt, retryAfterMs));
     }
-  };
+  }
 
-  if (caption && mediaType !== "audio") payload[mediaType].caption = caption;
-
-  const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw mapMetaError(data, "Error al enviar media");
-
-  return data?.messages?.[0]?.id || `meta-${Date.now()}`;
+  bumpHardeningMetric("outbound.cloud_send_failed");
+  throw lastErr instanceof AppError ? lastErr : new AppError("Error al enviar mensaje", 500);
 };
 
-const SendMessageService = async ({ body, ticketId, contactId, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption }: SendMessageRequest): Promise<Message> => {
-  let ticket: any = null;
-  if (ticketId) ticket = await Ticket.findByPk(ticketId, {
+const SendMessageService = async ({ body, ticketId, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption, idempotencyKey }: SendMessageRequest): Promise<Message> => {
+  if (!ticketId) {
+    throw new AppError("ticketId requerido", 400);
+  }
+
+  const ticket = await Ticket.findByPk(ticketId, {
     include: [
       { model: Contact, as: "contact" },
       { model: require("../../models/Whatsapp").default, as: "whatsapp" }
     ]
   });
 
-  if (!ticket && contactId) {
-    ticket = await Ticket.findOne({
-      where: { contactId, status: { [Op.in]: ["open", "pending"] } },
-      order: [["updatedAt", "DESC"]],
-      include: [
-        { model: Contact, as: "contact" },
-        { model: require("../../models/Whatsapp").default, as: "whatsapp" }
-      ]
-    } as any);
-  }
-
   if (!ticket) {
-    throw new AppError("Conversación no encontrada", 404);
+    throw new AppError("Ticket no encontrado", 404);
   }
 
-  const isTemplate = Boolean(String(templateName || "").trim());
-  const isMedia = Boolean(String(mediaUrl || "").trim());
-  const cleanBody = String(body || "").trim();
+  const sanitizedBody = String(body || "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim();
 
-  if (!isTemplate && !isMedia && !cleanBody) {
-    throw new AppError("Mensaje vacío", 400);
+  const cleanTemplateName = String(templateName || "").trim();
+  const cleanMediaUrl = String(mediaUrl || "").trim();
+  const cleanCaption = String(caption || "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim();
+  const cleanLanguageCode = String(languageCode || "es_AR").trim() || "es_AR";
+  const cleanIdempotencyKey = normalizeClientIdempotencyKey(String(idempotencyKey || ""));
+
+  if (String(idempotencyKey || "").trim() && !cleanIdempotencyKey) {
+    bumpHardeningMetric("outbound.invalid_idempotency_key_blocked");
+    pushHardeningSignal("outbound_invalid_idempotency_key_blocked", 3, { ticketId: ticket.id });
+    throw new AppError("Idempotency-Key invalido", 400);
+  }
+
+  const payload: OutboundPayload = cleanTemplateName
+    ? {
+        mode: "template",
+        templateName: cleanTemplateName,
+        languageCode: cleanLanguageCode,
+        templateVariables: Array.isArray(templateVariables) ? templateVariables : undefined
+      }
+    : cleanMediaUrl
+      ? { mode: "media", mediaUrl: cleanMediaUrl, mediaType: (mediaType || "image") as OutboundMediaType, caption: cleanCaption }
+      : { mode: "text", text: sanitizedBody };
+
+  if (payload.mode === "text" && !sanitizedBody) {
+    bumpHardeningMetric("outbound.empty_text_blocked");
+    pushHardeningSignal("outbound_empty_text_blocked", 3, { ticketId: ticket.id });
+    throw new AppError("Mensaje vacío no permitido", 400);
+  }
+
+  if (payload.mode === "media" && !cleanMediaUrl) {
+    throw new AppError("Media URL requerida", 400);
+  }
+
+  const previousMessagesCount = await Message.count({ where: { ticketId: ticket.id } });
+  const isFirstContact = previousMessagesCount === 0;
+
+  const enforceFirstContactHolaTemplate = Boolean((getRuntimeSettings() as any).waFirstContactHolaTemplateRequired ?? true);
+
+  if (isFirstContact && enforceFirstContactHolaTemplate) {
+    if (payload.mode !== "template") {
+      bumpHardeningMetric("outbound.first_contact_template_required_blocked");
+      pushHardeningSignal("outbound_first_contact_template_required_blocked", 3, { ticketId: ticket.id, mode: payload.mode });
+      throw new AppError("Primer contacto: debés usar template de Hola", 400);
+    }
+
+    if (!/hola/i.test(String(payload.templateName || ""))) {
+      bumpHardeningMetric("outbound.first_contact_hola_template_required_blocked");
+      pushHardeningSignal("outbound_first_contact_hola_template_required_blocked", 3, {
+        ticketId: ticket.id,
+        templateName: String(payload.templateName || "")
+      });
+      throw new AppError("Primer contacto: el template debe ser el de Hola", 400);
+    }
   }
 
   try {
     let msgId: any = crypto.randomUUID();
-    const wbot = getWbot((ticket as any).whatsappId);
+    const wbot = getWbot(ticket.whatsappId);
 
+    const tenantScope = `company:${String((ticket as any)?.companyId || "na")}:wa:${String((ticket as any)?.whatsappId || "na")}`;
+    const dedupeKey = buildOutboundDedupeKey(ticket.id, ticket.contact.number, payload, cleanIdempotencyKey, tenantScope);
+    if (cleanIdempotencyKey) {
+      bumpHardeningMetric("outbound.idempotency_key_used");
+    } else {
+      bumpHardeningMetric("outbound.idempotency_key_missing");
+    }
+    const dedupeTtlSeconds = resolveOutboundDedupeTtlSeconds();
+    let shouldSend = true;
     try {
-      if (isTemplate) {
-        const firstName = String((ticket as any)?.contact?.name || "cliente").split(/\s+/)[0] || "cliente";
-        const vars = Array.isArray(templateVariables) && templateVariables.length
-          ? templateVariables
-          : [/hola/i.test(String(templateName || "")) ? firstName : ""].filter(Boolean);
-        msgId = await sendViaCloudTemplate((ticket as any).companyId, (ticket as any).contact.number, String(templateName).trim(), String(languageCode || "es_AR"), vars);
-      } else if (isMedia) {
-        msgId = await sendViaCloudMedia(
-          (ticket as any).companyId,
-          (ticket as any).contact.number,
-          String(mediaUrl || "").trim(),
-          (mediaType || "image") as any,
-          String(caption || "").trim()
-        );
-      } else {
-        msgId = await sendViaCloudText((ticket as any).companyId, (ticket as any).contact.number, cleanBody);
+      shouldSend = await reserveOutboundDedupe(dedupeKey, dedupeTtlSeconds);
+    } catch (dedupeErr: any) {
+      bumpHardeningMetric("outbound.dedupe_infra_error");
+      pushHardeningSignal("outbound_dedupe_infra_error", 3, { ticketId: ticket.id, mode: payload.mode });
+
+      if (resolveOutboundDedupeFailClosed()) {
+        bumpHardeningMetric("outbound.dedupe_fail_closed_blocked");
+        pushHardeningSignal("outbound_dedupe_fail_closed_blocked", 2, { ticketId: ticket.id, mode: payload.mode });
+        console.error("[wa-hardening] outbound dedupe infra failed; fail-closed mode blocked outbound", {
+          ticketId: ticket.id,
+          mode: payload.mode,
+          error: dedupeErr?.message || String(dedupeErr)
+        });
+        throw new AppError("Bloqueado por hardening: dedupe outbound no disponible", 503);
       }
-    } catch (cloudErr: any) {
-      if (!wbot) throw cloudErr;
-      if (isTemplate || isMedia) throw cloudErr;
-      const contactNumber = `${(ticket as any).contact.number}@s.whatsapp.net`;
-      const sentMessage: any = await wbot.sendMessage(contactNumber, { text: cleanBody });
-      msgId = sentMessage?.key?.id || msgId;
+
+      console.error("[wa-hardening] outbound dedupe infra failed; using emergency memory dedupe", {
+        ticketId: ticket.id,
+        mode: payload.mode,
+        error: dedupeErr?.message || String(dedupeErr)
+      });
+
+      shouldSend = reserveOutboundDedupeEmergency(dedupeKey, dedupeTtlSeconds);
+      if (shouldSend) {
+        bumpHardeningMetric("outbound.dedupe_emergency_reserved");
+      } else {
+        bumpHardeningMetric("outbound.dedupe_emergency_duplicate_blocked");
+      }
     }
 
-    const persistedBody = isTemplate
-      ? `[TEMPLATE:${String(templateName || "").trim()}]`
-      : isMedia
-        ? `${caption ? `${caption}\n` : ""}${String(mediaUrl || "").trim()}`.trim()
-        : cleanBody;
+    if (!shouldSend) {
+      bumpHardeningMetric("outbound.duplicate_blocked");
+      if (cleanIdempotencyKey) {
+        bumpHardeningMetric("outbound.duplicate_blocked_with_idempotency_key");
+        pushHardeningSignal("outbound_duplicate_blocked_with_idempotency_key", 3, { ticketId: ticket.id, mode: payload.mode });
+      } else {
+        bumpHardeningMetric("outbound.duplicate_blocked_without_idempotency_key");
+      }
+      pushHardeningSignal("outbound_duplicate_blocked", 5, { ticketId: ticket.id, mode: payload.mode });
+      throw new AppError(`Mensaje duplicado bloqueado (ventana ${dedupeTtlSeconds}s)`, 409);
+    }
+    bumpHardeningMetric("outbound.dedupe_reserved");
+
+    try {
+      if (wbot) {
+        msgId = await sendViaWbot(wbot, ticket.contact.number, payload, Boolean(cleanIdempotencyKey));
+      } else {
+        msgId = await sendViaCloud(
+          ticket.contact.number,
+          payload,
+          String((ticket as any)?.contact?.name || ""),
+          String((ticket as any)?.contact?.needs || ""),
+          Boolean(cleanIdempotencyKey)
+        );
+      }
+    } catch (sendErr: any) {
+      bumpHardeningMetric("outbound.provider_send_failed");
+
+      if (shouldReleaseDedupeAfterProviderFailure(sendErr)) {
+        try {
+          await releaseOutboundDedupe(dedupeKey);
+          bumpHardeningMetric("outbound.dedupe_released_after_non_retryable_provider_error");
+        } catch (releaseErr: any) {
+          bumpHardeningMetric("outbound.dedupe_release_failed_after_non_retryable_provider_error");
+          console.error("[wa-hardening] failed to release dedupe key after non-retryable provider error", {
+            dedupeKey,
+            error: releaseErr?.message || String(releaseErr)
+          });
+        }
+      } else {
+        bumpHardeningMetric("outbound.dedupe_retained_after_provider_failure");
+      }
+
+      throw sendErr;
+    }
+
+    const persistedBody = payload.mode === "template"
+      ? `[TEMPLATE:${payload.templateName}] idioma=${payload.languageCode}`
+      : payload.mode === "media"
+        ? `${payload.caption ? `${payload.caption}\n` : ''}${String(payload.mediaUrl || '').trim()}`.trim()
+        : String(payload.text || "");
+
+    const persistedMediaType = payload.mode === "template"
+      ? "template"
+      : payload.mode === "media"
+        ? String(payload.mediaType || "image")
+        : "chat";
 
     const message = await Message.create({
       id: msgId,
       body: persistedBody,
-      contactId: (ticket as any).contactId,
-      ticketId: (ticket as any)?.id || null,
+      contactId: ticket.contactId,
+      ticketId: ticket.id,
       fromMe: true,
       read: true,
       ack: 0,
-      mediaType: isTemplate ? "template" : (isMedia ? String(mediaType || "image") : "chat")
+      mediaType: persistedMediaType
     } as any);
+    bumpHardeningMetric("outbound.message_persisted");
 
-    await (ticket as any).update({ lastMessage: persistedBody, updatedAt: new Date() });
+    await ticket.update({
+      lastMessage: persistedBody,
+      updatedAt: new Date()
+    });
 
     const io = getIO();
-    io.to(`ticket-${(ticket as any).id}`).emit("appMessage", {
+    io.to(`ticket-${ticket.id}`).emit("appMessage", {
       action: "create",
       message,
       ticket,
-      contact: (ticket as any).contact
+      contact: ticket.contact
     });
 
     return message;
-  } catch (error: any) {
-    console.error("Error al enviar mensaje:", error?.message || error);
+  } catch (error) {
+    bumpHardeningMetric("outbound.send_service_error");
+    console.error("Error al enviar mensaje:", error);
     throw error instanceof AppError ? error : new AppError("Error al enviar mensaje", 500);
   }
 };

@@ -12,11 +12,12 @@ interface SendOutboundTextRequest {
   to: string;
   text: string;
   contactName?: string;
+  idempotencyKey?: string;
 }
 
 const normalizeNumber = (raw: string): string => (raw || "").replace(/\D/g, "");
 
-const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contactName }: SendOutboundTextRequest) => {
+const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contactName, idempotencyKey }: SendOutboundTextRequest) => {
   const toNorm = normalizeNumber(to);
   if (!toNorm) throw new AppError("Invalid destination number", 400);
   if (!text?.trim()) throw new AppError("Text is required", 400);
@@ -59,7 +60,7 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
   const io = getIO();
   io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message: msg, conversationId: contact.id, contact });
 
-  return { conversationId: contact.id, contact, message: msg };
+  return { conversationId: contact.id, contact, message: msg, idempotencyKey: idempotencyKey || null };
 };
 
 export default SendOutboundTextService;

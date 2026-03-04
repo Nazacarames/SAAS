@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
     Container,
     Paper,
@@ -83,6 +84,9 @@ const Login = () => {
                             {loading ? 'Iniciando sesión...' : 'Iniciar Sesión'}
                         </Button>
                     </form>
+                    <Typography variant='body2' align='center'>
+                        ¿No tenés cuenta? <Link to='/register'>Crear cuenta</Link>
+                    </Typography>
                 </Paper>
             </Box>
         </Container>

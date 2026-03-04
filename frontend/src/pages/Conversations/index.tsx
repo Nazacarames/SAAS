@@ -76,6 +76,27 @@ const extractFirstUrl = (value?: string) => {
   return sanitizeUrl(m?.[0] || '');
 };
 
+const normalizePreviewImageUrl = (image?: string, baseUrl?: string) => {
+  const raw = String(image || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('//')) return `https:${raw}`;
+  if (baseUrl && /^https?:\/\//i.test(baseUrl)) {
+    try {
+      return new URL(raw, baseUrl).toString();
+    } catch {
+      return '';
+    }
+  }
+  return '';
+};
+
+const fallbackPreviewImageUrl = (url?: string) => {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return '';
+  return `https://image.thum.io/get/width/1200/noanimate/${encodeURIComponent(clean)}`;
+};
+
 const buildSummary = (msgs: any[]) => {
   const inbound = (msgs || []).filter((m) => !m.fromMe && String(m.body || '').trim());
   if (inbound.length === 0) return 'Sin contexto todavía. Esperando más mensajes del cliente.';
@@ -89,7 +110,7 @@ const buildSummary = (msgs: any[]) => {
   else if (/problema|error|no funciona|ayuda/i.test(full)) intent = 'soporte/incidencia';
   else if (/comprar|contratar|quiero/i.test(full)) intent = 'intención de compra';
 
-  return `El cliente está en ${intent}. Últimos puntos: ${latest.slice(-2).join(' | ')}`;
+  return `El cliente está en ${intent}. ltimos puntos: ${latest.slice(-2).join(' | ')}`;
 };
 
 const Conversations = () => {
@@ -455,7 +476,7 @@ const Conversations = () => {
           display: 'flex',
           overflow: 'hidden',
           borderRadius: 3,
-          bgcolor: '#0b141a',
+          bgcolor: 'rgba(10,16,30,0.95)',
           border: '1px solid rgba(255,255,255,0.08)',
           boxShadow: '0 12px 40px rgba(0,0,0,0.45)'
         }}
@@ -463,22 +484,22 @@ const Conversations = () => {
         <Box
           sx={{
             width: { xs: '100%', md: 360 },
-            borderRight: { md: '1px solid #202c33' },
-            bgcolor: '#111b21',
+            borderRight: { md: '1px solid rgba(125,157,214,0.18)' },
+            bgcolor: 'rgba(12,20,36,0.92)',
             display: selectedConv ? { xs: 'none', md: 'block' } : 'block'
           }}
         >
-          <Box sx={{ p: 1.5, bgcolor: '#202c33', borderBottom: '1px solid #2a3942' }}>
+          <Box sx={{ p: 1.5, bgcolor: 'rgba(17,28,48,0.92)', borderBottom: '1px solid rgba(125,157,214,0.18)' }}>
             <Typography variant='subtitle1' sx={{ fontWeight: 700, color: '#e9edef' }}>
               Conversaciones
             </Typography>
           </Box>
 
-          <Box sx={{ p: 1, bgcolor: '#111b21' }}>
+          <Box sx={{ p: 1, bgcolor: 'rgba(12,20,36,0.92)' }}>
             <TextField
               fullWidth
               size='small'
-              placeholder='Buscar o iniciar chat'
+              placeholder='Buscar conversacin o contacto'
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               InputProps={{
@@ -486,13 +507,13 @@ const Conversations = () => {
               }}
               sx={{
                 '& .MuiInputBase-root': {
-                  bgcolor: '#202c33',
+                  bgcolor: 'rgba(17,28,48,0.92)',
                   color: '#d1d7db',
                   borderRadius: 2
                 },
                 '& .MuiOutlinedInput-notchedOutline': { borderColor: 'transparent' },
                 '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#2a3942' },
-                '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#00a884' }
+                '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#5BB2FF' }
               }}
             />
           </Box>
@@ -500,7 +521,7 @@ const Conversations = () => {
 
           {loadingTickets ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-              <CircularProgress size={24} sx={{ color: '#00a884' }} />
+              <CircularProgress size={24} sx={{ color: '#5BB2FF' }} />
             </Box>
           ) : filtered.length === 0 ? (
             <Typography variant='body2' sx={{ p: 2, color: '#8696a0' }}>
@@ -516,9 +537,9 @@ const Conversations = () => {
                   sx={{
                     py: 1.2,
                     px: 1.5,
-                    borderBottom: '1px solid #202c33',
+                    borderBottom: '1px solid rgba(125,157,214,0.14)',
                     '&.Mui-selected': { bgcolor: '#2a3942' },
-                    '&:hover': { bgcolor: '#202c33' }
+                    '&:hover': { bgcolor: 'rgba(17,28,48,0.92)' }
                   }}
                 >
                   <Avatar sx={{ width: 40, height: 40, mr: 1.2, bgcolor: '#3b4a54', color: '#e9edef' }}>
@@ -543,7 +564,7 @@ const Conversations = () => {
                         <Badge
                           color='success'
                           badgeContent={c.ticketCount > 99 ? '99+' : c.ticketCount}
-                          sx={{ '& .MuiBadge-badge': { bgcolor: '#00a884', color: '#0b141a' } }}
+                          sx={{ '& .MuiBadge-badge': { bgcolor: '#5BB2FF', color: '#0b141a' } }}
                         />
                       </Stack>
                     }
@@ -559,7 +580,7 @@ const Conversations = () => {
             flex: 1,
             display: 'flex',
             flexDirection: 'column',
-            bgcolor: '#0b141a',
+            bgcolor: 'rgba(10,16,30,0.95)',
             backgroundImage:
               'radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), radial-gradient(rgba(255,255,255,0.02) 1px, transparent 1px)',
             backgroundPosition: '0 0, 20px 20px',
@@ -577,8 +598,8 @@ const Conversations = () => {
               <Box
                 sx={{
                   p: 1.2,
-                  bgcolor: '#202c33',
-                  borderBottom: '1px solid #2a3942',
+                  bgcolor: 'rgba(17,28,48,0.92)',
+                  borderBottom: '1px solid rgba(125,157,214,0.18)',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center'
@@ -610,7 +631,7 @@ const Conversations = () => {
               <Stack spacing={1} sx={{ flex: 1, overflow: 'auto', p: 2 }}>
                 {loadingMessages ? (
                   <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-                    <CircularProgress size={24} sx={{ color: '#00a884' }} />
+                    <CircularProgress size={24} sx={{ color: '#5BB2FF' }} />
                   </Box>
                 ) : messages.length === 0 ? (
                   <Typography variant='body2' sx={{ color: '#8696a0' }}>
@@ -652,7 +673,7 @@ const Conversations = () => {
                                 {(() => {
                                   const raw = String(m.body || '').trim();
                                   const mtpl = raw.match(/^\[TEMPLATE:([^\]]+)\]/i);
-                                  if (mtpl) return `📩 Template enviado: ${mtpl[1]}`;
+                                  if (mtpl) return ` Template enviado: ${mtpl[1]}`;
                                   return raw || (m.mediaType && m.mediaType !== 'chat' ? `[${String(m.mediaType).toUpperCase()}]` : 'Mensaje sin contenido');
                                 })()}
                               </Typography>
@@ -661,10 +682,12 @@ const Conversations = () => {
                                 const title = String(p.title || '').trim();
                                 const desc = String(p.description || '').trim();
                                 const host = String(p.host || (() => { try { return new URL(mediaUrl).hostname; } catch { return ''; } })()).trim();
-                                const image = String(p.image || '').trim();
+                                const image = normalizePreviewImageUrl(String(p.image || '').trim(), mediaUrl);
+                                const fallbackImage = fallbackPreviewImageUrl(mediaUrl);
+                                const previewImage = image || fallbackImage;
                                 return (
                                   <Box sx={{ mt: 0.8, border: '1px solid rgba(255,255,255,0.16)', borderRadius: 1.5, overflow: 'hidden', bgcolor: 'rgba(0,0,0,0.12)' }}>
-                                    {isHttpUrl(image) && <Box component='img' src={image} alt='preview' sx={{ width: '100%', maxHeight: 140, objectFit: 'cover' }} />}
+                                    {previewImage && <Box component='img' src={previewImage} alt='preview' sx={{ width: '100%', maxHeight: 180, objectFit: 'cover' }} /> }
                                     <Box sx={{ p: 1 }}>
                                       {title && <Typography variant='body2' sx={{ fontWeight: 700 }}>{title}</Typography>}
                                       {desc && <Typography variant='caption' sx={{ color: '#b8c7cf', display: 'block' }}>{desc}</Typography>}
@@ -685,7 +708,7 @@ const Conversations = () => {
                 )}
               </Stack>
 
-              <Box sx={{ p: 1.2, bgcolor: '#202c33', borderTop: '1px solid #2a3942' }}>
+              <Box sx={{ p: 1.2, bgcolor: 'rgba(17,28,48,0.92)', borderTop: '1px solid #2a3942' }}>
                 {savedReplies.length > 0 && (
                   <Stack direction='row' spacing={0.8} sx={{ mb: 1, overflowX: 'auto', pb: 0.5 }}>
                     {savedReplies.slice(0, 8).map((r) => (
@@ -740,10 +763,10 @@ const Conversations = () => {
                       },
                       '& .MuiOutlinedInput-notchedOutline': { borderColor: 'transparent' },
                       '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#3b4a54' },
-                      '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#00a884' }
+                      '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#5BB2FF' }
                     }}
                   />
-                  <IconButton onClick={handleSend} disabled={sending || !text.trim()} sx={{ width: 50, height: 50, borderRadius: '50%', bgcolor: '#22a6f2', color: '#ffffff', boxShadow: '0 6px 14px rgba(34,166,242,0.35)', '&:hover': { bgcolor: '#1697e0' }, '&.Mui-disabled': { bgcolor: '#35566f', color: '#9bb2c3' } }}>
+                  <IconButton onClick={handleSend} disabled={sending || !text.trim()} sx={{ width: 50, height: 50, borderRadius: '50%', bgcolor: '#5BB2FF', color: '#ffffff', boxShadow: '0 6px 14px rgba(34,166,242,0.35)', '&:hover': { bgcolor: '#4B9BE0' }, '&.Mui-disabled': { bgcolor: '#2D405A', color: '#9bb2c3' } }}>
                     {sending ? <CircularProgress size={20} color='inherit' /> : <SendIcon />}
                   </IconButton>
                 </Stack>
@@ -753,7 +776,7 @@ const Conversations = () => {
         </Box>
 
         {selectedConv && (
-          <Box sx={{ width: 320, borderLeft: '1px solid #202c33', bgcolor: '#111b21', p: 1.2, display: { xs: 'none', lg: 'block' }, overflow: 'auto' }}>
+          <Box sx={{ width: 320, borderLeft: '1px solid #202c33', bgcolor: 'rgba(12,20,36,0.92)', p: 1.2, display: { xs: 'none', lg: 'block' }, overflow: 'auto' }}>
             <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb: 1 }}>
               <Typography variant='subtitle1' sx={{ color: '#e9edef', fontWeight: 700 }}>
                 Datos del cliente
@@ -773,7 +796,7 @@ const Conversations = () => {
               </Stack>
             </Stack>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#202c33', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
               <FormControl fullWidth size='small'>
                 <InputLabel sx={{ color: '#9fb1bb' }}>Estado del Lead</InputLabel>
                 <Select
@@ -799,7 +822,7 @@ const Conversations = () => {
               </Box>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#202c33', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
               <Typography variant='subtitle2' sx={{ mb: 1 }}>Progreso del paso</Typography>
               <Stack spacing={0.6}>
                 <Stack direction='row' alignItems='center' justifyContent='space-between'>
@@ -829,7 +852,7 @@ const Conversations = () => {
               </Stack>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#202c33', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
               <Typography variant='subtitle2' sx={{ mb: 1 }}>Datos capturados</Typography>
               <Typography variant='caption' display='block'>Nombre: {contactData?.name || selectedConv.name}</Typography>
               <Typography variant='caption' display='block'>Email: {contactData?.email || '-'}</Typography>
@@ -838,12 +861,12 @@ const Conversations = () => {
               <Typography variant='caption' display='block'>Necesidad: {contactData?.needs || '-'}</Typography>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#202c33', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
               <Typography variant='subtitle2' sx={{ mb: 1 }}>Mini resumen IA</Typography>
               <Typography variant='caption'>{summary}</Typography>
             </Paper>
 
-            <Paper sx={{ p: 1.2, bgcolor: '#202c33', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
               <Typography variant='subtitle2' sx={{ mb: 1 }}>Trazabilidad de decisiones IA</Typography>
               {decisionLogs.length === 0 ? (
                 <Typography variant='caption' sx={{ color: '#9fb1bb' }}>Sin decisiones registradas para este ticket.</Typography>
@@ -871,3 +894,4 @@ const Conversations = () => {
 };
 
 export default Conversations;
+

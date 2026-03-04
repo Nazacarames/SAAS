@@ -1,6 +1,5 @@
 import crypto from "crypto";
 import { Op, QueryTypes } from "sequelize";
-import { z } from "zod";
 
 import Contact from "../../models/Contact";
 import Ticket from "../../models/Ticket";
@@ -12,9 +11,8 @@ import sequelize from "../../database";
 import { getIO } from "../../libs/socket";
 import { recordInboundDuplicate, recordInboundError, recordInboundMessage } from "../../utils/messageStats";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
-import { syncLeadToTokko, searchTokkoProperties } from "../TokkoServices/TokkoService";
 
-type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { metadata?: { phone_number_id?: string }; messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }>; statuses?: Array<{ id?: string; status?: string; timestamp?: string; recipient_id?: string; errors?: Array<{ code?: number; title?: string; message?: string }> }> } }> }> };
+type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }> } }> }> };
 type ConversationType = "sales" | "support" | "scheduling" | "general";
 type Policy = { maxReplyChars?: number; allowAutoClose?: boolean; autoHandoffOnSensitive?: boolean; forbiddenKeywords?: string[] };
 
@@ -25,51 +23,33 @@ const defaultPolicies: Record<ConversationType, Policy> = {
   general: { maxReplyChars: 260, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
 };
 
-let integrationErrorTableReady = false;
-const ensureIntegrationErrorTable = async () => {
-  if (integrationErrorTableReady) return;
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS integration_errors (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER,
-    source VARCHAR(30) NOT NULL,
-    severity VARCHAR(20) NOT NULL DEFAULT 'medium',
-    error_code VARCHAR(120),
-    message TEXT NOT NULL,
-    suggestion TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-  )`);
-  integrationErrorTableReady = true;
-};
-const logIntegrationError = async (args: { companyId?: number; source: string; severity?: string; errorCode?: string; message: string; suggestion?: string; payload?: any }) => {
-  await ensureIntegrationErrorTable();
-  await sequelize.query(`INSERT INTO integration_errors (company_id, source, severity, error_code, message, suggestion, payload_json, created_at)
-    VALUES (:companyId, :source, :severity, :errorCode, :message, :suggestion, :payloadJson, NOW())`, {
-    replacements: {
-      companyId: args.companyId || null,
-      source: args.source,
-      severity: args.severity || 'medium',
-      errorCode: args.errorCode || null,
-      message: args.message,
-      suggestion: args.suggestion || null,
-      payloadJson: JSON.stringify(args.payload || {})
-    },
-    type: QueryTypes.INSERT
-  });
-};
+const MAX_WEBHOOK_MESSAGE_AGE_SECONDS = 60 * 60 * 24; // 24h
+const MAX_WEBHOOK_FUTURE_SKEW_SECONDS = 60 * 5; // 5m
+const MAX_INBOUND_TEXT_LENGTH = 4096;
+const MAX_INBOUND_MESSAGES_PER_PAYLOAD = 200;
+const DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD = 40;
+const ALLOWED_INBOUND_TYPES = new Set(["text", "image", "audio", "video", "document", "sticker", "interactive", "button"]);
 
 let decisionTableReady = false;
 let outboundDedupeTableReady = false;
+let outboundDedupeLastPruneAt = 0;
+let inboundReplayTableReady = false;
+let inboundReplayLastPruneAt = 0;
+const INBOUND_REPLAY_TTL_SECONDS = 60 * 60 * 24; // 24h
+const OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS = 60 * 1000;
+const INBOUND_REPLAY_PRUNE_INTERVAL_MS = 60 * 1000;
+const outboundDedupeMemory = new Map<string, number>();
 
-const ensureOutboundDedupeTable = async () => {
-  if (outboundDedupeTableReady) return;
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_dedupe (
-    id SERIAL PRIMARY KEY,
-    dedupe_key VARCHAR(220) UNIQUE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-  )`);
-  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_dedupe_key ON ai_outbound_dedupe(dedupe_key)`);
-  outboundDedupeTableReady = true;
+const resolveInboundReplayTtlSeconds = () => {
+  const n = Number(getRuntimeSettings().waInboundReplayTtlSeconds || INBOUND_REPLAY_TTL_SECONDS);
+  if (!Number.isFinite(n)) return INBOUND_REPLAY_TTL_SECONDS;
+  return Math.max(300, Math.min(60 * 60 * 24 * 7, Math.round(n)));
+};
+
+const resolveInboundReplayMaxBlocksPerPayload = () => {
+  const n = Number(getRuntimeSettings().waInboundReplayMaxBlocksPerPayload || DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD;
+  return Math.max(5, Math.min(500, Math.round(n)));
 };
 
 const resolveOutboundDedupeTtlSeconds = () => {
@@ -78,12 +58,36 @@ const resolveOutboundDedupeTtlSeconds = () => {
   return Math.max(30, Math.min(900, Math.round(n)));
 };
 
-const reserveOutboundDedupe = async (dedupeKey: string, ttlSeconds = resolveOutboundDedupeTtlSeconds()): Promise<boolean> => {
-  await ensureOutboundDedupeTable();
+const ensureDecisionTable = async () => {
+  if (decisionTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_decision_logs (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL, conversation_type VARCHAR(32) NOT NULL, decision_key VARCHAR(80) NOT NULL, reason TEXT, guardrail_action VARCHAR(80), response_preview TEXT, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  decisionTableReady = true;
+};
+
+const ensureOutboundDedupeTable = async () => {
+  if (outboundDedupeTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_dedupe (id SERIAL PRIMARY KEY, dedupe_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_dedupe_key ON ai_outbound_dedupe(dedupe_key)`);
+  outboundDedupeTableReady = true;
+};
+
+const pruneOutboundDedupeIfDue = async (ttlSeconds: number) => {
+  const now = Date.now();
+  if (now - outboundDedupeLastPruneAt < OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS) {
+    bumpHardeningMetric("outbound.dedupe_prune_skipped");
+    return;
+  }
+  outboundDedupeLastPruneAt = now;
+  bumpHardeningMetric("outbound.dedupe_prune_runs");
   await sequelize.query(`DELETE FROM ai_outbound_dedupe WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`, {
     replacements: { ttlSeconds },
     type: QueryTypes.DELETE
   });
+};
+
+const reserveOutboundDedupe = async (dedupeKey: string, ttlSeconds = 120): Promise<boolean> => {
+  await ensureOutboundDedupeTable();
+  await pruneOutboundDedupeIfDue(ttlSeconds);
   const rows: any[] = await sequelize.query(
     `INSERT INTO ai_outbound_dedupe (dedupe_key, created_at)
      VALUES (:dedupeKey, NOW())
@@ -94,27 +98,81 @@ const reserveOutboundDedupe = async (dedupeKey: string, ttlSeconds = resolveOutb
   return Boolean(rows[0]?.dedupe_key);
 };
 
-const normalizeForDedupe = (text: string) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 160);
-const buildOutboundDedupeKey = (ticketId: number, to: string, text: string) => {
-  const base = `${ticketId}:${String(to || '').replace(/\D/g, '')}:${normalizeForDedupe(text)}`;
-  return `wa-out:${crypto.createHash('sha1').update(base).digest('hex')}`;
+const releaseOutboundDedupe = async (dedupeKey: string) => {
+  await sequelize.query(`DELETE FROM ai_outbound_dedupe WHERE dedupe_key = :dedupeKey`, {
+    replacements: { dedupeKey },
+    type: QueryTypes.DELETE
+  });
 };
 
-const isLowSignalMessage = (text: string) => {
-  const t = String(text || '').trim().toLowerCase();
-  if (!t) return true;
-  if (/^[\p{Emoji}\s!?.,]+$/u.test(t)) return true;
-  return /^(ok|oka|dale|genial|gracias|joya|perfecto|👍|🙏|👌)$/.test(t);
+const reserveOutboundDedupeMemory = (dedupeKey: string, ttlSeconds: number): boolean => {
+  const now = Date.now();
+  for (const [key, expiresAt] of outboundDedupeMemory.entries()) {
+    if (expiresAt <= now) outboundDedupeMemory.delete(key);
+  }
+  const existingExpiresAt = outboundDedupeMemory.get(dedupeKey) || 0;
+  if (existingExpiresAt > now) return false;
+  outboundDedupeMemory.set(dedupeKey, now + Math.max(1000, ttlSeconds * 1000));
+  return true;
 };
 
-const ensureDecisionTable = async () => {
-  if (decisionTableReady) return;
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_decision_logs (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL, conversation_type VARCHAR(32) NOT NULL, decision_key VARCHAR(80) NOT NULL, reason TEXT, guardrail_action VARCHAR(80), response_preview TEXT, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
-  decisionTableReady = true;
+const ensureInboundReplayTable = async () => {
+  if (inboundReplayTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_inbound_replay_guard (id SERIAL PRIMARY KEY, replay_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_inbound_replay_guard_key ON ai_inbound_replay_guard(replay_key)`);
+  inboundReplayTableReady = true;
 };
+
+const buildInboundReplayKey = (messageId: string, from: string) => {
+  const base = `${String(messageId || "").trim()}:${String(from || "").replace(/\D/g, "")}`;
+  return `wa-in:${crypto.createHash("sha1").update(base).digest("hex")}`;
+};
+
+const pruneInboundReplayIfDue = async (ttlSeconds: number) => {
+  const now = Date.now();
+  if (now - inboundReplayLastPruneAt < INBOUND_REPLAY_PRUNE_INTERVAL_MS) {
+    bumpHardeningMetric("inbound.replay_prune_skipped");
+    return;
+  }
+  inboundReplayLastPruneAt = now;
+  bumpHardeningMetric("inbound.replay_prune_runs");
+  await sequelize.query(`DELETE FROM ai_inbound_replay_guard WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`, {
+    replacements: { ttlSeconds },
+    type: QueryTypes.DELETE
+  });
+};
+
+const reserveInboundReplay = async (replayKey: string, ttlSeconds = INBOUND_REPLAY_TTL_SECONDS): Promise<boolean> => {
+  await ensureInboundReplayTable();
+  await pruneInboundReplayIfDue(ttlSeconds);
+  const rows: any[] = await sequelize.query(
+    `INSERT INTO ai_inbound_replay_guard (replay_key, created_at)
+     VALUES (:replayKey, NOW())
+     ON CONFLICT (replay_key) DO NOTHING
+     RETURNING replay_key`,
+    { replacements: { replayKey }, type: QueryTypes.SELECT }
+  );
+  return Boolean(rows[0]?.replay_key);
+};
+
+const releaseInboundReplay = async (replayKey: string) => {
+  await sequelize.query(`DELETE FROM ai_inbound_replay_guard WHERE replay_key = :replayKey`, {
+    replacements: { replayKey },
+    type: QueryTypes.DELETE
+  });
+};
+
 const logDecision = async (args: { companyId: number; ticketId: number; conversationType: ConversationType; decisionKey: string; reason?: string; guardrailAction?: string; responsePreview?: string }) => {
-  await ensureDecisionTable();
-  await sequelize.query(`INSERT INTO ai_decision_logs (company_id, ticket_id, conversation_type, decision_key, reason, guardrail_action, response_preview, created_at) VALUES (:companyId, :ticketId, :conversationType, :decisionKey, :reason, :guardrailAction, :responsePreview, NOW())`, { replacements: args, type: QueryTypes.INSERT });
+  try {
+    await ensureDecisionTable();
+    await sequelize.query(`INSERT INTO ai_decision_logs (company_id, ticket_id, conversation_type, decision_key, reason, guardrail_action, response_preview, created_at) VALUES (:companyId, :ticketId, :conversationType, :decisionKey, :reason, :guardrailAction, :responsePreview, NOW())`, { replacements: args, type: QueryTypes.INSERT });
+  } catch (error: any) {
+    console.warn("[wa-cloud][decision-log] skipped", {
+      ticketId: args.ticketId,
+      decisionKey: args.decisionKey,
+      error: error?.message || String(error)
+    });
+  }
 };
 const resolvePolicies = (): Record<ConversationType, Policy> => {
   const rt = getRuntimeSettings();
@@ -143,121 +201,6 @@ const applyGuardrails = async ({ text, reply, conversationType }: { text: string
   return { finalReply: safeReply, reason: forbidden ? `Keyword bloqueada: ${forbidden}` : "Guardrails aplicados", action: forbidden ? "rewrite_forbidden" : "allow" };
 };
 
-const ticketStateSchema = z.object({
-  intent: z.string().optional(),
-  slots: z.object({
-    zone: z.string().optional().default(''),
-    propertyType: z.string().optional().default(''),
-    minBedrooms: z.number().optional(),
-    minPrice: z.number().optional(),
-    maxPrice: z.number().optional(),
-    currency: z.string().optional().default('USD')
-  }).optional().default({ zone: '', propertyType: '', currency: 'USD' }),
-  missing_slots: z.array(z.string()).default([]),
-  last_tool_call: z.any().optional()
-});
-
-type ConversationState = z.infer<typeof ticketStateSchema>;
-
-let conversationStateTableReady = false;
-const ensureConversationStateTable = async () => {
-  if (conversationStateTableReady) return;
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS conversation_state (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    contact_id INTEGER NOT NULL,
-    whatsapp_id INTEGER NOT NULL,
-    intent VARCHAR(80),
-    slots_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    missing_slots_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-    last_tool_call_json JSONB,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    UNIQUE(company_id, contact_id, whatsapp_id)
-  )`);
-  conversationStateTableReady = true;
-};
-
-const loadState = async (key: { companyId: number; contactId: number; whatsappId: number }): Promise<ConversationState> => {
-  await ensureConversationStateTable();
-  const [row]: any = await sequelize.query(
-    `SELECT intent, slots_json, missing_slots_json, last_tool_call_json
-     FROM conversation_state
-     WHERE company_id = :companyId AND contact_id = :contactId AND whatsapp_id = :whatsappId
-     LIMIT 1`,
-    { replacements: key, type: QueryTypes.SELECT }
-  );
-  const raw = {
-    intent: row?.intent || '',
-    slots: row?.slots_json || {},
-    missing_slots: row?.missing_slots_json || [],
-    last_tool_call: row?.last_tool_call_json || null
-  };
-  const parsed = ticketStateSchema.safeParse(raw);
-  return parsed.success ? parsed.data : ticketStateSchema.parse({});
-};
-
-const saveState = async (key: { companyId: number; contactId: number; whatsappId: number }, state: ConversationState) => {
-  await ensureConversationStateTable();
-  const parsed = ticketStateSchema.parse(state);
-  await sequelize.query(
-    `INSERT INTO conversation_state (company_id, contact_id, whatsapp_id, intent, slots_json, missing_slots_json, last_tool_call_json, created_at, updated_at)
-     VALUES (:companyId, :contactId, :whatsappId, :intent, CAST(:slots AS jsonb), CAST(:missing AS jsonb), CAST(:toolCall AS jsonb), NOW(), NOW())
-     ON CONFLICT (company_id, contact_id, whatsapp_id)
-     DO UPDATE SET intent = EXCLUDED.intent, slots_json = EXCLUDED.slots_json, missing_slots_json = EXCLUDED.missing_slots_json, last_tool_call_json = EXCLUDED.last_tool_call_json, updated_at = NOW()`,
-    { replacements: { ...key, intent: parsed.intent || '', slots: JSON.stringify(parsed.slots || {}), missing: JSON.stringify(parsed.missing_slots || []), toolCall: JSON.stringify(parsed.last_tool_call || null) }, type: QueryTypes.INSERT }
-  );
-};
-
-const withConversationLock = async <T>(contactId: number, fn: () => Promise<T>): Promise<T> => {
-  const key = Number(contactId);
-  await sequelize.query(`SELECT pg_advisory_lock(:key)`, { replacements: { key }, type: QueryTypes.SELECT });
-  try {
-    return await fn();
-  } finally {
-    try { await sequelize.query(`SELECT pg_advisory_unlock(:key)`, { replacements: { key }, type: QueryTypes.SELECT }); } catch {}
-  }
-};
-
-const logTurn = async (args: { companyId?: number; ticketId?: number; contactId?: number; providerMessageId?: string; event: string; intent?: string; slots?: any; toolCalled?: string; queryText?: string; resultCount?: number; decision?: string; payload?: any }) => {
-  try {
-    await sequelize.query(
-      `INSERT INTO integration_logs (company_id, ticket_id, contact_id, provider_message_id, direction, event, intent, slots_json, tool_called, query_text, result_count, decision, payload_json, created_at)
-       VALUES (:companyId, :ticketId, :contactId, :providerMessageId, 'inbound', :event, :intent, CAST(:slots AS jsonb), :toolCalled, :queryText, :resultCount, :decision, CAST(:payload AS jsonb), NOW())`,
-      { replacements: { companyId: args.companyId || null, ticketId: args.ticketId || null, contactId: args.contactId || null, providerMessageId: args.providerMessageId || null, event: args.event, intent: args.intent || null, slots: JSON.stringify(args.slots || {}), toolCalled: args.toolCalled || null, queryText: args.queryText || null, resultCount: args.resultCount ?? null, decision: args.decision || null, payload: JSON.stringify(args.payload || {}) }, type: QueryTypes.INSERT }
-    );
-  } catch {}
-};
-
-const zoneAliases: Record<string, string> = {
-  'pichincha': 'rosario pichincha',
-  'centro': 'rosario centro',
-  'zona norte': 'rosario zona norte'
-};
-
-const normalizeZone = (text: string): { zone: string; confidence: number } => {
-  const raw = String(text || '').toLowerCase().trim();
-  if (!raw) return { zone: '', confidence: 0 };
-  for (const [k, v] of Object.entries(zoneAliases)) if (raw.includes(k)) return { zone: v, confidence: 0.95 };
-  const cleaned = raw.replace(/[^a-záéíóúñ\s]/g, ' ').replace(/\s+/g, ' ').trim();
-  return { zone: cleaned, confidence: cleaned.length >= 4 ? 0.7 : 0.3 };
-};
-
-const parseHumanNumber = (token: string): number | null => {
-  let t = String(token || '').toLowerCase().trim();
-  if (!t) return null;
-  t = t.replace(/u\$s|usd|ars|ar\$/g, '').trim();
-  const hasK = /k|mil/.test(t);
-  const hasM = /m|mill/.test(t);
-  t = t.replace(/mil|millones?|k|m/g, '').trim();
-  t = t.replace(/\./g, '').replace(',', '.');
-  const n = Number(t);
-  if (!Number.isFinite(n)) return null;
-  if (hasM) return Math.round(n * 1000000);
-  if (hasK) return Math.round(n * 1000);
-  return Math.round(n);
-};
-
 const resolveWhatsapp = async () => {
   const runtime = getRuntimeSettings();
   const preferredId = Number(runtime.waCloudDefaultWhatsappId || 0);
@@ -271,984 +214,827 @@ const getOrCreateContact = async (phone: string, companyId: number) => {
   if (!contact) contact = await Contact.create({ name: phone, number: phone, companyId, isGroup: false });
   return contact;
 };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const getOrCreateTicket = async (contactId: number, whatsappId: number, companyId: number) => {
   let ticket = await Ticket.findOne({ where: { contactId, whatsappId, status: { [Op.ne]: "closed" } }, order: [["updatedAt", "DESC"]] });
-  if (!ticket) ticket = await Ticket.create({ contactId, whatsappId, companyId, status: "pending", unreadMessages: 1, lastMessage: "", bot_enabled: true, human_override: false } as any);
+  if (!ticket) ticket = await Ticket.create({ contactId, whatsappId, companyId, status: "pending", unreadMessages: 1, lastMessage: "" } as any);
   return ticket;
 };
 
-const resolveCloudCredentials = async (companyId: number) => {
-  const settings: any = getRuntimeSettings();
-  let phoneNumberId = String(settings.waCloudPhoneNumberId || '').trim();
-  let accessToken = String(settings.waCloudAccessToken || '').trim();
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  if (!phoneNumberId || !accessToken) {
-    const [conn]: any = await sequelize.query(
-      `SELECT phone_number_id, access_token FROM meta_connections WHERE company_id = :companyId AND status = 'connected' ORDER BY id DESC LIMIT 1`,
-      { replacements: { companyId }, type: QueryTypes.SELECT }
-    );
-    if (conn?.phone_number_id && conn?.access_token) {
-      phoneNumberId = String(conn.phone_number_id);
-      accessToken = String(conn.access_token);
-    }
-  }
+const HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
+const hardeningSignalBuckets = new Map<string, number[]>();
+const hardeningSignalThresholds = new Map<string, number>();
+const hardeningMetricCounters = new Map<string, number>();
+const hardeningMetricLastAt = new Map<string, string>();
 
-  if (!phoneNumberId || !accessToken) throw new Error('Cloud API credentials missing');
-  return { phoneNumberId, accessToken };
+const bumpHardeningMetric = (metric: string, by = 1) => {
+  const next = (hardeningMetricCounters.get(metric) || 0) + by;
+  hardeningMetricCounters.set(metric, next);
+  hardeningMetricLastAt.set(metric, new Date().toISOString());
 };
 
-const sendCloudText = async (to: string, text: string, companyId = 1) => {
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
-  const cleanTo = String(to || '').replace(/\D/g, '');
-  const cleanText = String(text || '').replace(/ /g, '').trim().slice(0, 3500);
-  if (!cleanTo || !cleanText) throw new Error('invalid_to_or_text');
+export const getWaHardeningMetrics = () => ({
+  counters: Object.fromEntries(Array.from(hardeningMetricCounters.entries()).sort((a, b) => a[0].localeCompare(b[0]))),
+  lastSeenAt: Object.fromEntries(Array.from(hardeningMetricLastAt.entries()).sort((a, b) => a[0].localeCompare(b[0])))
+});
 
-  let lastErr: any = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: cleanText } })
-    });
-    const data: any = await res.json().catch(() => ({}));
-    if (res.ok) return data?.messages?.[0]?.id || crypto.randomUUID();
-    lastErr = new Error(data?.error?.message || `Cloud send failed (${res.status})`);
-    if (res.status === 429 || res.status >= 500) {
-      await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-      continue;
-    }
-    break;
-  }
-  throw lastErr || new Error('Cloud send failed');
-};
+export const getWaHardeningAlertSnapshot = () => {
+  const now = Date.now();
+  const pendingAlerts = Array.from(hardeningSignalBuckets.entries())
+    .map(([signal, hits]) => {
+      const threshold = hardeningSignalThresholds.get(signal) || 0;
+      const inWindow = hits.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS).length;
+      return { signal, threshold, inWindow, remaining: Math.max(0, threshold - inWindow) };
+    })
+    .filter((entry) => entry.threshold > 0 && entry.inWindow > 0)
+    .sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
 
-const sendCloudImage = async (to: string, imageUrl: string, caption = '', companyId = 1) => {
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
-  const payload: any = {
-    messaging_product: 'whatsapp',
-    to,
-    type: 'image',
-    image: {
-      link: String(imageUrl || '').trim(),
-      ...(caption ? { caption: String(caption).slice(0, 1024) } : {})
-    }
+  return {
+    windowMs: HARDENING_ALERT_WINDOW_MS,
+    pendingAlerts
   };
-  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify(payload)
-  });
-  const data: any = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Cloud image send failed (${res.status})`);
-  return data?.messages?.[0]?.id || crypto.randomUUID();
 };
 
-const sendCloudTemplate = async (to: string, templateName: string, languageCode = 'en_US', companyId = 1, components: any[] = []) => {
-  const { phoneNumberId, accessToken } = await resolveCloudCredentials(companyId);
-  const candidates = [
-    String(languageCode || 'en_US').trim(),
-    'en_US',
-    'en',
-    'es_AR',
-    'es'
-  ].filter((v, i, arr) => v && arr.indexOf(v) === i);
+const pushHardeningSignal = (signal: string, threshold: number, context?: Record<string, unknown>) => {
+  hardeningSignalThresholds.set(signal, Math.max(1, Number(threshold) || 1));
+  bumpHardeningMetric(`signal.${signal}`);
+  const now = Date.now();
+  const prev = hardeningSignalBuckets.get(signal) || [];
+  const next = prev.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS);
+  next.push(now);
+  hardeningSignalBuckets.set(signal, next);
 
-  let lastErr: any = null;
-  for (const lang of candidates) {
-    const payload: any = {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'template',
-      template: {
-        name: templateName,
-        language: { code: lang },
-        ...(Array.isArray(components) && components.length ? { components } : {})
-      }
-    };
-
-    const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify(payload)
+  if (next.length >= threshold) {
+    bumpHardeningMetric(`alert.${signal}`);
+    console.warn("[wa-hardening][alert] threshold reached", {
+      signal,
+      count: next.length,
+      windowMs: HARDENING_ALERT_WINDOW_MS,
+      ...context
     });
-    const data: any = await res.json().catch(() => ({}));
-    if (res.ok) return data?.messages?.[0]?.id || crypto.randomUUID();
+    hardeningSignalBuckets.set(signal, []);
+  }
+};
 
-    const msg = String(data?.error?.message || `Cloud template send failed (${res.status})`);
-    lastErr = new Error(msg);
-    const recoverableLangError = /translation|language|132001/i.test(msg);
-    if (!recoverableLangError) break;
+export const recordInboundSignatureInvalidBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.signature_invalid_blocked");
+  pushHardeningSignal("inbound_signature_invalid_blocked", 4, context);
+};
+
+export const recordInboundSignatureInvalidRateLimited = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.signature_invalid_rate_limited");
+  pushHardeningSignal("inbound_signature_invalid_rate_limited", 3, context);
+};
+
+export const recordInboundPayloadReplayBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.payload_replay_blocked");
+  pushHardeningSignal("inbound_payload_replay_blocked", 4, context);
+};
+
+export const recordInboundPayloadOversizeBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.payload_size_blocked");
+  pushHardeningSignal("inbound_payload_size_blocked", 2, context);
+};
+
+export const recordInboundInvalidEnvelopeBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.invalid_envelope_blocked");
+  pushHardeningSignal("inbound_invalid_envelope_blocked", 3, context);
+};
+
+const parseRetryAfterMs = (retryAfterHeader?: string | null): number | null => {
+  if (!retryAfterHeader) return null;
+  const seconds = Number(retryAfterHeader);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+
+  const dateMs = Date.parse(retryAfterHeader);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    return delta > 0 ? delta : null;
+  }
+  return null;
+};
+
+const resolveOutboundRetryMaxDelayMs = (): number => {
+  const n = Number(getRuntimeSettings().waOutboundRetryMaxDelayMs || 15000);
+  if (!Number.isFinite(n)) return 15000;
+  return Math.max(500, Math.min(60000, Math.round(n)));
+};
+
+const resolveOutboundRequestTimeoutMs = (): number => {
+  const n = Number(getRuntimeSettings().waOutboundRequestTimeoutMs || 12000);
+  if (!Number.isFinite(n)) return 12000;
+  return Math.max(1000, Math.min(45000, Math.round(n)));
+};
+
+const resolveOutboundRetryOnTimeout = (): boolean => {
+  // Managed replies do not carry a client idempotency key through provider hops.
+  // Retrying on timeout is a high duplicate-risk path (provider may have accepted the first send).
+  // Keep fail-safe default off; explicit runtime opt-in can re-enable only when operators accept that risk.
+  return Boolean((getRuntimeSettings() as any).waOutboundRetryOnTimeout) && !resolveOutboundRetryRequireIdempotencyKey();
+};
+
+const resolveOutboundRetryRequireIdempotencyKey = (): boolean => {
+  const raw = (getRuntimeSettings() as any).waOutboundRetryRequireIdempotencyKey;
+  // hardening default: retries without explicit idempotency key are duplicate-prone
+  if (raw === undefined || raw === null || String(raw).trim() === "") return true;
+  return ["1", "true", "yes", "on"].includes(String(raw).toLowerCase());
+};
+
+const resolveManagedReplyRetryRequireIdempotencyKey = (): boolean => {
+  const settings = getRuntimeSettings() as any;
+  const specific = settings.waManagedReplyRetryRequireIdempotencyKey;
+  if (specific === undefined || specific === null || String(specific).trim() === "") {
+    return resolveOutboundRetryRequireIdempotencyKey();
+  }
+  return ["1", "true", "yes", "on"].includes(String(specific).toLowerCase());
+};
+
+const applyRetryJitter = (ms: number, maxDelayMs: number): number => {
+  if (ms <= 0) return 0;
+  const multiplier = 0.9 + (Math.random() * 0.2); // ±10%
+  const jittered = Math.round(ms * multiplier);
+  return Math.max(200, Math.min(jittered, maxDelayMs));
+};
+
+const computeBackoffMs = (attempt: number, retryAfterMs?: number | null): number => {
+  const maxDelayMs = resolveOutboundRetryMaxDelayMs();
+  if (retryAfterMs && retryAfterMs > 0) return applyRetryJitter(Math.min(retryAfterMs, maxDelayMs), maxDelayMs);
+  const base = 400 * Math.pow(2, attempt - 1);
+  return applyRetryJitter(base, maxDelayMs);
+};
+
+const isRetryableCloudFailure = (status?: number, code?: number): boolean => {
+  if (!status) return true;
+  // 409 can happen in conflict windows; retrying can amplify duplicate outbound risk.
+  if (status === 408 || status === 429) return true;
+  if (status >= 500) return true;
+  if (code === 131016 || code === 131048 || code === 131056) return true;
+  return false;
+};
+
+const shouldReleaseDedupeAfterProviderFailure = (status?: number): boolean => {
+  const s = Number(status || 0);
+  if (!s) return false;
+  if (s === 408 || s === 409 || s === 429) return false;
+  if (s >= 500) return false;
+  return s >= 400 && s < 500;
+};
+
+const sendCloudText = async (to: string, text: string): Promise<{ sentId: string | null; providerFailureStatus?: number }> => {
+  const settings = getRuntimeSettings();
+  const cleanTo = String(to || "").replace(/\D/g, "");
+  const cleanText = String(text || "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+
+  if (!cleanTo || !/^\d{8,20}$/.test(cleanTo)) {
+    bumpHardeningMetric("outbound.invalid_recipient_blocked");
+    pushHardeningSignal("outbound_invalid_recipient_blocked", 3, { toLength: cleanTo.length });
+    console.warn("[wa-cloud][send] invalid outbound recipient blocked", { toLength: cleanTo.length });
+    return { sentId: null };
   }
 
-  throw lastErr || new Error('Cloud template send failed');
+  if (!cleanText) {
+    bumpHardeningMetric("outbound.empty_text_blocked");
+    console.warn("[wa-cloud][send] empty outbound text blocked", { to: cleanTo });
+    return { sentId: null };
+  }
+
+  if (cleanText.length > MAX_INBOUND_TEXT_LENGTH) {
+    bumpHardeningMetric("outbound.oversized_text_blocked");
+    pushHardeningSignal("outbound_oversized_text_blocked", 3, { size: cleanText.length });
+    console.warn("[wa-cloud][send] oversized outbound text blocked", { to: cleanTo, size: cleanText.length });
+    return { sentId: null };
+  }
+
+  if (!settings.waCloudPhoneNumberId || !settings.waCloudAccessToken) {
+    console.error("[wa-cloud][send] missing credentials");
+    pushHardeningSignal("outbound_send_missing_credentials", 1, {});
+    return { sentId: null };
+  }
+
+  const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  const retryRequiresIdempotency = resolveManagedReplyRetryRequireIdempotencyKey();
+  const allowRetry = !retryRequiresIdempotency;
+  const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
+    try {
+      const controller = new AbortController();
+      const requestTimeoutMs = resolveOutboundRequestTimeoutMs();
+      const timeoutHandle = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+      const res = await fetch(`https://graph.facebook.com/v21.0/${settings.waCloudPhoneNumberId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.waCloudAccessToken}` },
+        body: JSON.stringify({ messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: cleanText } }),
+        signal: controller.signal
+      }).finally(() => clearTimeout(timeoutHandle));
+      const data: any = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        bumpHardeningMetric("outbound.cloud_send_ok");
+        return { sentId: data?.messages?.[0]?.id || crypto.randomUUID() };
+      }
+
+      const cloudCode = Number(data?.error?.code);
+      const retryable = isRetryableCloudFailure(res.status, cloudCode);
+      lastError = data?.error?.message || `status ${res.status}`;
+
+      if (!retryable || attempt === effectiveMaxAttempts) {
+        if (retryable && !allowRetry) {
+          bumpHardeningMetric("outbound.retry_blocked_missing_idempotency_key");
+          pushHardeningSignal("outbound_retry_blocked_missing_idempotency_key", 3, { status: res.status, cloudCode, attempt });
+        }
+        bumpHardeningMetric("outbound.cloud_send_failed");
+        pushHardeningSignal("outbound_retry_exhausted", 3, { status: res.status, cloudCode });
+        console.error("[wa-cloud][send] failed:", lastError, { status: res.status, cloudCode, attempt, maxAttempts: effectiveMaxAttempts, allowRetry });
+        return { sentId: null, providerFailureStatus: Number(res.status) || undefined };
+      }
+
+      const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+      bumpHardeningMetric("outbound.retry_attempt");
+      if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.retry_after_header_used");
+      pushHardeningSignal("outbound_retry", 8, { status: res.status, cloudCode, attempt, maxAttempts });
+      await sleep(computeBackoffMs(attempt, retryAfterMs));
+    } catch (e: any) {
+      const status = Number(e?.statusCode || e?.status);
+      const isAbortTimeout = e?.name === "AbortError";
+      const timeoutRetryEnabled = isAbortTimeout ? resolveOutboundRetryOnTimeout() : false;
+      const retryable = isAbortTimeout ? timeoutRetryEnabled : isRetryableCloudFailure(status);
+      lastError = e?.message || e;
+
+      if (isAbortTimeout) {
+        bumpHardeningMetric("outbound.cloud_request_timeout");
+        pushHardeningSignal("outbound_cloud_request_timeout", 4, { attempt, timeoutMs: resolveOutboundRequestTimeoutMs() });
+
+        if (!timeoutRetryEnabled) {
+          bumpHardeningMetric("outbound.cloud_timeout_not_retried");
+          pushHardeningSignal("outbound_cloud_timeout_not_retried", 3, { attempt });
+        }
+      }
+
+      if (!retryable || attempt === effectiveMaxAttempts) {
+        if (retryable && !allowRetry) {
+          bumpHardeningMetric("outbound.retry_blocked_missing_idempotency_key");
+          pushHardeningSignal("outbound_retry_blocked_missing_idempotency_key", 3, {
+            status: status || undefined,
+            attempt,
+            reason: isAbortTimeout ? "timeout" : undefined
+          });
+        }
+        bumpHardeningMetric("outbound.cloud_send_failed");
+        pushHardeningSignal("outbound_retry_exhausted", 3, { status: status || undefined, reason: isAbortTimeout ? "timeout" : undefined });
+        console.error("[wa-cloud][send] exception:", lastError, { status, attempt, maxAttempts: effectiveMaxAttempts, isAbortTimeout, timeoutRetryEnabled, allowRetry });
+        return { sentId: null, providerFailureStatus: status || undefined };
+      }
+
+      const retryAfterMs = parseRetryAfterMs(e?.response?.headers?.["retry-after"] || e?.headers?.["retry-after"]);
+      bumpHardeningMetric("outbound.retry_attempt");
+      if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.retry_after_header_used");
+      pushHardeningSignal("outbound_retry", 8, { status, attempt, maxAttempts, reason: isAbortTimeout ? "timeout" : undefined });
+      await sleep(computeBackoffMs(attempt, retryAfterMs));
+    }
+  }
+
+  bumpHardeningMetric("outbound.cloud_send_failed");
+  console.error("[wa-cloud][send] exhausted retries", { lastError });
+  return { sentId: null };
 };
-const emitOutgoing = (_ticket: any, contact: any, message: any) => { try { const io = getIO(); io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message, conversationId: contact.id, contact }); } catch {} };
+
+const normalizeForDedupe = (text: string) => {
+  const raw = String(text || "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "") // zero-width chars often used to bypass dedupe
+    .toLowerCase();
+
+  const folded = raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // fold accents (ej: "mañana" ~= "manana")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (folded) return folded.slice(0, 160);
+
+  // fallback: avoid collapsing all-symbol messages (e.g. 👍 vs ❤️) into the same dedupe key
+  return raw.replace(/\s+/g, " ").trim().slice(0, 160);
+};
+
+const normalizeMediaUrlForDedupe = (rawUrl: string): string => {
+  const input = String(rawUrl || "").trim();
+  if (!input) return "";
+  try {
+    const u = new URL(input);
+    const host = u.hostname.toLowerCase();
+    const path = decodeURIComponent(u.pathname || "").replace(/\/+/g, "/");
+    return `${host}${path}`.slice(0, 240);
+  } catch {
+    return input.split("?")[0].split("#")[0].trim().slice(0, 240);
+  }
+};
+
+const buildOutboundDedupeKey = (
+  companyId: number,
+  to: string,
+  payload: { mode: "text"; text: string } | { mode: "media"; mediaUrl: string; mediaType?: string; caption?: string }
+) => {
+  const cleanTo = String(to || "").replace(/\D/g, "");
+  const semantic = payload.mode === "media"
+    ? `media:${String(payload.mediaType || "image").toLowerCase()}:${normalizeMediaUrlForDedupe(payload.mediaUrl)}:${normalizeForDedupe(String(payload.caption || ""))}`
+    : `text:${normalizeForDedupe(payload.text)}`;
+  const tenant = Math.max(0, Number(companyId) || 0);
+  const base = `${tenant}:${cleanTo}:${semantic}`;
+  return `wa-out:${crypto.createHash("sha1").update(base).digest("hex")}`;
+};
+
+const emitOutgoing = (ticket: any, contact: any, message: any) => { try { const io = getIO(); io.to(`ticket-${ticket.id}`).emit("appMessage", { action: "create", message, ticket, contact }); } catch {} };
+
+const sendManagedReply = async ({ ticket, contact, text }: { ticket: any; contact: any; text: string }) => {
+  const cleanText = String(text || "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim();
+
+  if (!cleanText) {
+    bumpHardeningMetric("outbound.empty_text_blocked");
+    pushHardeningSignal("outbound_empty_text_blocked", 3, { ticketId: ticket.id, source: "managed_reply" });
+    return null;
+  }
+
+  const dedupeKey = buildOutboundDedupeKey(ticket.companyId, String(contact.number), { mode: "text", text: cleanText });
+  const dedupeTtlSeconds = resolveOutboundDedupeTtlSeconds();
+  let shouldSend = true;
+  try {
+    shouldSend = await reserveOutboundDedupe(dedupeKey, dedupeTtlSeconds);
+  } catch (dedupeErr: any) {
+    bumpHardeningMetric("outbound.dedupe_infra_error");
+    pushHardeningSignal("outbound_dedupe_infra_error", 3, { ticketId: ticket.id });
+    shouldSend = reserveOutboundDedupeMemory(dedupeKey, dedupeTtlSeconds);
+    if (shouldSend) {
+      bumpHardeningMetric("outbound.dedupe_memory_reserved");
+    } else {
+      bumpHardeningMetric("outbound.dedupe_memory_blocked");
+      bumpHardeningMetric("outbound.duplicate_blocked");
+      pushHardeningSignal("outbound_duplicate_blocked", 5, { ticketId: ticket.id, source: "memory_fallback" });
+      console.warn("[wa-cloud][send] duplicate outbound blocked by memory fallback", { ticketId: ticket.id, dedupeKey });
+      return null;
+    }
+    console.error("[wa-cloud][send] dedupe infra failed; using memory fallback", {
+      ticketId: ticket.id,
+      dedupeKey,
+      error: dedupeErr?.message || String(dedupeErr)
+    });
+  }
+  if (!shouldSend) {
+    bumpHardeningMetric("outbound.dedupe_db_blocked");
+    bumpHardeningMetric("outbound.duplicate_blocked");
+    pushHardeningSignal("outbound_duplicate_blocked", 5, { ticketId: ticket.id });
+    console.warn("[wa-cloud][send] duplicate outbound blocked", { ticketId: ticket.id, dedupeKey });
+    return null;
+  }
+  bumpHardeningMetric("outbound.dedupe_reserved");
+  const sendResult = await sendCloudText(String(contact.number), cleanText);
+  if (!sendResult.sentId) {
+    bumpHardeningMetric("outbound.provider_send_failed");
+    pushHardeningSignal("outbound_provider_send_failed", 4, {
+      ticketId: ticket.id,
+      providerFailureStatus: sendResult.providerFailureStatus || undefined
+    });
+
+    if (shouldReleaseDedupeAfterProviderFailure(sendResult.providerFailureStatus)) {
+      try {
+        await releaseOutboundDedupe(dedupeKey);
+        bumpHardeningMetric("outbound.dedupe_released_after_non_retryable_provider_error");
+      } catch (releaseErr: any) {
+        bumpHardeningMetric("outbound.dedupe_release_failed_after_non_retryable_provider_error");
+        pushHardeningSignal("outbound_dedupe_release_failed", 2, {
+          ticketId: ticket.id,
+          providerFailureStatus: sendResult.providerFailureStatus || undefined
+        });
+        console.error("[wa-cloud][send] failed to release dedupe key after non-retryable provider error", {
+          dedupeKey,
+          error: releaseErr?.message || String(releaseErr)
+        });
+      }
+    } else {
+      bumpHardeningMetric("outbound.dedupe_retained_after_provider_failure");
+    }
+
+    console.error("[wa-cloud][send] outbound not persisted because provider send failed", {
+      ticketId: ticket.id,
+      contactId: contact.id,
+      dedupeKey,
+      providerFailureStatus: sendResult.providerFailureStatus
+    });
+    return null;
+  }
+  const out = await Message.create({ id: sendResult.sentId, body: cleanText, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: "chat" } as any);
+  emitOutgoing(ticket, contact, out);
+  return out;
+};
 const ensureArchivedTag = async (contactId: number) => { const [tag] = await Tag.findOrCreate({ where: { name: "archivado" }, defaults: { name: "archivado", color: "#6b7280" } }); const exists = await ContactTag.findOne({ where: { contactId, tagId: tag.id } }); if (!exists) await ContactTag.create({ contactId, tagId: tag.id } as any); };
 const autoSummaryAndScore = async (ticketId: number, contact: Contact) => {
   const inbound = await Message.findAll({ where: { ticketId, fromMe: false }, order: [["createdAt", "DESC"]], limit: 6 });
   const joined = inbound.map((m: any) => String(m.body || "").trim()).filter(Boolean).reverse().join(" | ");
   if (!joined) return;
   let score = Number((contact as any).lead_score || 0);
-  if (/comprar|contratar|precio|plan|quiero|cotiz/i.test(joined)) score = Math.max(score, 65);
-  if (/urgente|ahora|hoy|ya/i.test(joined)) score = Math.max(score, 78);
-  if (/gracias|resuelto|listo/i.test(joined)) score = Math.max(score, 45);
-  const leadStatus = score >= 75 ? "hot" : score >= 50 ? "warm" : score >= 25 ? "engaged" : ((contact as any).leadStatus || "new");
-  await (contact as any).update({ needs: joined.slice(0, 900), lead_score: Math.min(100, score), leadStatus: leadStatus, updatedAt: new Date() } as any);
-
-  // Enviar contexto consolidado a Tokko una vez que hay contenido útil de conversación
-  try {
-    const context = joined.slice(0, 900);
-    if (context.length >= 30) {
-      await syncLeadToTokko({
-        name: String((contact as any).name || ''),
-        phone: String((contact as any).number || ''),
-        email: String((contact as any).email || ''),
-        source: 'meta_lead_ads',
-        message: `Actualización de contexto desde conversación CRM: ${context}`
-      });
-    }
-  } catch {}
+  if (/comprar|contratar|precio|plan|quiero|usd|d[oó]lar|departamento|casa/i.test(joined)) score = Math.max(score, 65);
+  if (/urgente|ahora|hoy|visita|seña/i.test(joined)) score = Math.max(score, 75);
+  if (/gracias|resuelto|listo/i.test(joined)) score = Math.max(score, 40);
+  await (contact as any).update({ needs: joined.slice(0, 900), lead_score: Math.min(100, score), updatedAt: new Date() } as any);
 };
-const aiReplyFor = async (text: string, companyId: number, contactNumber?: string): Promise<string> => {
-  const t = String(text || "").toLowerCase().trim();
-  if (isLowSignalMessage(t)) return "";
 
+const isLowSignalMessage = (text: string) => {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return true;
+  if (/^[\p{Emoji}\s👍👌👏🙏😂🤣❤❤️]+$/u.test(t)) return true;
+  return /^(ok|oka|dale|genial|gracias|joya|perfecto|👍|👌|🙏)$/.test(t);
+};
+
+const parseBudget = (text: string): number | null => {
+  const m = String(text || "").toLowerCase().match(/(\d{2,3}(?:[\.,]\d{3})+|\d{5,8})\s*(usd|u\$s|d[oó]lares?)/i);
+  if (!m) return null;
+  return Number(String(m[1]).replace(/\./g, "").replace(/,/g, "")) || null;
+};
+
+const isWebhookTimestampAcceptable = (timestamp?: string): boolean => {
+  const ts = Number(timestamp || 0);
+  if (!ts) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const age = nowSec - ts;
+  if (age > MAX_WEBHOOK_MESSAGE_AGE_SECONDS) return false;
+  if (age < -MAX_WEBHOOK_FUTURE_SKEW_SECONDS) return false;
+  return true;
+};
+
+const isValidInboundSender = (from: string): boolean => /^\d{8,20}$/.test(String(from || ""));
+
+const isValidInboundMessageId = (messageId: string): boolean => /^[A-Za-z0-9:_\-.]{6,200}$/.test(String(messageId || ""));
+
+const isValidInboundType = (type: string): boolean => ALLOWED_INBOUND_TYPES.has(String(type || "").toLowerCase());
+
+const isInboundTextLengthAcceptable = (body: string): boolean => String(body || "").length <= MAX_INBOUND_TEXT_LENGTH;
+
+const ragLookup = async (companyId: number, text: string, limit = 3) => {
+  const q = String(text || "").trim().toLowerCase();
+  if (!q) return [] as any[];
+  const terms = q.split(/\s+/).filter((w) => w.length >= 4).slice(0, 5);
+  const like = `%${q}%`;
   const rows: any[] = await sequelize.query(
-    `SELECT c.id, c.chunk_text, d.title, d.category,
-            ts_rank_cd(c.chunk_tsv, websearch_to_tsquery('spanish', :query)) AS score
+    `SELECT c.chunk_text, d.title,
+            (CASE WHEN POSITION(LOWER(:q) IN LOWER(c.chunk_text)) > 0 THEN 100 ELSE 0 END
+             + ${terms.map((_, i) => `CASE WHEN LOWER(c.chunk_text) LIKE LOWER(:t${i}) THEN 10 ELSE 0 END`).join(" + ") || "0"}) AS score
      FROM kb_chunks c
      JOIN kb_documents d ON d.id = c.document_id
      WHERE d.company_id = :companyId
-       AND c.chunk_tsv @@ websearch_to_tsquery('spanish', :query)
+       AND (LOWER(c.chunk_text) LIKE LOWER(:like) OR LOWER(d.title) LIKE LOWER(:like) ${terms.map((_, i) => `OR LOWER(c.chunk_text) LIKE LOWER(:t${i})`).join(" ")})
      ORDER BY score DESC, c.id DESC
-     LIMIT 5`,
-    { replacements: { companyId, query: t || 'propiedades' }, type: QueryTypes.SELECT }
+     LIMIT :limit`,
+    {
+      replacements: {
+        companyId,
+        q,
+        like,
+        limit,
+        ...Object.fromEntries(terms.map((t, i) => [`t${i}`, `%${t}%`]))
+      },
+      type: QueryTypes.SELECT
+    }
   );
+  return rows;
+};
 
-  let leadContext = '';
-  if (contactNumber) {
+const tokkoPropertyHint = async (text: string): Promise<string | null> => {
+  const rt = getRuntimeSettings();
+  if (!rt.tokkoEnabled || !rt.tokkoAgentSearchEnabled || !rt.tokkoApiKey) return null;
+  if (!/departamento|depto|casa|propiedad|ambientes|m2|usd|d[oó]lares?|alquiler|venta/i.test(text)) return null;
+  try {
+    const base = String(rt.tokkoBaseUrl || "https://www.tokkobroker.com/api/v1").replace(/\/$/, "");
+    const path = String(rt.tokkoPropertiesPath || "/property/").startsWith("/") ? String(rt.tokkoPropertiesPath || "/property/") : `/${String(rt.tokkoPropertiesPath || "property/")}`;
+    const budget = parseBudget(text);
+    const search = encodeURIComponent(String(text).slice(0, 120));
+    const url = `${base}${path}?key=${encodeURIComponent(rt.tokkoApiKey)}&search=${search}&limit=3${budget ? `&price_to=${budget}` : ""}`;
+    const resp = await fetch(url, { method: "GET" });
+    if (!resp.ok) return null;
+    const data: any = await resp.json().catch(() => null);
+    const list = Array.isArray(data?.objects) ? data.objects : (Array.isArray(data) ? data : []);
+    if (!list.length) return "No encontré propiedades exactas en Tokko con ese criterio todavía; si querés te pido zona, ambientes y presupuesto para afinar.";
+    const top = list.slice(0, 2).map((p: any) => {
+      const title = p?.publication_title || p?.title || p?.address || "Propiedad";
+      const price = p?.operations?.[0]?.prices?.[0]?.price || p?.price || "s/p";
+      return `• ${String(title).slice(0, 70)} (${price})`;
+    }).join("\n");
+    return `Encontré opciones en Tokko:\n${top}\nSi querés, te paso más opciones filtradas.`;
+  } catch {
+    return null;
+  }
+};
+
+const buildLeadFormContextIntro = (needsRaw: any): string => {
+  const raw = String(needsRaw || "").trim();
+  if (!raw) return "";
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const entries = Object.entries(parsed)
+        .map(([k, v]) => `${String(k)}: ${String(v ?? "").trim()}`)
+        .filter((x) => /\S/.test(x))
+        .slice(0, 2);
+
+      const flattened = entries.join(" | ");
+      const lotMatch = flattened.match(/lote[^|,.;]*/i);
+      if (lotMatch?.[0]) {
+        return `¡Genial! Vimos que te interesó ${lotMatch[0].trim()}.`;
+      }
+
+      if (flattened) {
+        return `¡Genial! Vimos tu formulario (${flattened}).`;
+      }
+    }
+  } catch {
+    // ignore json parse errors
+  }
+
+  const lotMatch = raw.match(/lote[^\n,.;]*/i);
+  if (lotMatch?.[0]) return `¡Genial! Vimos que te interesó ${lotMatch[0].trim()}.`;
+
+  return "¡Genial! Vimos tu formulario y ya tenemos tus datos.";
+};
+
+const buildLeadFormFollowup = (needsRaw: any): string => {
+  const raw = String(needsRaw || "").toLowerCase();
+
+  if (/inversi[oó]n|invertir|renta|rentabilidad/.test(raw)) {
+    return "Si es para inversión, ¿querés que te muestre propiedades con mejor oportunidad y rentabilidad?";
+  }
+
+  if (/departamento|depto|departamentos/.test(raw)) {
+    return "¿También te interesa ver otros departamentos similares? Te ayudo a encontrarlos.";
+  }
+
+  if (/casa|casas/.test(raw)) {
+    return "¿Querés que te muestre otras casas parecidas según tu búsqueda?";
+  }
+
+  if (/lote|terreno|lotes/.test(raw)) {
+    return "¿También te interesa ver otros lotes similares en esta zona o zonas cercanas?";
+  }
+
+  return "¿También te interesa ver otras propiedades similares? Si querés, te ayudo a buscarlas ahora.";
+};
+
+const getLatestMetaLeadFormHint = async (companyId: number, phoneRaw: string): Promise<string> => {
+  const phone = String(phoneRaw || "").replace(/\D/g, "");
+  if (!phone) return "";
+
+  try {
+    const [row]: any = await sequelize.query(
+      `SELECT form_id, payload_json, form_fields_json
+       FROM meta_lead_events
+       WHERE company_id = :companyId
+         AND contact_phone IS NOT NULL
+         AND REPLACE(REGEXP_REPLACE(contact_phone, '\\D', '', 'g'), ' ', '') LIKE :phoneLike
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      {
+        replacements: { companyId, phoneLike: `%${phone.slice(-10)}%` },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const candidates: string[] = [];
+    if (row?.form_id) candidates.push(String(row.form_id));
+
     try {
-      const normalized = String(contactNumber).replace(/\D/g, '');
-      const [lead]: any = await sequelize.query(
-        `SELECT campaign_id, form_id
-         FROM meta_lead_events
-         WHERE company_id = :companyId
-           AND REGEXP_REPLACE(COALESCE(contact_phone,''), '\D', '', 'g') = :phone
-         ORDER BY id DESC LIMIT 1`,
-        { replacements: { companyId, phone: normalized }, type: QueryTypes.SELECT }
-      );
-      if (lead) {
-        const camp = lead?.campaign_id ? `campaña ${lead.campaign_id}` : '';
-        const form = lead?.form_id ? `formulario ${lead.form_id}` : '';
-        const extra = [camp, form].filter(Boolean).join(' · ');
-        if (extra) leadContext = ` (Contexto lead: ${extra})`;
+      const p = row?.payload_json ? JSON.parse(String(row.payload_json)) : null;
+      const n = p?.form_name || p?.form?.name || p?.name || p?.title;
+      if (n) candidates.push(String(n));
+    } catch {}
+
+    try {
+      const f = row?.form_fields_json ? JSON.parse(String(row.form_fields_json)) : null;
+      if (f && typeof f === "object") {
+        const flat = JSON.stringify(f);
+        if (flat) candidates.push(flat);
       }
     } catch {}
-  }
 
-  const top = rows?.[0];
-  const topScore = Number(top?.score || 0);
-  if (top?.chunk_text && topScore >= 0.60) {
-    const bullets = rows
-      .filter((r: any) => Number(r.score || 0) >= 0.58)
-      .slice(0, 2)
-      .map((r: any) => `• ${String(r.chunk_text || '').slice(0, 180)}`)
-      .join('\\n');
-    return `Según nuestra base de conocimiento (${top.title || 'documentación'}), esto te ayuda:\\n${bullets}${leadContext}\\n\\nSi querés, te lo explico aplicado a tu caso.`;
+    return candidates.join(" ").toLowerCase().slice(0, 300);
+  } catch {
+    return "";
   }
+};
 
+const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): Promise<string> => {
+  const t = String(text || "").toLowerCase();
+  if (isLowSignalMessage(t)) return "";
   if (/hola|buenas|buen día|buen dia/.test(t)) return "¡Hola! 👋 Soy el asistente de Charlott. Contame qué necesitás y te ayudo ahora mismo.";
   if (/precio|plan|costo|cu[aá]nto/.test(t)) return "Perfecto. Te cuento planes y precios según tu necesidad. Si querés, te hago una recomendación rápida en 2 pasos.";
   if (/turno|agenda|cita|horario/.test(t)) return "Genial, te ayudo a agendar. Decime día y franja horaria preferida y lo coordinamos.";
   if (/soporte|error|no funciona|problema/.test(t)) return "Gracias por avisar. Ya te ayudo con soporte. Si querés, pasame captura o detalle del error para resolverlo más rápido.";
 
-  if (/ubicaciones|zonas|barrios|localidades|donde tienen|dónde tienen/.test(t)) {
-    const locRows: any[] = await sequelize.query(
-      `SELECT d.content
-       FROM kb_documents d
-       WHERE d.company_id = :companyId
-         AND d.source_type = 'tokko_locations'
-         AND d.status = 'active'
-       ORDER BY d.id DESC
-       LIMIT 1`,
-      { replacements: { companyId }, type: QueryTypes.SELECT }
-    );
-    const raw = String(locRows?.[0]?.content || '');
-    const lines = raw.split('\n').map((x) => x.trim()).filter((x) => x.startsWith('- ')).slice(0, 40);
-    const zoneSet = new Set<string>();
-    for (const ln of lines) {
-      const tln = String(ln || '').toLowerCase();
-      if (/centro|microcentro|abasto|rio|río|pichincha|macrocentro/.test(tln)) zoneSet.add('Rosario Centro / Río / Pichincha');
-      else if (/norte|fisherton|alberdi|arroyito/.test(tln)) zoneSet.add('Rosario Zona Norte');
-      else if (/sur|tiro suizo/.test(tln)) zoneSet.add('Rosario Zona Sur');
-      else if (/funes/.test(tln)) zoneSet.add('Funes');
-      else if (/roldán|roldan/.test(tln)) zoneSet.add('Roldán');
-      else if (/ibarlucea/.test(tln)) zoneSet.add('Ibarlucea');
-      else if (/alvear/.test(tln)) zoneSet.add('Alvear');
-      else if (/rosario/.test(tln)) zoneSet.add('Rosario');
-    }
-    const zones = Array.from(zoneSet).slice(0, 6);
-    if (zones.length) {
-      return `Tenemos propiedades en zonas como: ${zones.join(', ')}. Si querés, te filtro por una zona puntual y presupuesto.`;
-    }
+  const tokkoQuery = [text, metaFormHint].filter(Boolean).join(" ").trim();
+  const tokkoHint = await tokkoPropertyHint(tokkoQuery || text);
+  if (tokkoHint) return tokkoHint;
+
+  const rows = await ragLookup(companyId, text, 3);
+  if (rows[0]?.chunk_text) {
+    const snippet = rows.slice(0, 2).map((r: any) => `• ${String(r.chunk_text || "").slice(0, 180)}`).join("\n");
+    return `Te respondo con info de la base:\n${snippet}`;
   }
-
-  return `Entendido 👍 ¿Querés que te ayude con precios, agenda de cita, o soporte?${leadContext}`;
-};
-
-
-const inferTokkoFilters = async (text: string, companyId: number, phone: string) => {
-  const low = String(text || '').toLowerCase();
-  const operationType = /alquiler|alquilar|renta/.test(low) ? 'Alquiler' : (/venta|comprar|compra/.test(low) ? 'Venta' : '');
-  const propertyType = /departamento|depto/.test(low) ? 'Departamento' : (/casa/.test(low) ? 'Casa' : (/lote|terreno/.test(low) ? 'Lote' : (/ph/.test(low) ? 'PH' : '')));
-  const locMatch = low.match(/(?:en|zona)\s+([a-záéíóúñ\s]{3,40})/i);
-  const locationFromChat = locMatch ? String(locMatch[1] || '').trim() : '';
-
-  let leadHint = '';
-  let locationFromLead = '';
-  let propertyTypeLead = '';
-  try {
-    const normalized = String(phone || '').replace(/\D/g, '');
-    const [lead]: any = await sequelize.query(
-      `SELECT form_fields_json FROM meta_lead_events WHERE company_id = :companyId AND REGEXP_REPLACE(COALESCE(contact_phone,''), '\D', '', 'g') = :phone ORDER BY id DESC LIMIT 1`,
-      { replacements: { companyId, phone: normalized }, type: QueryTypes.SELECT }
-    );
-    const ff = lead?.form_fields_json ? JSON.parse(String(lead.form_fields_json)) : null;
-    const pull = (keys: string[]) => {
-      if (!ff) return '';
-      if (Array.isArray(ff)) {
-        for (const k of keys) {
-          const row: any = ff.find((x: any) => String(x?.name || '').toLowerCase() === k.toLowerCase());
-          const v = row?.values?.[0];
-          if (v) return String(v);
-        }
-        return '';
-      }
-      for (const k of keys) {
-        const v = (ff as any)?.[k];
-        if (v) return String(v);
-      }
-      return '';
-    };
-    leadHint = pull(['interes','interés','consulta','necesidad','property_type','tipo_propiedad']);
-    locationFromLead = pull(['location','zona','barrio','ciudad']);
-    propertyTypeLead = pull(['property_type','tipo_propiedad','tipo']);
-  } catch {}
-
-  const location = locationFromChat || locationFromLead;
-  const prop = propertyType || propertyTypeLead;
-  const q = [text, leadHint].filter(Boolean).join(' ').slice(0, 180);
-  return { q, operationType, propertyType: prop, location, minPrice: undefined, maxPrice: undefined, limit: 5 };
-};
-
-
-const summarizeZone = (line: string): string => {
-  const t = String(line || '').toLowerCase();
-  if (/centro|microcentro|abasto|rio|r[ií]o|pichincha|macrocentro/.test(t)) return 'Rosario Centro / Río / Pichincha';
-  if (/norte|fisherton|alberdi|arroyito/.test(t)) return 'Rosario Zona Norte';
-  if (/sur|tiro suizo|sarmiento/.test(t)) return 'Rosario Zona Sur';
-  if (/funes/.test(t)) return 'Funes';
-  if (/rold[aá]n/.test(t)) return 'Roldán';
-  if (/ibarlucea/.test(t)) return 'Ibarlucea';
-  if (/alvear/.test(t)) return 'Alvear';
-  if (/rosario/.test(t)) return 'Rosario';
-  return '';
-};
-
-const fmtPrice = (p: any) => {
-  if (p === undefined || p === null || p === '') return 'Consultar';
-  const n = Number(p);
-  if (Number.isNaN(n)) return String(p);
-  return new Intl.NumberFormat('es-AR').format(n);
-};
-
-const buildTokkoFilters = (state: ConversationState) => {
-  const s: any = state?.slots || {};
-  return {
-    q: `${s.zone || ''} ${s.propertyType || ''} ${s.minBedrooms || ''}`.trim(),
-    operationType: 'Venta',
-    propertyType: s.propertyType || undefined,
-    location: s.zone || undefined,
-    minPrice: s.minPrice || undefined,
-    maxPrice: s.maxPrice || undefined,
-    minBedrooms: s.minBedrooms || undefined,
-    limit: 3
-  };
-};
-
-const buildCarouselComponentsFromTokko = (results: any[]) => {
-  const cards = (results || []).slice(0, 5).map((r: any, idx: number) => {
-    const title = String(r?.title || 'Propiedad').slice(0, 60);
-    const price = `${r?.currency || '$'} ${fmtPrice(r?.price)}`.slice(0, 60);
-    const location = String(r?.location || 'Ubicación a confirmar').slice(0, 60);
-    const comps: any[] = [
-      { type: 'body', parameters: [
-        { type: 'text', text: title },
-        { type: 'text', text: price },
-        { type: 'text', text: location }
-      ] }
-    ];
-    if (r?.imageUrl) {
-      comps.unshift({ type: 'header', parameters: [{ type: 'image', image: { link: String(r.imageUrl) } }] });
-    }
-    if (r?.url) {
-      comps.push({ type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: String(r.url).slice(0, 200) }] });
-    }
-    return { card_index: idx, components: comps };
-  });
-
-  return [
-    { type: 'body', parameters: [{ type: 'text', text: 'Te comparto opciones filtradas para vos.' }] },
-    { type: 'carousel', cards }
-  ];
-};
-
-
-
-const parsePriceFilters = (text: string): { minPrice?: number; maxPrice?: number; currency?: string } => {
-  const low = String(text || '').toLowerCase();
-  const currency = /ars|ar\$/.test(low) ? 'ARS' : 'USD';
-
-  const tokenMatches = [
-    ...(low.match(/(?:u\$s|usd|ars|ar\$)?\s*\d+[\d\.,]*\s*(?:k|mil|m|millones?)?/g) || []),
-    ...(low.match(/\d+[\d\.,]*\s*(?:u\$s|usd|ars|ar\$)/g) || [])
-  ];
-
-  const tokens = tokenMatches
-    .map((t) => parseHumanNumber(t))
-    .filter((n): n is number => Number.isFinite(n || NaN) && Number(n) > 0)
-    .map((n) => Number(n));
-
-  let minPrice: number | undefined;
-  let maxPrice: number | undefined;
-
-  if (/entre/.test(low) && tokens.length >= 2) {
-    minPrice = Math.min(tokens[0], tokens[1]);
-    maxPrice = Math.max(tokens[0], tokens[1]);
-  } else if (/\d+[\d\.,]*\s*(k|mil|m|millones?)?\s*[-a]\s*\d+[\d\.,]*/.test(low) && tokens.length >= 2) {
-    minPrice = Math.min(tokens[0], tokens[1]);
-    maxPrice = Math.max(tokens[0], tokens[1]);
-  } else if (/(hasta|máximo|maximo|tope)/.test(low) && tokens.length >= 1) {
-    maxPrice = tokens[0];
-  } else if (/(desde|mínimo|minimo)/.test(low) && tokens.length >= 1) {
-    minPrice = tokens[0];
-  } else if (tokens.length === 1) {
-    maxPrice = tokens[0];
-  }
-
-  return { minPrice, maxPrice, currency };
-};
-
-const parsePropertyFiltersFromText = (text: string) => {
-  const low = String(text || '').toLowerCase();
-  const zoneMatch = low.match(/(?:en|zona)\s+([a-záéíóúñ\s]{3,40})/i);
-  let zone = zoneMatch ? String(zoneMatch[1] || '').trim() : '';
-
-  if (!zone) {
-    const zn = low.match(/(rosario centro|rosario|funes|rold[áa]n|pichincha|echesortu|fisherton|zona norte|centro)/i);
-    if (zn) zone = String(zn[1] || '').trim();
-  }
-  if (!zone) {
-    const plain = low.replace(/[^a-záéíóúñ\s]/g, ' ').replace(/\s+/g, ' ').trim();
-    const looksLikeOnlyPlace = plain.length >= 3 && plain.length <= 40 && !/(compr|propiedad|depto|departamento|casa|lote|terreno|dorm|habit|usd|u\$s|ars|ar\$|sugerime|recomend|hola|buen)/.test(plain);
-    if (looksLikeOnlyPlace) zone = plain;
-  }
-  const nz = normalizeZone(zone);
-  zone = nz.zone;
-
-  let propertyType = '';
-  if (/departamento|depto|apartment/.test(low)) propertyType = 'departamento';
-  else if (/casa|house/.test(low)) propertyType = 'casa';
-  else if (/lote|terreno|land/.test(low)) propertyType = 'terreno';
-
-  const bedMatch = low.match(/(\d+)\s*(?:dorm|habit)/i);
-  const minBedrooms = bedMatch ? Number(bedMatch[1]) : undefined;
-
-  const { minPrice, maxPrice } = parsePriceFilters(low);
-  return { zone, propertyType, minBedrooms, minPrice, maxPrice };
-};
-
-const nextMissingFilterQuestion = (f: any, userText = ''): string | null => {
-  const low = String(userText || '').toLowerCase();
-  const wantsGuidance = /(sugerime|sugerir|recomend|vos decime|no se)/.test(low);
-
-  if (!f?.zone) return 'Buenísimo, arranquemos por la zona. Preferís Rosario centro, zona norte o otra zona?';
-  if (!f?.minPrice && !f?.maxPrice) {
-    if (wantsGuidance) return 'Dale, para Rosario suele funcionar entre 100.000 y 180.000 USD. Te sirve ese rango o tenés otro presupuesto?';
-    return 'Perfecto. Qué rango de precio manejás en USD?';
-  }
-  if (!f?.propertyType) {
-    if (wantsGuidance) return 'Si querés, con ese presupuesto normalmente conviene departamento. Te va departamento, casa o terreno?';
-    return 'Qué tipo de propiedad buscás? (departamento, casa o terreno)';
-  }
-  if (!f?.minBedrooms) return 'Y de dormitorios, cuántos mínimos necesitás?';
-  return null;
-};
-
-const recentlySentSameReply = async (contactId: number, body: string, seconds = 45): Promise<boolean> => {
-  const rows: any[] = await sequelize.query(
-    `SELECT id FROM messages
-     WHERE "contactId" = :contactId
-       AND "fromMe" = true
-       AND body = :body
-       AND "createdAt" > NOW() - make_interval(secs => :seconds)
-     LIMIT 1`,
-    { replacements: { contactId, body: String(body || '').trim(), seconds: Number(seconds) }, type: QueryTypes.SELECT }
-  );
-  return !!rows?.[0]?.id;
-};
-
-const sendAgentText = async (ticket: any, contact: any, text: string, dedupeSeconds = 45): Promise<string | null> => {
-  const clean = String(text || '').trim();
-  if (!clean) return null;
-  try {
-    const dedupeKey = buildOutboundDedupeKey(Number(ticket?.id || 0), String(contact?.number || ''), clean);
-    const reserved = await reserveOutboundDedupe(dedupeKey, Math.max(45, Number(dedupeSeconds || 45)));
-    if (!reserved) {
-      await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'outbound_suppressed_duplicate_key', payload: { body: clean.slice(0, 200), dedupeSeconds, dedupeKey } });
-      return null;
-    }
-    const isDup = await recentlySentSameReply(contact.id, clean, dedupeSeconds);
-    if (isDup) {
-      await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'outbound_suppressed_duplicate', payload: { body: clean.slice(0, 200), dedupeSeconds } });
-      return null;
-    }
-  } catch (dedupeErr: any) {
-    console.error("[wa-hardening] outbound dedupe infra failed; fail-open", { ticketId: ticket?.id, error: dedupeErr?.message || String(dedupeErr) });
-  }
-
-  let sentId: string | null = null;
-  try {
-    sentId = await sendCloudText(String(contact.number), clean, ticket.companyId);
-  } catch (err: any) {
-    try {
-      await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'outbound_cloud_send_error', payload: { message: String(err?.message || err || 'unknown') } });
-    } catch {}
-  }
-  if (sentId) return sentId;
-
-  // Fallback interno para continuidad conversacional/test cuando Cloud rechaza el destino.
-  // No marca entrega real; el mensaje queda con ack=0 en los callsites.
-  try {
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'outbound_local_echo_fallback', payload: { body: clean.slice(0, 200) } });
-  } catch {}
-  return 'local-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+  return "Entendido 👍 ¿Querés que te ayude con precios, agenda de cita, o soporte?";
 };
 
 const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: any; contact: any; incomingText: string }) => {
-  const text = String(incomingText || '').trim();
-  if (!text) return;
-  if ((ticket as any).human_override || (ticket as any).bot_enabled === false) return;
-
-  const lowRaw = text.toLowerCase();
-  if (isLowSignalMessage(lowRaw)) {
-    const [lastOutbound]: any = await sequelize.query(
-      `SELECT body, "createdAt" FROM messages
-       WHERE "ticketId" = :ticketId AND "fromMe" = true
-       ORDER BY "createdAt" DESC LIMIT 1`,
-      { replacements: { ticketId: ticket.id }, type: QueryTypes.SELECT }
-    );
-
-    const lastBody = String(lastOutbound?.body || '').trim();
-    const askedQuestionRecently = /\?$/.test(lastBody) || /quer[eé]s|te interesa|te parece|confirm[aá]s|cu[aá]l|cu[aá]nto|d[oó]nde|cuando/i.test(lastBody);
-
-    if (!askedQuestionRecently) {
-      await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'inbound_low_signal_no_reply', payload: { body: text.slice(0, 120) } });
-      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: 'general', decisionKey: 'no_reply_low_signal', reason: 'Low signal inbound', guardrailAction: 'silent', responsePreview: '' });
-      return;
-    }
-
-    const nudge = 'Perfecto 🙌 En base a lo que me dijiste, ¿querés que te pase ahora 3 opciones concretas con link?';
-    const nudgeId = await sendAgentText(ticket, contact, nudge, 90);
-    if (nudgeId) {
-      const out = await Message.create({ id: nudgeId, providerMessageId: nudgeId, body: nudge, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-      await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: nudge, updatedAt: new Date() } as any);
-      emitOutgoing(ticket, contact, out);
-    }
-
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: 'general', decisionKey: 'reply_low_signal_after_question', reason: 'Low signal but pending question from bot', guardrailAction: 'nudge', responsePreview: nudge.slice(0, 180) });
-    return;
-  }
-  const newDiscoveryStart = /(hola|buenas|buen dia|buenas tardes|buenas noches)/.test(lowRaw) && /(comprar|inver|busco)/.test(lowRaw);
-
-  const recentInbound: any[] = await sequelize.query(
-    `SELECT body FROM messages
-     WHERE "contactId" = :contactId AND "fromMe" = false
-       AND "createdAt" > NOW() - INTERVAL '45 seconds'
-     ORDER BY "createdAt" DESC
-     LIMIT 2`,
-    { replacements: { contactId: contact.id }, type: QueryTypes.SELECT }
-  );
-  const mergedContext = newDiscoveryStart
-    ? text
-    : [...recentInbound.map((r: any) => String(r?.body || '').trim()).filter(Boolean).reverse(), text].join(' | ').slice(0, 600);
-
-  const low = mergedContext.toLowerCase();
-  const convoKey = { companyId: ticket.companyId, contactId: contact.id, whatsappId: ticket.whatsappId };
-  let state = await loadState(convoKey);
-  if (newDiscoveryStart) {
-    state = ticketStateSchema.parse({ intent: 'buy', slots: { zone: '', propertyType: '', currency: 'USD' }, missing_slots: [], last_tool_call: null });
-  }
-
-  const plainGreeting = /(hola|buenas|buen dia|buen día|buenas tardes|buenas noches)/.test(lowRaw) && !/(comprar|busco|inver|departamento|depto|casa|lote|terreno|presupuesto|dormitorios|soporte|login|problema)/.test(lowRaw);
-  if (plainGreeting) {
-    state = ticketStateSchema.parse({ intent: '', slots: { zone: '', propertyType: '', currency: 'USD' }, missing_slots: [], last_tool_call: null });
-  }
-  const currentSlots: any = state.slots || {};
+  const text = String(incomingText || "").trim();
+  if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
+  const low = text.toLowerCase();
+  const conversationType = classifyConversation(text);
+  await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
 
   if (/humano|asesor|agente|persona/.test(low)) {
-        const transferText = 'Perfecto. Te paso con un asesor humano para continuar 🙌';
-    const msgId = await sendAgentText(ticket, contact, transferText, 120);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: transferText, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
+    await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+    const transferText = "Perfecto. Te paso con un asesor humano para continuar 🙌";
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "manual_handoff", reason: "Cliente pidió humano", guardrailAction: "handoff", responsePreview: transferText });
+    const out = await sendManagedReply({ ticket, contact, text: transferText });
     await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'handoff_human', decision: 'explicit_request' });
-    emitOutgoing(ticket, contact, out);
+    if (!out) return;
     return;
   }
 
-  if (/tasar|tasación|tasacion/.test(low)) {
-    const txt = 'Buenísimo. Para tasar tu propiedad te paso el contacto directo 🙂 Podés escribir a contacto@skygarden.com.ar o al WhatsApp +54 341 308-1048. También podés ver más info en https://www.skygarden.com.ar/.';
-    const msgId = await sendAgentText(ticket, contact, txt, 90);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: txt, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
+  if (/gracias|perfecto|listo|resuelto/.test(low) && resolvePolicies()[conversationType]?.allowAutoClose) {
+    const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "auto_close", reason: "Cierre positivo detectado", guardrailAction: "close", responsePreview: closeText });
+    const out = await sendManagedReply({ ticket, contact, text: closeText });
+    await ticket.update({ status: "closed", unreadMessages: 0, lastMessage: closeText, updatedAt: new Date() } as any);
+    await ensureArchivedTag(contact.id); await (contact as any).update({ leadStatus: "read", lastInteractionAt: new Date() } as any);
+    if (!out) return;
+    return;
+  }
+
+  const metaFormHint = await getLatestMetaLeadFormHint(ticket.companyId, String((contact as any)?.number || ""));
+  const baseReplyCore = await aiReplyFor(text, ticket.companyId, metaFormHint);
+  const contactNeedsRaw = String((contact as any)?.needs || "");
+  const isMetaFormLead = (() => {
+    const n = contactNeedsRaw.toLowerCase();
+    const h = String(metaFormHint || "").toLowerCase();
+    return n.includes("meta") || n.includes("form") || n.includes("leadgen") || n.includes("lote") || n.startsWith("{") || h.includes("form") || h.includes("lead") || h.includes("meta");
+  })();
+  const shouldInjectLeadFormContext = isMetaFormLead && /asistente de charlott/i.test(String(ticket.lastMessage || "")) && !/hola|buenas|buen d[ií]a/.test(low);
+  const leadFormIntro = shouldInjectLeadFormContext ? buildLeadFormContextIntro(contactNeedsRaw) : "";
+  const leadFormFollowup = shouldInjectLeadFormContext
+    ? buildLeadFormFollowup(contactNeedsRaw)
+    : "";
+  const baseReply = [leadFormIntro, baseReplyCore, leadFormFollowup].filter((x) => String(x || "").trim()).join(" ").trim();
+
+  if (!String(baseReply || "").trim()) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
+    return;
+  }
+  const guardrail = await applyGuardrails({ text, reply: baseReply, conversationType });
+  if (guardrail.handoff) {
+    await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+    const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "guardrail_handoff", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: txt });
+    const out = await sendManagedReply({ ticket, contact, text: txt });
     await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'intent_tasar', intent: 'tasar' });
-    emitOutgoing(ticket, contact, out);
+    if (!out) return;
     return;
   }
 
-  if (/alquiler|alquilar|renta/.test(low)) {
-    const txt = 'Por ahora estamos enfocados en compra y venta de propiedades, no en alquileres 🙂 Si querés, te puedo ayudar a buscar opciones para comprar o pasarte el contacto para tasar tu propiedad.';
-    const msgId = await sendAgentText(ticket, contact, txt, 90);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: txt, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'intent_alquiler', intent: 'alquiler' });
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  const explicitListingsAsk = /mostra|mostrame|opciones|pasame|ver\s+opciones|quiero\s+ver|busco\s+(departamento|depto|casa|lote|terreno)|comprar\s+(departamento|depto|casa|lote|terreno)|presupuesto|dormitorios/.test(lowRaw);
-  const supportIntent = /soporte|error|no funciona|problema|login|ingresar|cuenta|contrase|password|token|bug|falla/.test(lowRaw);
-  const institutionalIntent = /que\s+sabes|qu[eé]\s+sabes|quienes\s+son|qui[eé]nes\s+son|como\s+trabajan|c[oó]mo\s+trabajan|horarios|ubicaciones|zonas|barrios|servicios|empresa|ustedes/.test(lowRaw);
-
-  if ((supportIntent || institutionalIntent) && !explicitListingsAsk) {
-    const ragReply = await aiReplyFor(mergedContext, ticket.companyId, String(contact.number || ''));
-    const safeReply = String(ragReply || '').trim() || 'Gracias por tu mensaje. Contame un poco más de tu caso y te respondo con la info más precisa.';
-    const msgId = await sendAgentText(ticket, contact, safeReply, 20);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: safeReply, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: safeReply, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'rag_general_reply', intent: supportIntent ? 'support' : 'general', decision: supportIntent ? 'support_first' : 'institutional_first' });
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  const buyIntent = /comprar|compra|departamento|depto|casa|lote|terreno|inmueble|mostrar.*prop|ver.*prop/.test(low);
-  if (buyIntent) state.intent = 'buy';
-
-  const extracted = parsePropertyFiltersFromText(mergedContext);
-  const price = parsePriceFilters(mergedContext);
-
-  state.slots = {
-    ...currentSlots,
-    zone: extracted.zone || currentSlots.zone || '',
-    propertyType: extracted.propertyType || currentSlots.propertyType || '',
-    minBedrooms: extracted.minBedrooms || currentSlots.minBedrooms,
-    minPrice: price.minPrice || extracted.minPrice || currentSlots.minPrice,
-    maxPrice: price.maxPrice || extracted.maxPrice || currentSlots.maxPrice,
-    currency: price.currency || currentSlots.currency || 'USD'
-  };
-
-  const missing: string[] = [];
-  if (!state.slots.zone) missing.push('zone');
-  if (!state.slots.propertyType) missing.push('propertyType');
-  if (!state.slots.minPrice && !state.slots.maxPrice) missing.push('price');
-  if (!state.slots.minBedrooms) missing.push('minBedrooms');
-  state.missing_slots = missing;
-
-  await saveState(convoKey, state);
-
-  if (!buyIntent && (state.intent || '') !== 'buy') {
-    const reply = String(await aiReplyFor(mergedContext, ticket.companyId, String(contact.number || '')) || '').trim()
-      || 'Dale, te ayudo con eso. Contame un poco más y te respondo con precisión.';
-    const outId = await sendAgentText(ticket, contact, reply, 90);
-    if (!outId) return;
-    const out = await Message.create({ id: outId, providerMessageId: outId, body: reply, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'rag_general_reply', intent: 'general', decision: 'non_buy_default_rag' });
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  const qMissing = nextMissingFilterQuestion(state.slots, mergedContext);
-  const explicitOptionsAsk = /mostra|mostrame|opciones|propiedades|pasame|ver\s+opciones|links?|concretas?|parecid|links\s+ya/.test(lowRaw);
-  const noFilterPreference = /sin\s+filtro|sin\s+filtrar|cualquiera|como\s+venga|mostrame\s+lo\s+que\s+haya|lo\s+que\s+tengas|no\s+quiero\s+filtrar|sin\s+especificar|sin\s+especificaciones?|da\s+igual/.test(lowRaw);
-  const canSearchNow = !!state.slots?.zone && !!state.slots?.propertyType && (!!state.slots?.maxPrice || !!state.slots?.minPrice) && !!state.slots?.minBedrooms;
-  const canSearchRelaxed = (explicitOptionsAsk || noFilterPreference) && (((state.intent || '') === 'buy') || !!state.slots?.zone || /rosario|funes|roldan|pichincha|centro|zona\s+norte/.test(low) || noFilterPreference) && (!!state.slots?.maxPrice || !!state.slots?.minPrice || /\d{2,}/.test(low) || noFilterPreference || (state.intent || '') === 'buy');
-  if (qMissing && !explicitOptionsAsk && !noFilterPreference) {
-    const msgId = await sendAgentText(ticket, contact, qMissing, 8);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: qMissing, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: qMissing, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'slot_collection', intent: 'buy', slots: state.slots, decision: 'ask_missing' });
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  if (canSearchNow && !explicitOptionsAsk) {
-    const confirm = 'Perfecto, ya tengo lo principal 🙌 ¿Querés que te pase ahora 3 opciones concretas con link?';
-    const msgId = await sendAgentText(ticket, contact, confirm, 15);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: confirm, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    state.last_tool_call = { ...(state.last_tool_call || {}), stage: 'ready_to_search', at: new Date().toISOString() };
-    await saveState(convoKey, state);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: confirm, updatedAt: new Date() } as any);
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  if (!canSearchNow && !canSearchRelaxed) {
-    const guard = 'Contame zona, tipo de propiedad, dormitorios y presupuesto para buscarte opciones precisas.';
-    const msgId = await sendAgentText(ticket, contact, guard, 8);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: guard, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: guard, updatedAt: new Date() } as any);
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  let baseFilters: any = buildTokkoFilters(state);
-  if (!canSearchNow && canSearchRelaxed) {
-    const inferred = await inferTokkoFilters(mergedContext, ticket.companyId, String(contact.number || ''));
-    baseFilters = {
-      ...baseFilters,
-      ...inferred,
-      operationType: inferred.operationType || 'Venta',
-      location: inferred.location || baseFilters.location,
-      propertyType: inferred.propertyType || baseFilters.propertyType,
-      minPrice: inferred.minPrice || baseFilters.minPrice,
-      maxPrice: inferred.maxPrice || baseFilters.maxPrice,
-      minBedrooms: baseFilters.minBedrooms || state.slots?.minBedrooms || undefined,
-      limit: 3
-    };
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'tokko_search_relaxed_entry', intent: 'buy', slots: state.slots, decision: 'explicit_options_relaxed' });
-  }
-  const lastCall: any = state.last_tool_call || {};
-  const sameFilters = JSON.stringify(lastCall.filters || {}) === JSON.stringify(baseFilters);
-  const lastAt = lastCall?.at ? new Date(lastCall.at).getTime() : 0;
-  const veryRecent = lastAt && (Date.now() - lastAt < 120000);
-  if (lastCall?.tool === 'tokko' && sameFilters && veryRecent) {
-    const txt = 'Ya te pasé opciones recién 👀 Si querés, te muestro otras cambiando zona, precio o dormitorios.';
-    const msgId = await sendAgentText(ticket, contact, txt, 60);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: txt, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  const strategies = [
-    { name: 'strict', filters: { ...baseFilters } },
-    { name: 'relax_bedrooms', filters: { ...baseFilters, minBedrooms: undefined } },
-    { name: 'relax_price', filters: { ...baseFilters, minPrice: undefined, maxPrice: undefined } },
-    { name: 'relax_type', filters: { ...baseFilters, propertyType: undefined } }
-  ];
-
-  let results: any[] = [];
-  let usedStrategy = 'strict';
-  for (const st of strategies) {
-    const res: any = await searchTokkoProperties(st.filters);
-    const arr = Array.isArray(res?.results) ? res.results : [];
-    if (arr.length) {
-      usedStrategy = st.name;
-      results = arr;
-      break;
-    }
-  }
-
-  if (!results.length) {
-    const txt = 'No encontré propiedades con esos filtros exactos. Si querés, ampliamos zona o rango de precio y sigo buscando.';
-    const msgId = await sendAgentText(ticket, contact, txt, 90);
-    if (!msgId) return;
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: txt, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: txt, updatedAt: new Date() } as any);
-    await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'tokko_search', intent: 'buy', slots: state.slots, toolCalled: 'tokko', queryText: JSON.stringify(baseFilters), resultCount: 0, decision: 'ask_relax' });
-    emitOutgoing(ticket, contact, out);
-    return;
-  }
-
-  if (usedStrategy !== 'strict') {
-    const note = usedStrategy === 'relax_bedrooms'
-      ? 'Te muestro opciones relajando dormitorios mínimos para darte más alternativas.'
-      : usedStrategy === 'relax_price'
-      ? 'Te muestro opciones relajando rango de precio para ampliar resultados.'
-      : 'Te muestro opciones relajando tipo de propiedad para ampliar resultados.';
-    const noteId = await sendAgentText(ticket, contact, note, 120);
-    const noteOut = await Message.create({ id: noteId, providerMessageId: noteId, body: note, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    emitOutgoing(ticket, contact, noteOut);
-  }
-
-  const top3 = results.slice(0, 3);
-  for (const [idx, r] of top3.entries()) {
-    const line = `${idx + 1}/3 · ${r?.title || 'Propiedad'}
-${r?.currency || '$'} ${fmtPrice(r?.price)}${r?.location ? ` · ${r.location}` : ''}${r?.url ? `
-${r.url}` : ''}`.slice(0, 1000);
-    const msgId = await sendCloudText(String(contact.number), line, ticket.companyId);
-    const out = await Message.create({ id: msgId, providerMessageId: msgId, body: line, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    emitOutgoing(ticket, contact, out);
-  }
-
-  state.last_tool_call = { tool: 'tokko', filters: baseFilters, strategy: usedStrategy, resultCount: top3.length, at: new Date().toISOString() };
-  state.intent = 'buy';
-  await saveState(convoKey, state);
-  await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: 'Opciones de propiedades enviadas', updatedAt: new Date() } as any);
-  await logTurn({ companyId: ticket.companyId, ticketId: ticket.id, contactId: contact.id, event: 'tokko_search', intent: 'buy', slots: state.slots, toolCalled: 'tokko', queryText: JSON.stringify(baseFilters), resultCount: top3.length, decision: usedStrategy });
-};
-
-
-export const recordInboundSignatureInvalidBlocked = (context?: Record<string, unknown>) => {
-  console.warn("[wa-hardening] invalid webhook signature blocked", context || {});
+  const reply = guardrail.finalReply || baseReply;
+  await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "reply", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: reply.slice(0, 240) });
+  const out = await sendManagedReply({ ticket, contact, text: reply });
+  await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
+  if (!out) return;
+  await autoSummaryAndScore(ticket.id, contact);
 };
 
 export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) => {
   const whatsapp = await resolveWhatsapp();
-  if (!whatsapp) return { processed: 0, ignored: 0, statusUpdated: 0, reason: "no_whatsapp_connection" };
+  if (!whatsapp) return { processed: 0, ignored: 0, reason: "no_whatsapp_connection" };
+
+  const envelopeMessages = (payload.entry || []).reduce((acc, entry) => {
+    return acc + (entry.changes || []).reduce((inner, change) => inner + (change.value?.messages?.length || 0), 0);
+  }, 0);
+  if (envelopeMessages > MAX_INBOUND_MESSAGES_PER_PAYLOAD) {
+    bumpHardeningMetric("inbound.payload_volume_blocked");
+    pushHardeningSignal("inbound_payload_volume_blocked", 2, { envelopeMessages, maxAllowed: MAX_INBOUND_MESSAGES_PER_PAYLOAD });
+    console.warn("[wa-cloud][inbound] payload volume blocked", { envelopeMessages, maxAllowed: MAX_INBOUND_MESSAGES_PER_PAYLOAD });
+    return { processed: 0, ignored: envelopeMessages, reason: "payload_volume_blocked" };
+  }
 
   let processed = 0;
   let ignored = 0;
-  let statusUpdated = 0;
+  let replayBlockedInPayload = 0;
+  const maxReplayBlockedPerPayload = resolveInboundReplayMaxBlocksPerPayload();
 
-  const toAck = (status?: string) => {
-    const s = String(status || "").toLowerCase();
-    if (s === "sent") return 1;
-    if (s === "delivered") return 2;
-    if (s === "read") return 3;
-    if (s === "failed") return 0;
-    return null;
-  };
-
-  for (const entry of payload.entry || []) {
+  outer: for (const entry of payload.entry || []) {
     for (const change of entry.changes || []) {
-      const value: any = change?.value || {};
-
-      const inboundMessages = Array.isArray(value.messages) ? value.messages : [];
-      if (inboundMessages.length > 200) {
-        console.warn("[wa-hardening] payload volume blocked", { inboundMessages: inboundMessages.length });
-        ignored += inboundMessages.length;
-        continue;
-      }
-
-      for (let incomingIndex = 0; incomingIndex < inboundMessages.length; incomingIndex += 1) {
-        const incoming = inboundMessages[incomingIndex];
+      for (const incoming of change.value?.messages || []) {
         const from = String(incoming.from || "").replace(/\D/g, "");
         const body = incoming.text?.body || "";
         const externalMsgId = incoming.id || "";
         const timestamp = Number(incoming.timestamp || 0);
+        const type = String(incoming.type || "chat");
+        const hasTextBody = type === "text" ? Boolean(String(body || "").trim()) : true;
+        const validSender = isValidInboundSender(from);
+        const validMessageId = isValidInboundMessageId(externalMsgId);
+        const validType = isValidInboundType(type);
+        const validTextLength = isInboundTextLengthAcceptable(body);
 
-        if (!from || !externalMsgId) {
+        if (!from || !externalMsgId || !validSender || !validMessageId || !validType || !isWebhookTimestampAcceptable(incoming.timestamp) || !hasTextBody || !validTextLength) {
+          if (!from || !externalMsgId) {
+            bumpHardeningMetric("inbound.invalid_envelope_blocked");
+            console.warn("[wa-cloud][inbound] invalid envelope blocked", { hasFrom: Boolean(from), hasId: Boolean(externalMsgId) });
+          } else if (!validSender) {
+            bumpHardeningMetric("inbound.invalid_sender_blocked");
+            console.warn("[wa-cloud][inbound] invalid sender blocked", { externalMsgId, fromLength: String(from || "").length });
+          } else if (!validMessageId) {
+            bumpHardeningMetric("inbound.invalid_message_id_blocked");
+            console.warn("[wa-cloud][inbound] invalid message id blocked", { externalMsgIdLength: String(externalMsgId || "").length });
+          } else if (!validType) {
+            bumpHardeningMetric("inbound.invalid_type_blocked");
+            console.warn("[wa-cloud][inbound] unsupported type blocked", { externalMsgId, type });
+          } else if (!isWebhookTimestampAcceptable(incoming.timestamp)) {
+            bumpHardeningMetric("inbound.stale_or_future_blocked");
+            console.warn("[wa-cloud][inbound] stale/future webhook blocked", { externalMsgId, timestamp: incoming.timestamp });
+          } else if (!hasTextBody) {
+            bumpHardeningMetric("inbound.empty_text_body_blocked");
+            console.warn("[wa-cloud][inbound] text message without body blocked", { externalMsgId });
+          } else {
+            bumpHardeningMetric("inbound.oversized_text_blocked");
+            console.warn("[wa-cloud][inbound] oversized text blocked", { externalMsgId, size: String(body || "").length });
+          }
           ignored += 1;
           continue;
         }
 
+        const replayKey = buildInboundReplayKey(externalMsgId, from);
+        const accepted = await reserveInboundReplay(replayKey, resolveInboundReplayTtlSeconds());
+        if (!accepted) {
+          replayBlockedInPayload += 1;
+          bumpHardeningMetric("inbound.replay_blocked");
+          recordInboundDuplicate();
+          console.warn("[wa-cloud][inbound] replay blocked", { externalMsgId, from });
+          pushHardeningSignal("inbound_replay_blocked", 10, { from });
+          ignored += 1;
+
+          if (replayBlockedInPayload >= maxReplayBlockedPerPayload) {
+            const remaining = Math.max(0, envelopeMessages - processed - ignored);
+            if (remaining > 0) {
+              ignored += remaining;
+            }
+            bumpHardeningMetric("inbound.replay_payload_dropped", 1);
+            bumpHardeningMetric("inbound.replay_payload_messages_dropped", remaining);
+            pushHardeningSignal("inbound_replay_payload_dropped", 2, {
+              replayBlockedInPayload,
+              maxReplayBlocked: maxReplayBlockedPerPayload,
+              droppedMessages: remaining,
+              envelopeMessages
+            });
+            console.warn("[wa-cloud][inbound] payload dropped after replay flood", {
+              replayBlockedInPayload,
+              maxReplayBlocked: maxReplayBlockedPerPayload,
+              droppedMessages: remaining,
+              envelopeMessages
+            });
+            break outer;
+          }
+          continue;
+        }
+
         try {
-          const [dupProvider]: any = await sequelize.query(
-            `SELECT id FROM messages WHERE provider_message_id = :providerMessageId LIMIT 1`,
-            { replacements: { providerMessageId: externalMsgId }, type: QueryTypes.SELECT }
-          );
-          if (dupProvider?.id) {
+          const exists = await Message.findByPk(externalMsgId);
+          if (exists) {
+            bumpHardeningMetric("inbound.duplicate_message_id_blocked");
             recordInboundDuplicate();
             ignored += 1;
             continue;
           }
-
           const contact = await getOrCreateContact(from, whatsapp.companyId);
           const ticket = await getOrCreateTicket(contact.id, whatsapp.id, whatsapp.companyId);
-
-          const inboundBody = String(body || '').trim();
-          if (inboundBody) {
-            const recentSameInbound: any[] = await sequelize.query(
-              `SELECT id FROM messages
-               WHERE "contactId" = :contactId
-                 AND "fromMe" = false
-                 AND body = :body
-                 AND "createdAt" > NOW() - INTERVAL '20 seconds'
-               ORDER BY "createdAt" DESC
-               LIMIT 1`,
-              { replacements: { contactId: contact.id, body: inboundBody }, type: QueryTypes.SELECT }
-            );
-            if (recentSameInbound?.[0]?.id) {
-              recordInboundDuplicate();
-              await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'inbound_suppressed_recent_duplicate', payload: { body: inboundBody.slice(0, 200) } });
-              ignored += 1;
-              continue;
-            }
-          }
-
-          await withConversationLock(contact.id, async () => {
-            const [dupAgain]: any = await sequelize.query(
-              `SELECT id FROM messages WHERE provider_message_id = :providerMessageId LIMIT 1`,
-              { replacements: { providerMessageId: externalMsgId }, type: QueryTypes.SELECT }
-            );
-            if (dupAgain?.id) {
-              recordInboundDuplicate();
-              ignored += 1;
-              return;
-            }
-
-            const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
-            const message = await Message.create({
-              id: externalMsgId || crypto.randomUUID(),
-              providerMessageId: externalMsgId || null,
-              body,
-              contactId: contact.id,
-              ticketId: ticket.id,
-              fromMe: false,
-              read: false,
-              ack: 0,
-              mediaType: incoming.type || "chat",
-              createdAt,
-              updatedAt: createdAt
-            } as any);
-
-            await ticket.update({
-              lastMessage: body,
-              unreadMessages: (ticket.unreadMessages || 0) + 1,
-              updatedAt: new Date()
-            } as any);
-
-            try { await (contact as any).update({ leadStatus: "unread", lastInteractionAt: new Date() } as any); } catch {}
-
-            recordInboundMessage({ fromMe: false, createdAt });
-            const io = getIO();
-            io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message, conversationId: contact.id, contact });
-            io.to("notification").emit("notification", { type: "new-message", conversationId: contact.id, contactId: contact.id, contactName: contact.name });
-
-            await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'inbound_received', payload: { body: String(body || '').slice(0, 300), type: String(incoming?.type || 'text') } });
-
-            const supportFastlane = /soporte|error|no\s+me\s+funciona|no\s+funciona|problema|login|ingresar|cuenta|contrase|password|token|bug|falla/.test(String(body || '').toLowerCase());
-            if (supportFastlane) {
-              const supportReply = 'Gracias por avisar 🙌 Te ayudo con soporte. Contame qué error te aparece (o mandame captura) y lo resolvemos rápido.';
-              const outId = await sendAgentText(ticket, contact, supportReply, 45);
-              if (outId) {
-                const out = await Message.create({ id: outId, providerMessageId: outId, body: supportReply, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-                await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: supportReply, updatedAt: new Date() } as any);
-                emitOutgoing(ticket, contact, out);
-              }
-              await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'support_fastlane_reply', payload: { body: String(body || '').slice(0, 120) } });
-              processed += 1;
-              return;
-            }
-
-            if (String(incoming?.type || '').toLowerCase() === 'audio') {
-              const audioReply = 'Por ahora no puedo procesar audios 🎧. Si querés, escribime tu consulta por texto y te respondo al instante.';
-              const outId = await sendAgentText(ticket, contact, audioReply, 120);
-              if (outId) {
-                const out = await Message.create({ id: outId, providerMessageId: outId, body: audioReply, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-                await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: audioReply, updatedAt: new Date() } as any);
-                emitOutgoing(ticket, contact, out);
-              }
-              await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'inbound_audio_unsupported', payload: { from } });
-              processed += 1;
-              return;
-            }
-
-            try {
-              const currentLow = String(body || '').toLowerCase();
-              const supportUrgent = /soporte|error|no funciona|problema|login|ingresar|cuenta|contrase|password|token|bug|falla/.test(currentLow);
-              const hasNewerFromSameSenderInPayload = inboundMessages.slice(incomingIndex + 1).some((m: any) => String(m?.from || "").replace(/\D/g, "") === from && Boolean(String(m?.text?.body || "").trim()));
-              if (hasNewerFromSameSenderInPayload && !supportUrgent) {
-                await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'agent_deferred_payload_batch', payload: { reason: 'newer_same_sender_message_in_payload' } });
-              } else {
-                await sleep(1200);
-                const [latestInbound]: any = await sequelize.query(
-                  `SELECT provider_message_id
-                   FROM messages
-                   WHERE "contactId" = :contactId
-                     AND "fromMe" = false
-                     AND "createdAt" > NOW() - INTERVAL '15 seconds'
-                   ORDER BY "createdAt" DESC
-                   LIMIT 1`,
-                  { replacements: { contactId: contact.id }, type: QueryTypes.SELECT }
-                );
-                const latestProviderId = String(latestInbound?.provider_message_id || '');
-                const currentProviderId = String(externalMsgId || '');
-                if (latestProviderId && currentProviderId && latestProviderId !== currentProviderId && !supportUrgent) {
-                  await logTurn({ companyId: whatsapp.companyId, ticketId: ticket.id, contactId: contact.id, providerMessageId: externalMsgId, event: 'agent_deferred_recent_newer_message', payload: { latestProviderId } });
-                } else {
-                  await runAutonomousAgent({ ticket, contact, incomingText: body });
-                }
-              }
-            } catch (agentErr: any) {
-              await logIntegrationError({ companyId: whatsapp.companyId, source: 'whatsapp', severity: 'high', errorCode: 'AUTONOMOUS_AGENT_ERROR', message: String(agentErr?.message || agentErr || 'agent error'), suggestion: 'Revisar guardrails y credenciales de WhatsApp Cloud', payload: { from, ticketId: ticket.id, body: String(body || '').slice(0, 300) } });
-              console.error("[wa-cloud][agent] error:", agentErr?.message || agentErr);
-                try {
-                  const fallback = "Perdon, tuve un error procesando tu mensaje. ¿Me lo repetís en una sola línea para responderte mejor?";
-                  const fbId = await sendCloudText(String(contact.number), fallback, whatsapp.companyId);
-                  await Message.create({ id: fbId, providerMessageId: fbId, body: fallback, contactId: contact.id, ticketId: ticket.id, fromMe: true, read: true, ack: 1, mediaType: "chat" } as any);
-                } catch {}
-            }
-
-            processed += 1;
-          });
-        } catch (error: any) {
-          await logIntegrationError({
-            companyId: whatsapp.companyId,
-            source: 'whatsapp',
-            severity: 'high',
-            errorCode: 'INBOUND_PROCESSING_ERROR',
-            message: String(error?.message || error || 'inbound processing error'),
-            suggestion: 'Validar formato payload entrante y estado de tablas de mensajes/tickets',
-            payload: { from, externalMsgId, type: incoming.type || 'chat' }
-          });
+          const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
+          const message = await Message.create({ id: externalMsgId || crypto.randomUUID(), body, contactId: contact.id, ticketId: ticket.id, fromMe: false, read: false, ack: 0, mediaType: incoming.type || "chat", createdAt, updatedAt: createdAt } as any);
+          await ticket.update({ lastMessage: body, unreadMessages: (ticket.unreadMessages || 0) + 1, updatedAt: new Date() } as any);
+          try { await (contact as any).update({ leadStatus: "unread", lastInteractionAt: new Date() } as any); } catch {}
+          recordInboundMessage({ fromMe: false, createdAt });
+          const io = getIO(); io.to(`ticket-${ticket.id}`).emit("appMessage", { action: "create", message, ticket, contact }); io.to("notification").emit("notification", { type: "new-message", ticketId: ticket.id, contactName: contact.name });
+          try { await runAutonomousAgent({ ticket, contact, incomingText: body }); } catch (agentErr: any) { console.error("[wa-cloud][agent] error:", agentErr?.message || agentErr); }
+          bumpHardeningMetric("inbound.processed_ok");
+          processed += 1;
+        } catch (error) {
+          bumpHardeningMetric("inbound.processing_error");
+          await releaseInboundReplay(replayKey);
           recordInboundError(error);
+          pushHardeningSignal("inbound_processing_error", 4, {});
           console.error("[wa-cloud] error processing inbound:", error);
-          ignored += 1;
-        }
-      }
-
-      for (const st of value.statuses || []) {
-        const msgId = String(st?.id || "");
-        if (!msgId) {
-          ignored += 1;
-          continue;
-        }
-
-        try {
-          const msg: any = await Message.findByPk(msgId);
-          if (!msg) {
-            ignored += 1;
-            continue;
-          }
-
-          const ack = toAck(st?.status);
-          const update: any = { updatedAt: new Date() };
-          if (ack !== null) update.ack = ack;
-          if (String(st?.status || "").toLowerCase() === "read") update.read = true;
-
-          await msg.update(update);
-          statusUpdated += 1;
-        } catch (error: any) {
-          await logIntegrationError({
-            companyId: whatsapp.companyId,
-            source: 'whatsapp',
-            severity: 'medium',
-            errorCode: 'STATUS_PROCESSING_ERROR',
-            message: String(error?.message || error || 'status processing error'),
-            suggestion: 'Revisar mapeo de estados webhook y existencia de Message.id',
-            payload: { messageId: msgId, status: st?.status, errors: st?.errors || [] }
-          });
           ignored += 1;
         }
       }
     }
   }
 
-  if (processed > 0 || statusUpdated > 0) {
-    console.log(`[wa-cloud] webhook processed messages=${processed} statuses=${statusUpdated} ignored=${ignored}`);
-  }
-
-  return { processed, ignored, statusUpdated };
+  return { processed, ignored };
 };

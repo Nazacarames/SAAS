@@ -2,15 +2,16 @@ import { Router } from "express";
 import integrationAuth from "../../middleware/integrationAuth";
 import CreateLeadService from "../../services/IntegrationServices/CreateLeadService";
 import SendOutboundTextService from "../../services/IntegrationServices/SendOutboundTextService";
+import featureGate from "../../middleware/featureGate";
+import { incrementUsage } from "../../services/BillingServices/BillingService";
+import { getRuntimeSettings } from "../../services/SettingsServices/RuntimeSettingsService";
 
 const integrationRoutes = Router();
 
-// All integration endpoints are protected by x-api-key
 integrationRoutes.use(integrationAuth);
 
-// Create lead from external platform
-integrationRoutes.post("/leads", async (req: any, res) => {
-  const companyId = 1; // single-tenant MVP
+integrationRoutes.post("/leads", featureGate("integrations_api"), async (req: any, res) => {
+  const companyId = Number(req.integrationCompanyId);
 
   const {
     whatsappId,
@@ -33,24 +34,34 @@ integrationRoutes.post("/leads", async (req: any, res) => {
     metadata
   });
 
+  await incrementUsage(companyId, "integrations.leads_created", 1);
   return res.status(201).json(result);
 });
 
-// Send message (outbound) from external platform
-integrationRoutes.post("/messages", async (req: any, res) => {
-  const companyId = 1; // single-tenant MVP
+integrationRoutes.post("/messages", featureGate("integrations_api"), async (req: any, res) => {
+  const companyId = Number(req.integrationCompanyId);
 
-  const { whatsappId, to, text, contactName } = req.body || {};
+  const { whatsappId, to, text, contactName, idempotencyKey } = req.body || {};
+  const idempotencyFromHeader = String(req.headers?.["x-idempotency-key"] || "").trim();
+  const effectiveIdempotencyKey = String(idempotencyFromHeader || idempotencyKey || "").trim();
+
+  const settings = getRuntimeSettings() as any;
+  const retryRequiresIdempotency = Boolean(settings?.waOutboundRetryRequireIdempotencyKey);
+  if (retryRequiresIdempotency && !effectiveIdempotencyKey) {
+    return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required" });
+  }
 
   const result = await SendOutboundTextService({
     companyId,
     whatsappId,
     to,
     text,
-    contactName
-  });
+    contactName,
+    idempotencyKey: effectiveIdempotencyKey || undefined
+  } as any);
 
-  return res.status(201).json(result);
+  await incrementUsage(companyId, "integrations.messages_sent", 1);
+  return res.status(201).json({ ...result, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) });
 });
 
 export default integrationRoutes;

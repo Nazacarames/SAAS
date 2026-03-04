@@ -18,7 +18,8 @@ import {
   Stack,
   Chip,
   MenuItem,
-  Grid
+  Grid,
+  LinearProgress
 } from '@mui/material';
 import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon } from '@mui/icons-material';
 import { useEffect, useMemo, useState } from 'react';
@@ -89,7 +90,6 @@ const Leads = () => {
     }
   };
 
-
   const fetchUsers = async () => {
     try {
       const { data } = await api.get('/users');
@@ -99,6 +99,7 @@ const Leads = () => {
       setUsers([]);
     }
   };
+
   useEffect(() => {
     fetchLeads();
     fetchUsers();
@@ -190,25 +191,25 @@ const Leads = () => {
 
   return (
     <Box>
-      <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb: 1 }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent='space-between' alignItems={{ xs: 'flex-start', md: 'center' }} sx={{ mb: 2, gap: 1 }}>
         <Box>
           <Typography variant='h4'>Leads</Typography>
-          <Typography variant='body2' color='text.secondary'>Gestión comercial de clientes potenciales.</Typography>
+          <Typography variant='body2' color='text.secondary'>Pipeline comercial con asignación y scoring.</Typography>
         </Box>
-        <Button variant='contained' startIcon={<AddIcon />} onClick={openCreate}>Nuevo Lead</Button>
+        <Button variant='contained' startIcon={<AddIcon />} onClick={openCreate}>Nuevo lead</Button>
       </Stack>
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Total</Typography><Typography variant='h5'>{stats.total}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Nuevos</Typography><Typography variant='h5'>{stats.nuevos}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Esperando</Typography><Typography variant='h5'>{stats.esperando}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Calientes (score ≥ 70)</Typography><Typography variant='h5'>{stats.calientes}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Total</Typography><Typography variant='h5'>{stats.total}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Nuevos</Typography><Typography variant='h5'>{stats.nuevos}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Esperando</Typography><Typography variant='h5'>{stats.esperando}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Calientes (score ≥ 70)</Typography><Typography variant='h5'>{stats.calientes}</Typography></Paper></Grid>
       </Grid>
 
       <Paper sx={{ p: 2, mb: 2 }}>
-        <Stack direction='row' spacing={1.5}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
           <TextField fullWidth label='Buscar por nombre, número, email o fuente' value={search} onChange={(e) => setSearch(e.target.value)} />
-          <TextField select label='Estado' value={filterStatus} onChange={(e) => setFilterStatus(e.target.value as any)} sx={{ minWidth: 170 }}>
+          <TextField select label='Estado' value={filterStatus} onChange={(e) => setFilterStatus(e.target.value as any)} sx={{ minWidth: 180 }}>
             <MenuItem value='all'>Todos</MenuItem>
             <MenuItem value='unread'>Nuevo</MenuItem>
             <MenuItem value='waiting'>Esperando</MenuItem>
@@ -218,6 +219,7 @@ const Leads = () => {
       </Paper>
 
       <Paper>
+        {loading && <LinearProgress />}
         <TableContainer>
           <Table>
             <TableHead>
@@ -227,23 +229,22 @@ const Leads = () => {
                 <TableCell>Estado</TableCell>
                 <TableCell>Score</TableCell>
                 <TableCell>Fuente</TableCell>
-                <TableCell>Asignado a</TableCell>
+                <TableCell>Asignado</TableCell>
                 <TableCell>Actualizado</TableCell>
                 <TableCell align='right'>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {loading ? (
-                <TableRow><TableCell colSpan={8} align='center'>Cargando...</TableCell></TableRow>
-              ) : filtered.length === 0 ? (
+              {!loading && filtered.length === 0 ? (
                 <TableRow><TableCell colSpan={8} align='center'>Sin leads</TableCell></TableRow>
               ) : (
                 filtered.map((l) => {
                   const st = (l.leadStatus || 'unread') as LeadStatus;
+                  const score = Number(l.lead_score || 0);
                   return (
                     <TableRow key={l.id} hover>
                       <TableCell>
-                        <Typography variant='body2' sx={{ fontWeight: 600 }}>{l.name}</Typography>
+                        <Typography variant='body2' sx={{ fontWeight: 700 }}>{l.name}</Typography>
                         <Typography variant='caption' color='text.secondary'>{l.business_type || '-'}</Typography>
                       </TableCell>
                       <TableCell>
@@ -251,7 +252,12 @@ const Leads = () => {
                         <Typography variant='caption' color='text.secondary'>{l.email || '-'}</Typography>
                       </TableCell>
                       <TableCell><Chip size='small' color={statusColor[st]} label={statusLabel[st]} /></TableCell>
-                      <TableCell>{Number(l.lead_score || 0)}%</TableCell>
+                      <TableCell>
+                        <Stack direction='row' spacing={0.8} alignItems='center'>
+                          <Box sx={{ width: 80 }}><LinearProgress variant='determinate' value={Math.max(0, Math.min(100, score))} sx={{ height: 8, borderRadius: 8 }} /></Box>
+                          <Typography variant='caption'>{score}%</Typography>
+                        </Stack>
+                      </TableCell>
                       <TableCell>{l.source || '-'}</TableCell>
                       <TableCell>{l.assignedUser?.name || 'Sin asignar'}</TableCell>
                       <TableCell>{new Date(l.updatedAt).toLocaleString()}</TableCell>

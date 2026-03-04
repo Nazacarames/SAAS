@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Typography, Box, Grid, Paper, Card, CardContent } from '@mui/material';
+import { useEffect, useMemo, useState } from 'react';
+import { Typography, Box, Grid, Paper, Card, CardContent, Stack, Chip, LinearProgress } from '@mui/material';
 import {
   Chat as ChatIcon,
   Contacts as ContactsIcon,
   WhatsApp as WhatsAppIcon,
   CheckCircle as CheckCircleIcon,
-  AccountTree as AccountTreeIcon
+  AccountTree as AccountTreeIcon,
+  TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
 import api from '../../services/api';
 
@@ -28,7 +29,7 @@ const Dashboard = () => {
       setConnections(Array.isArray(w.data) ? w.data : []);
       setFunnel(f.data || { nuevo: 0, contactado: 0, calificado: 0, interesado: 0 });
     } catch {
-      // silent dashboard fallback
+      // silent fallback
     }
   };
 
@@ -47,39 +48,48 @@ const Dashboard = () => {
   }).length;
 
   const stats = [
-    { title: 'Tickets Abiertos', value: String(openTickets), icon: <ChatIcon fontSize='large' />, color: '#3b82f6' },
-    { title: 'Contactos', value: String(contacts.length), icon: <ContactsIcon fontSize='large' />, color: '#8b5cf6' },
-    { title: 'WhatsApp', value: String(connections.length), icon: <WhatsAppIcon fontSize='large' />, color: '#10b981' },
-    { title: 'Resueltos Hoy', value: String(closedToday), icon: <CheckCircleIcon fontSize='large' />, color: '#f59e0b' }
+    { title: 'Tickets abiertos', value: String(openTickets), icon: <ChatIcon />, color: '#5BB2FF' },
+    { title: 'Contactos', value: String(contacts.length), icon: <ContactsIcon />, color: '#8B7CFF' },
+    { title: 'Canales WhatsApp', value: String(connections.length), icon: <WhatsAppIcon />, color: '#22C55E' },
+    { title: 'Resueltos hoy', value: String(closedToday), icon: <CheckCircleIcon />, color: '#F59E0B' }
   ];
 
   const funnelCards = [
-    { title: 'Funnel · Nuevo', value: funnel.nuevo, color: '#64748b' },
-    { title: 'Funnel · Contactado', value: funnel.contactado, color: '#0ea5e9' },
-    { title: 'Funnel · Calificado', value: funnel.calificado, color: '#a855f7' },
-    { title: 'Funnel · Interesado', value: funnel.interesado, color: '#22c55e' }
+    { title: 'Nuevo', value: funnel.nuevo, color: '#7D8CA8' },
+    { title: 'Contactado', value: funnel.contactado, color: '#5BB2FF' },
+    { title: 'Calificado', value: funnel.calificado, color: '#A78BFA' },
+    { title: 'Interesado', value: funnel.interesado, color: '#22C55E' }
   ];
+
+  const funnelTotal = useMemo(
+    () => funnel.nuevo + funnel.contactado + funnel.calificado + funnel.interesado,
+    [funnel]
+  );
 
   return (
     <Box>
-      <Typography variant='h4' gutterBottom>
-        Dashboard
-      </Typography>
+      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent='space-between' alignItems={{ xs: 'flex-start', md: 'center' }} sx={{ mb: 2, gap: 1 }}>
+        <Box>
+          <Typography variant='h4'>Dashboard ejecutivo</Typography>
+          <Typography variant='body2' color='text.secondary'>Visión operativa en tiempo real de conversaciones, leads y conversión.</Typography>
+        </Box>
+        <Chip icon={<TrendingUpIcon />} label='Actualiza cada 15s' color='primary' variant='outlined' />
+      </Stack>
 
-      <Grid container spacing={3} sx={{ mt: 1 }}>
+      <Grid container spacing={2}>
         {stats.map((stat, index) => (
-          <Grid item xs={12} sm={6} md={3} key={index}>
-            <Card>
+          <Grid item xs={12} sm={6} lg={3} key={index}>
+            <Card sx={{ border: '1px solid', borderColor: 'divider' }}>
               <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Stack direction='row' justifyContent='space-between' alignItems='center'>
                   <Box>
-                    <Typography color='text.secondary' gutterBottom>
+                    <Typography color='text.secondary' variant='body2'>
                       {stat.title}
                     </Typography>
-                    <Typography variant='h4'>{stat.value}</Typography>
+                    <Typography variant='h4' sx={{ mt: 0.5 }}>{stat.value}</Typography>
                   </Box>
-                  <Box sx={{ color: stat.color }}>{stat.icon}</Box>
-                </Box>
+                  <Box sx={{ color: stat.color, p: 1, borderRadius: 2, bgcolor: 'rgba(255,255,255,0.03)' }}>{stat.icon}</Box>
+                </Stack>
               </CardContent>
             </Card>
           </Grid>
@@ -87,23 +97,29 @@ const Dashboard = () => {
       </Grid>
 
       <Paper sx={{ mt: 3, p: 2.5 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-          <AccountTreeIcon fontSize='small' />
+        <Stack direction='row' alignItems='center' spacing={1} sx={{ mb: 2 }}>
+          <AccountTreeIcon fontSize='small' color='primary' />
           <Typography variant='h6'>Funnel unificado</Typography>
-        </Box>
+        </Stack>
+
         <Grid container spacing={2}>
-          {funnelCards.map((item) => (
-            <Grid item xs={12} md={3} key={item.title}>
-              <Paper variant='outlined' sx={{ p: 1.5 }}>
-                <Typography variant='caption' color='text.secondary'>
-                  {item.title}
-                </Typography>
-                <Typography variant='h5' sx={{ color: item.color }}>
-                  {item.value}
-                </Typography>
-              </Paper>
-            </Grid>
-          ))}
+          {funnelCards.map((item) => {
+            const pct = funnelTotal > 0 ? Math.round((item.value / funnelTotal) * 100) : 0;
+            return (
+              <Grid item xs={12} md={3} key={item.title}>
+                <Paper variant='outlined' sx={{ p: 1.5, borderColor: 'divider' }}>
+                  <Typography variant='caption' color='text.secondary'>
+                    {item.title}
+                  </Typography>
+                  <Typography variant='h5' sx={{ color: item.color, mb: 1 }}>
+                    {item.value}
+                  </Typography>
+                  <LinearProgress variant='determinate' value={pct} sx={{ height: 8, borderRadius: 10 }} />
+                  <Typography variant='caption' color='text.secondary' sx={{ mt: 0.6, display: 'block' }}>{pct}% del funnel</Typography>
+                </Paper>
+              </Grid>
+            );
+          })}
         </Grid>
       </Paper>
     </Box>

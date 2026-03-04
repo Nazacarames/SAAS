@@ -14,13 +14,21 @@ import {
   DialogActions,
   ToggleButton,
   ToggleButtonGroup,
-  Chip
+  Chip,
+  Divider
 } from '@mui/material';
 import { Add as AddIcon, ChevronLeft, ChevronRight } from '@mui/icons-material';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
 const toYmd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const statusColor = (status: string) => {
+  const s = String(status || '').toLowerCase();
+  if (s === 'completed') return 'success';
+  if (s === 'cancelled') return 'error';
+  return 'warning';
+};
 
 const Agenda = () => {
   const [contacts, setContacts] = useState<any[]>([]);
@@ -150,45 +158,37 @@ const Agenda = () => {
 
   return (
     <Box>
-      <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb: 1 }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent='space-between' alignItems={{ xs: 'flex-start', md: 'center' }} sx={{ mb: 2, gap: 1.2 }}>
         <Box>
           <Typography variant='h4'>Agenda de citas</Typography>
-          <Typography variant='body2' color='text.secondary'>Gestioná las citas agendadas con tus clientes.</Typography>
+          <Typography variant='body2' color='text.secondary'>Planificá, visualizá y gestioná citas con una vista clara y profesional.</Typography>
         </Box>
         <Button variant='contained' startIcon={<AddIcon />} onClick={() => setOpenNew(true)}>
-          Nueva Cita
+          Nueva cita
         </Button>
       </Stack>
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Hoy</Typography><Typography variant='h5'>{stats.today}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Esta semana</Typography><Typography variant='h5'>{stats.week}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Pendientes</Typography><Typography variant='h5'>{stats.pending}</Typography></Paper></Grid>
-        <Grid item xs={12} md={3}><Paper sx={{ p: 2 }}><Typography variant='caption'>Completadas</Typography><Typography variant='h5'>{stats.done}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Hoy</Typography><Typography variant='h5'>{stats.today}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Esta semana</Typography><Typography variant='h5'>{stats.week}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Pendientes</Typography><Typography variant='h5'>{stats.pending}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Completadas</Typography><Typography variant='h5'>{stats.done}</Typography></Paper></Grid>
       </Grid>
 
       <Paper sx={{ p: 2 }}>
-        <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb: 2 }}>
-          <Stack direction='row' spacing={1} alignItems='center'>
-            <ToggleButtonGroup size='small' value={view} exclusive onChange={(_, v) => v && setView(v)}>
-              <ToggleButton value='list'>Lista</ToggleButton>
-              <ToggleButton value='week'>Semana</ToggleButton>
-              <ToggleButton value='month'>Mes</ToggleButton>
-            </ToggleButtonGroup>
-          </Stack>
+        <Stack direction={{ xs: 'column', md: 'row' }} justifyContent='space-between' alignItems={{ xs: 'stretch', md: 'center' }} sx={{ mb: 2, gap: 1 }}>
+          <ToggleButtonGroup size='small' value={view} exclusive onChange={(_, v) => v && setView(v)}>
+            <ToggleButton value='list'>Lista</ToggleButton>
+            <ToggleButton value='week'>Semana</ToggleButton>
+            <ToggleButton value='month'>Mes</ToggleButton>
+          </ToggleButtonGroup>
 
-          <Stack direction='row' spacing={1} alignItems='center'>
+          <Stack direction='row' spacing={1} alignItems='center' flexWrap='wrap'>
             <Button size='small' onClick={() => setMonthCursor(new Date())}>Hoy</Button>
             <Button size='small' onClick={() => setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() - 1, 1))}><ChevronLeft /></Button>
-            <Typography sx={{ textTransform: 'capitalize', minWidth: 140, textAlign: 'center' }}>{monthLabel}</Typography>
+            <Typography sx={{ textTransform: 'capitalize', minWidth: 150, textAlign: 'center', fontWeight: 600 }}>{monthLabel}</Typography>
             <Button size='small' onClick={() => setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 1))}><ChevronRight /></Button>
-            <TextField
-              select
-              size='small'
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              sx={{ minWidth: 140 }}
-            >
+            <TextField select size='small' value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} sx={{ minWidth: 160 }}>
               <MenuItem value='all'>Todos</MenuItem>
               <MenuItem value='scheduled'>Pendientes</MenuItem>
               <MenuItem value='completed'>Completadas</MenuItem>
@@ -197,37 +197,53 @@ const Agenda = () => {
           </Stack>
         </Stack>
 
+        <Divider sx={{ mb: 2 }} />
+
         {view === 'list' ? (
           <Stack spacing={1}>
-            {filteredAppointments.map((a: any) => (
-              <Paper key={a.id} variant='outlined' sx={{ p: 1.2 }}>
-                <Typography variant='body2' sx={{ fontWeight: 600 }}>{a.contact_name || a.contact_id}</Typography>
-                <Typography variant='caption' color='text.secondary'>
-                  {new Date(a.starts_at).toLocaleString()} · {a.service_type || 'general'} · {a.status}
-                </Typography>
+            {filteredAppointments.length === 0 ? (
+              <Typography variant='body2' color='text.secondary'>No hay citas para este filtro.</Typography>
+            ) : filteredAppointments.map((a: any) => (
+              <Paper key={a.id} variant='outlined' sx={{ p: 1.2, borderColor: 'divider' }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent='space-between' gap={1}>
+                  <Box>
+                    <Typography variant='body2' sx={{ fontWeight: 700 }}>{a.contact_name || a.contact_id}</Typography>
+                    <Typography variant='caption' color='text.secondary'>
+                      {new Date(a.starts_at).toLocaleString()} · {a.service_type || 'general'}
+                    </Typography>
+                  </Box>
+                  <Chip size='small' label={String(a.status || 'scheduled')} color={statusColor(a.status) as any} />
+                </Stack>
               </Paper>
             ))}
           </Stack>
         ) : (
           <Box>
-            <Grid container columns={7} sx={{ border: '1px solid #e5e7eb', borderBottom: 'none' }}>
+            <Grid container columns={7} sx={{ border: '1px solid', borderColor: 'divider', borderBottom: 'none', borderRadius: '10px 10px 0 0', overflow: 'hidden' }}>
               {['LUN', 'MAR', 'MIÉ', 'JUE', 'VIE', 'SÁB', 'DOM'].map((d) => (
-                <Grid item xs={1} key={d} sx={{ p: 1, textAlign: 'center', borderBottom: '1px solid #e5e7eb', bgcolor: '#f8fafc' }}>
+                <Grid item xs={1} key={d} sx={{ p: 1, textAlign: 'center', borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'rgba(255,255,255,0.03)' }}>
                   <Typography variant='caption' color='text.secondary'>{d}</Typography>
                 </Grid>
               ))}
             </Grid>
 
-            <Grid container columns={7} sx={{ borderLeft: '1px solid #e5e7eb', borderTop: '1px solid #e5e7eb' }}>
+            <Grid container columns={7} sx={{ borderLeft: '1px solid', borderTop: '1px solid', borderColor: 'divider' }}>
               {calendarCells.map((cell, idx) => {
                 const key = cell.date ? toYmd(cell.date) : `empty-${idx}`;
                 const list = cell.date ? apptsByDay.get(toYmd(cell.date)) || [] : [];
+                const isToday = cell.date ? toYmd(cell.date) === toYmd(new Date()) : false;
                 return (
-                  <Grid item xs={1} key={key} sx={{ minHeight: 108, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #e5e7eb', p: 0.8 }}>
-                    <Typography variant='caption' sx={{ fontWeight: 600 }}>{cell.day || ''}</Typography>
+                  <Grid item xs={1} key={key} sx={{ minHeight: 124, borderRight: '1px solid', borderBottom: '1px solid', borderColor: 'divider', p: 0.9, bgcolor: isToday ? 'rgba(91,178,255,0.10)' : 'transparent' }}>
+                    <Typography variant='caption' sx={{ fontWeight: 700, opacity: cell.day ? 1 : 0.2 }}>{cell.day || ''}</Typography>
                     <Stack spacing={0.5} sx={{ mt: 0.5 }}>
                       {list.slice(0, 2).map((a: any) => (
-                        <Chip key={a.id} size='small' label={`${new Date(a.starts_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${a.contact_name || 'Cita'}`} />
+                        <Chip
+                          key={a.id}
+                          size='small'
+                          color={statusColor(a.status) as any}
+                          variant='outlined'
+                          label={`${new Date(a.starts_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${a.contact_name || 'Cita'}`}
+                        />
                       ))}
                       {list.length > 2 && <Typography variant='caption' color='text.secondary'>+{list.length - 2} más</Typography>}
                     </Stack>

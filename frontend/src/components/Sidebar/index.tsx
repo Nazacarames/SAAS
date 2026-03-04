@@ -8,7 +8,8 @@ import {
   Toolbar,
   Typography,
   Box,
-  Divider
+  Divider,
+  Chip
 } from '@mui/material';
 import {
   Dashboard as DashboardIcon,
@@ -22,7 +23,8 @@ import {
   AutoStories as AutoStoriesIcon,
   CalendarMonth as CalendarMonthIcon,
   TextSnippet as TextSnippetIcon,
-  Analytics as AnalyticsIcon
+  Analytics as AnalyticsIcon,
+  CreditCard as CreditCardIcon
 } from '@mui/icons-material';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/Auth/AuthContext';
@@ -42,6 +44,7 @@ const Sidebar = () => {
     { text: 'Agenda', icon: <CalendarMonthIcon />, path: '/agenda' },
     { text: 'WhatsApp', icon: <WhatsAppIcon />, path: '/connections' },
     { text: 'Reportes', icon: <AnalyticsIcon />, path: '/reports', adminOnly: true },
+    { text: 'Billing', icon: <CreditCardIcon />, path: '/billing' },
     { text: 'Agente IA', icon: <SmartToyIcon />, path: '/ai-agents', adminOnly: true },
     { text: 'Conocimiento', icon: <AutoStoriesIcon />, path: '/knowledge', adminOnly: true },
     { text: 'Templates', icon: <TextSnippetIcon />, path: '/templates', adminOnly: true },
@@ -51,14 +54,15 @@ const Sidebar = () => {
   ];
 
   const drawer = (
-    <Box>
-      <Toolbar>
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <Toolbar sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <Typography variant='h6' noWrap component='div'>
-          LMTM CRM
+          Charlott
         </Typography>
+        <Chip label='CRM' size='small' color='primary' variant='outlined' />
       </Toolbar>
       <Divider />
-      <List>
+      <List sx={{ py: 1 }}>
         {menuItems
           .filter((i: any) => isAdmin || !i.adminOnly)
           .map((item) => (

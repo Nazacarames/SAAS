@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import { QueryTypes } from "sequelize";
+import sequelize from "../../database";
 
 export interface RuntimeSettings {
   waCloudVerifyToken: string;
@@ -44,6 +46,11 @@ export interface RuntimeSettings {
   routingRulesJson: string;
   dedupeStrictEmail: boolean;
   waOutboundDedupeTtlSeconds: number;
+  waOutboundRetryMaxAttempts: number;
+  waOutboundRetryMaxDelayMs: number;
+  waOutboundRequestTimeoutMs: number;
+  waInboundReplayTtlSeconds: number;
+  waInboundReplayMaxBlocksPerPayload: number;
 }
 
 const FILE_PATH = path.resolve(process.cwd(), "runtime-settings.json");
@@ -113,7 +120,12 @@ export const getRuntimeSettings = (): RuntimeSettings => {
     followUpDaysJson: String(fromFile.followUpDaysJson || '') || defaultFollowUpDaysJson,
     routingRulesJson: String(fromFile.routingRulesJson || '') || defaultRoutingRulesJson,
     dedupeStrictEmail: parseBool(fromFile.dedupeStrictEmail, false),
-    waOutboundDedupeTtlSeconds: clampInt(fromFile.waOutboundDedupeTtlSeconds || process.env.WA_OUTBOUND_DEDUPE_TTL_SECONDS || 120, 120, 30, 900)
+    waOutboundDedupeTtlSeconds: clampInt(fromFile.waOutboundDedupeTtlSeconds || process.env.WA_OUTBOUND_DEDUPE_TTL_SECONDS || 120, 120, 30, 900),
+    waOutboundRetryMaxAttempts: clampInt(fromFile.waOutboundRetryMaxAttempts || process.env.WA_OUTBOUND_RETRY_MAX_ATTEMPTS || 3, 3, 1, 6),
+    waOutboundRetryMaxDelayMs: clampInt(fromFile.waOutboundRetryMaxDelayMs || process.env.WA_OUTBOUND_RETRY_MAX_DELAY_MS || 2000, 2000, 100, 10000),
+    waOutboundRequestTimeoutMs: clampInt(fromFile.waOutboundRequestTimeoutMs || process.env.WA_OUTBOUND_REQUEST_TIMEOUT_MS || 12000, 12000, 1000, 60000),
+    waInboundReplayTtlSeconds: clampInt(fromFile.waInboundReplayTtlSeconds || process.env.WA_INBOUND_REPLAY_TTL_SECONDS || 900, 900, 60, 86400),
+    waInboundReplayMaxBlocksPerPayload: clampInt(fromFile.waInboundReplayMaxBlocksPerPayload || process.env.WA_INBOUND_REPLAY_MAX_BLOCKS_PER_PAYLOAD || 3, 3, 1, 20)
   };
 };
 
@@ -159,8 +171,63 @@ export const saveRuntimeSettings = (patch: Partial<RuntimeSettings>) => {
     followUpDaysJson: String(patch.followUpDaysJson ?? current.followUpDaysJson ?? defaultFollowUpDaysJson),
     routingRulesJson: String(patch.routingRulesJson ?? current.routingRulesJson ?? defaultRoutingRulesJson),
     dedupeStrictEmail: typeof patch.dedupeStrictEmail === 'boolean' ? patch.dedupeStrictEmail : current.dedupeStrictEmail,
-    waOutboundDedupeTtlSeconds: clampInt((patch as any).waOutboundDedupeTtlSeconds ?? current.waOutboundDedupeTtlSeconds ?? 120, 120, 30, 900)
+    waOutboundDedupeTtlSeconds: clampInt((patch as any).waOutboundDedupeTtlSeconds ?? current.waOutboundDedupeTtlSeconds ?? 120, 120, 30, 900),
+    waOutboundRetryMaxAttempts: clampInt((patch as any).waOutboundRetryMaxAttempts ?? current.waOutboundRetryMaxAttempts ?? 3, 3, 1, 6),
+    waOutboundRetryMaxDelayMs: clampInt((patch as any).waOutboundRetryMaxDelayMs ?? current.waOutboundRetryMaxDelayMs ?? 2000, 2000, 100, 10000),
+    waOutboundRequestTimeoutMs: clampInt((patch as any).waOutboundRequestTimeoutMs ?? current.waOutboundRequestTimeoutMs ?? 12000, 12000, 1000, 60000),
+    waInboundReplayTtlSeconds: clampInt((patch as any).waInboundReplayTtlSeconds ?? current.waInboundReplayTtlSeconds ?? 900, 900, 60, 86400),
+    waInboundReplayMaxBlocksPerPayload: clampInt((patch as any).waInboundReplayMaxBlocksPerPayload ?? current.waInboundReplayMaxBlocksPerPayload ?? 3, 3, 1, 20)
   };
   writeFileSettings(next);
+  return next;
+};
+
+const ensureCompanyRuntimeSettingsTable = async () => {
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS company_runtime_settings (
+    company_id INTEGER PRIMARY KEY,
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+};
+
+export const getRuntimeSettingsForCompany = async (companyId: number): Promise<RuntimeSettings> => {
+  const base = getRuntimeSettings();
+  if (!companyId || Number.isNaN(companyId)) return base;
+
+  try {
+    await ensureCompanyRuntimeSettingsTable();
+    const [row]: any = await sequelize.query(
+      `SELECT settings_json FROM company_runtime_settings WHERE company_id = :companyId LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+    if (!row?.settings_json) return base;
+    const tenantSettings = JSON.parse(String(row.settings_json || '{}')) || {};
+    return { ...base, ...tenantSettings } as RuntimeSettings;
+  } catch {
+    return base;
+  }
+};
+
+export const saveRuntimeSettingsForCompany = async (companyId: number, patch: Partial<RuntimeSettings>) => {
+  if (!companyId || Number.isNaN(companyId)) return saveRuntimeSettings(patch);
+
+  await ensureCompanyRuntimeSettingsTable();
+  const current = await getRuntimeSettingsForCompany(companyId);
+  const next = { ...current, ...patch } as RuntimeSettings;
+
+  await sequelize.query(
+    `INSERT INTO company_runtime_settings (company_id, settings_json, updated_at)
+     VALUES (:companyId, :settingsJson, NOW())
+     ON CONFLICT (company_id)
+     DO UPDATE SET settings_json = EXCLUDED.settings_json, updated_at = NOW()`,
+    {
+      replacements: {
+        companyId,
+        settingsJson: JSON.stringify(next || {})
+      },
+      type: QueryTypes.INSERT
+    }
+  );
+
   return next;
 };

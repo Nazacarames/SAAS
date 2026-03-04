@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked } from "../services/WhatsAppCloudServices/ProcessCloudWebhookService";
 import { getRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
+import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "../services/MessageServices/SendMessageService";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
 
@@ -18,9 +19,39 @@ const safeEqualHex = (a: string, b: string) => {
   }
 };
 
+const resolveAllowUnsignedWebhook = (): boolean => {
+  const raw = String((getRuntimeSettings() as any).waWebhookAllowUnsigned || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw);
+};
+
+const resolveWebhookSignatureHardeningState = () => {
+  const settings = getRuntimeSettings();
+  const appSecretConfigured = Boolean(String(settings.waCloudAppSecret || "").trim());
+  const allowUnsigned = resolveAllowUnsignedWebhook();
+  return {
+    appSecretConfigured,
+    allowUnsigned,
+    insecureUnsignedWebhookAllowed: allowUnsigned
+  };
+};
+
+const hasValidHardeningToken = (req: any): boolean => {
+  const expected = String(getRuntimeSettings().waCloudVerifyToken || "").trim();
+  if (!expected) return false;
+
+  const candidate = String(
+    req.headers?.["x-hardening-token"]
+      || req.query?.token
+      || req.query?.verify_token
+      || ""
+  ).trim();
+
+  return candidate.length > 0 && candidate === expected;
+};
+
 const verifyWebhookSignature = (req: any): boolean => {
   const secret = String(getRuntimeSettings().waCloudAppSecret || "").trim();
-  if (!secret) return true; // If secret not configured, keep backward compatibility.
+  if (!secret) return resolveAllowUnsignedWebhook();
 
   const header = String(req.headers?.["x-hub-signature-256"] || "");
   if (!header.startsWith("sha256=")) return false;
@@ -36,7 +67,6 @@ const verifyWebhookSignature = (req: any): boolean => {
   return safeEqualHex(expected, provided);
 };
 
-
 whatsappCloudRoutes.get("/webhook", (req: any, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -51,9 +81,57 @@ whatsappCloudRoutes.get("/webhook", (req: any, res) => {
   return res.status(403).json({ error: "Verification failed" });
 });
 
+whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
+  if (!hasValidHardeningToken(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const signatureHardening = resolveWebhookSignatureHardeningState();
+  const inboundRuntimeAlerts = signatureHardening.insecureUnsignedWebhookAllowed
+    ? [{
+      signal: "inbound_unsigned_webhook_allowed",
+      threshold: 1,
+      inWindow: 1,
+      remaining: 0,
+      severity: "warn",
+      source: "runtime_settings"
+    }]
+    : [];
+
+  const outbound = getSendHardeningMetrics();
+  const outboundAlerts = getSendHardeningAlertSnapshot();
+  const withKey = Number((outbound?.counters || {})["outbound.duplicate_blocked_with_idempotency_key"] || 0);
+  const withoutKey = Number((outbound?.counters || {})["outbound.duplicate_blocked_without_idempotency_key"] || 0);
+
+  const recommendations: string[] = [];
+  if (withKey > 0) recommendations.push("Revisar clientes que reutilizan idempotencyKey (outbound duplicate blocked WITH key)");
+  if (withoutKey > 0) recommendations.push("Incluir idempotencyKey en env?os outbound para reintentos seguros");
+
+  return res.status(200).json({
+    ok: inboundRuntimeAlerts.length === 0,
+    generatedAt: new Date().toISOString(),
+    signatureHardening,
+    alerts: {
+      inbound: {
+        pendingAlerts: inboundRuntimeAlerts
+      },
+      outbound: outboundAlerts
+    },
+    outbound,
+    summary: {
+      duplicateBlockedWithIdempotencyKey: withKey,
+      duplicateBlockedWithoutIdempotencyKey: withoutKey
+    },
+    recommendations
+  });
+});
+
 whatsappCloudRoutes.post("/webhook", async (req: any, res) => {
   if (!verifyWebhookSignature(req)) {
-    recordInboundSignatureInvalidBlocked({ hasSignatureHeader: Boolean(String(req.headers?.["x-hub-signature-256"] || "").trim()), appSecretConfigured: Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim()) });
+    recordInboundSignatureInvalidBlocked({
+      hasSignatureHeader: Boolean(String(req.headers?.["x-hub-signature-256"] || "").trim()),
+      appSecretConfigured: Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim())
+    });
     return res.status(401).json({ ok: false, error: "invalid_signature" });
   }
   const result = await processCloudWebhookPayload(req.body || {});
@@ -64,6 +142,9 @@ whatsappCloudRoutes.post("/webhook", async (req: any, res) => {
 whatsappCloudRoutes.post("/test-send", isAuth, isAdmin, async (req: any, res) => {
   const to = String(req.body?.to || "").replace(/\D/g, "");
   const text = String(req.body?.text || "").trim();
+  const idempotencyFromHeader = String(req.headers?.["x-idempotency-key"] || "").trim();
+  const idempotencyFromBody = String(req.body?.idempotencyKey || "").trim();
+  const idempotencyKey = String(idempotencyFromHeader || idempotencyFromBody || "").trim();
 
   if (!to || to.length < 8) return res.status(400).json({ error: "Missing/invalid 'to'" });
   if (!text) return res.status(400).json({ error: "Missing 'text'" });
@@ -78,7 +159,8 @@ whatsappCloudRoutes.post("/test-send", isAuth, isAdmin, async (req: any, res) =>
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer " + settings.waCloudAccessToken
+      Authorization: "Bearer " + settings.waCloudAccessToken,
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {})
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",

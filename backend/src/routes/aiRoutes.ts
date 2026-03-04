@@ -3,30 +3,22 @@ import { QueryTypes } from "sequelize";
 import crypto from "crypto";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
+import featureGate from "../middleware/featureGate";
+import { incrementUsage } from "../services/BillingServices/BillingService";
 import sequelize from "../database";
 import Contact from "../models/Contact";
 import Ticket from "../models/Ticket";
 import Message from "../models/Message";
 import Whatsapp from "../models/Whatsapp";
 import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
+const getWaHardeningMetrics = () => ({}) as any;
+const getWaHardeningAlertSnapshot = () => [] as any[];
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
+const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
+import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
+import SendMessageService from "../services/MessageServices/SendMessageService";
 
 const aiRoutes = Router();
-
-const chunkText = (content: string, approxChars = 3200, overlap = 400): string[] => {
-  const text = String(content || '').replace(/\r/g, '').trim();
-  if (!text) return [];
-  const out: string[] = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    const end = Math.min(text.length, cursor + approxChars);
-    const slice = text.slice(cursor, end);
-    out.push(slice.trim());
-    if (end >= text.length) break;
-    cursor = Math.max(end - overlap, cursor + 1);
-  }
-  return out.filter(Boolean).slice(0, 500);
-};
 
 const resolveWhatsapp = async (companyId: number) => {
   const runtime = getRuntimeSettings();
@@ -42,34 +34,71 @@ const resolveWhatsapp = async (companyId: number) => {
   return Whatsapp.create({ name: "WhatsApp Cloud", status: "CONNECTED", isDefault: true, companyId } as any);
 };
 
-const sendCloudText = async (to: string, text: string, companyId = 1) => {
-  const settings: any = getRuntimeSettings();
-  let phoneNumberId = String(settings.waCloudPhoneNumberId || '').trim();
-  let accessToken = String(settings.waCloudAccessToken || '').trim();
+const parseRetryAfterMs = (retryAfterHeader?: string | null): number | null => {
+  if (!retryAfterHeader) return null;
+  const seconds = Number(retryAfterHeader);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+  const dateMs = Date.parse(retryAfterHeader);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    return delta > 0 ? delta : null;
+  }
+  return null;
+};
 
-  // Fallback: usar última conexión OAuth guardada si faltan credenciales runtime
-  if (!phoneNumberId || !accessToken) {
-    await ensureMetaOauthTables();
-    const [conn]: any = await sequelize.query(
-      `SELECT phone_number_id, access_token FROM meta_connections WHERE company_id = :companyId AND status = 'connected' ORDER BY id DESC LIMIT 1`,
-      { replacements: { companyId }, type: QueryTypes.SELECT }
-    );
-    if (conn?.phone_number_id && conn?.access_token) {
-      phoneNumberId = String(conn.phone_number_id);
-      accessToken = String(conn.access_token);
+const computeBackoffMs = (attempt: number, retryAfterMs?: number | null) => {
+  if (retryAfterMs && retryAfterMs > 0) return Math.min(retryAfterMs, 15000);
+  const base = 400 * Math.pow(2, Math.max(0, attempt - 1)); // 400, 800, 1600, ...
+  const jitter = Math.floor(Math.random() * 150);
+  return base + jitter;
+};
+
+const isRetryableCloudFailure = (status?: number, code?: number) => {
+  if (!status) return true;
+  if (status === 408 || status === 409 || status === 429) return true;
+  if (status >= 500) return true;
+  if (code === 131016 || code === 131048 || code === 131056) return true;
+  return false;
+};
+
+const sendCloudText = async (to: string, text: string) => {
+  const settings = getRuntimeSettings();
+  if (!settings.waCloudPhoneNumberId || !settings.waCloudAccessToken) throw new Error("Cloud API credentials missing");
+
+  const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  let lastError = "Cloud send failed";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await fetch(`https://graph.facebook.com/v21.0/${settings.waCloudPhoneNumberId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.waCloudAccessToken}` },
+        body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: text } })
+      });
+
+      const data: any = await resp.json().catch(() => ({}));
+      if (resp.ok) return data?.messages?.[0]?.id || `meta-${Date.now()}`;
+
+      const cloudCode = Number(data?.error?.code);
+      lastError = data?.error?.message || `Cloud send failed (${resp.status})`;
+      if (!isRetryableCloudFailure(resp.status, cloudCode) || attempt === maxAttempts) {
+        throw new Error(lastError);
+      }
+
+      const retryAfterMs = parseRetryAfterMs(resp.headers.get("retry-after"));
+      await new Promise((resolve) => setTimeout(resolve, computeBackoffMs(attempt, retryAfterMs)));
+    } catch (error: any) {
+      const status = Number(error?.statusCode || error?.status || 0) || undefined;
+      if (!isRetryableCloudFailure(status) || attempt === maxAttempts) {
+        throw error;
+      }
+      const retryAfterMs = parseRetryAfterMs(error?.response?.headers?.["retry-after"] || error?.headers?.["retry-after"] || null);
+      lastError = error?.message || lastError;
+      await new Promise((resolve) => setTimeout(resolve, computeBackoffMs(attempt, retryAfterMs)));
     }
   }
 
-  if (!phoneNumberId || !accessToken) throw new Error("Cloud API credentials missing");
-
-  const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: text } })
-  });
-  const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data?.error?.message || `Cloud send failed (${resp.status})`);
-  return data?.messages?.[0]?.id || `meta-${Date.now()}`;
+  throw new Error(lastError);
 };
 
 const graphApiVersion = process.env.META_GRAPH_API_VERSION || "v21.0";
@@ -163,6 +192,31 @@ const sendCloudTemplateWithCredentials = async (
   return data?.messages?.[0]?.id || `meta-${Date.now()}`;
 };
 
+const resolveMetaFormName = async (companyId: number, formId: string): Promise<string> => {
+  const cleanFormId = String(formId || '').trim();
+  if (!cleanFormId) return '';
+
+  try {
+    const [conn]: any = await sequelize.query(
+      `SELECT access_token FROM meta_connections WHERE company_id = :companyId ORDER BY id DESC LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+    const accessToken = String(conn?.access_token || '').trim();
+    if (!accessToken) return '';
+
+    const resp = await fetch(`https://graph.facebook.com/${graphApiVersion}/${cleanFormId}?fields=name`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data: any = await resp.json().catch(() => ({}));
+    if (!resp.ok) return '';
+
+    return String(data?.name || '').trim();
+  } catch {
+    return '';
+  }
+};
+
 const scoreFromText = (text: string, current = 0) => {
   let score = Number(current || 0);
   if (/comprar|contratar|precio|plan|cotiz|demo/i.test(text)) score = Math.max(score, 65);
@@ -171,6 +225,20 @@ const scoreFromText = (text: string, current = 0) => {
   if (/gracias|resuelto|listo/i.test(text)) score = Math.max(score, 45);
   return Math.min(100, score);
 };
+
+aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (_req: any, res) => {
+  try {
+    return res.json({
+      ok: true,
+      hardening: {
+        metrics: getWaHardeningMetrics(),
+        alerts: getWaHardeningAlertSnapshot()
+      }
+    });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error?.message || "wa hardening snapshot failed" });
+  }
+});
 
 aiRoutes.get("/agents", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
@@ -278,6 +346,35 @@ aiRoutes.put("/agents/:id", isAuth, isAdmin, async (req: any, res) => {
   return res.json(agent || null);
 });
 
+aiRoutes.post("/tickets/:ticketId/toggle-bot", isAuth, async (req: any, res) => {
+  const { companyId } = req.user;
+  const { ticketId } = req.params;
+  const { botEnabled, humanOverride } = req.body || {};
+
+  await sequelize.query(
+    `UPDATE tickets
+     SET bot_enabled = COALESCE(:botEnabled, bot_enabled),
+         human_override = COALESCE(:humanOverride, human_override),
+         "updatedAt" = NOW()
+     WHERE id = :ticketId AND "companyId" = :companyId`,
+    {
+      replacements: {
+        ticketId: Number(ticketId),
+        companyId,
+        botEnabled: typeof botEnabled === "boolean" ? botEnabled : null,
+        humanOverride: typeof humanOverride === "boolean" ? humanOverride : null
+      },
+      type: QueryTypes.UPDATE
+    }
+  );
+
+  const [ticket]: any = await sequelize.query(
+    `SELECT id, status, bot_enabled, human_override FROM tickets WHERE id = :ticketId`,
+    { replacements: { ticketId: Number(ticketId) }, type: QueryTypes.SELECT }
+  );
+
+  return res.json(ticket || null);
+});
 
 aiRoutes.post("/kb/documents", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
@@ -291,7 +388,11 @@ aiRoutes.post("/kb/documents", isAuth, async (req: any, res) => {
   );
 
   // simple chunking by paragraphs
-  const parts = chunkText(String(content));
+  const parts = String(content)
+    .split(/\n{2,}/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 200);
 
   for (let i = 0; i < parts.length; i++) {
     await sequelize.query(
@@ -355,7 +456,11 @@ aiRoutes.put("/kb/documents/:id", isAuth, async (req: any, res) => {
     { replacements: { documentId: Number(id) }, type: QueryTypes.DELETE }
   );
 
-  const parts = chunkText(String(nextContent));
+  const parts = String(nextContent)
+    .split(/\n{2,}/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 200);
 
   for (let i = 0; i < parts.length; i++) {
     await sequelize.query(
@@ -413,26 +518,26 @@ aiRoutes.post("/rag/search", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
   const { query = "", limit = 5 } = req.body || {};
 
-  const rows: any[] = await sequelize.query(
+  const rows = await sequelize.query(
     `SELECT c.id, c.document_id, c.chunk_text, d.title, d.category,
-            ts_rank_cd(c.chunk_tsv, websearch_to_tsquery('spanish', :query)) AS score
+            (CASE WHEN POSITION(LOWER(:query) IN LOWER(c.chunk_text)) > 0 THEN 0.95 ELSE 0.50 END) AS score
      FROM kb_chunks c
      JOIN kb_documents d ON d.id = c.document_id
      WHERE d.company_id = :companyId
-       AND c.chunk_tsv @@ websearch_to_tsquery('spanish', :query)
+       AND (LOWER(c.chunk_text) LIKE LOWER(:qLike) OR LOWER(d.title) LIKE LOWER(:qLike))
      ORDER BY score DESC, c.id DESC
      LIMIT :limit`,
     {
       replacements: {
         companyId,
-        query: String(query || ''),
+        query: String(query),
+        qLike: `%${String(query)}%`,
         limit: Number(limit) || 5
       },
       type: QueryTypes.SELECT
     }
   );
 
-  const compact = rows.map((r: any) => ({ id: r.id, doc: r.document_id, score: Number(r.score || 0) }));
   await sequelize.query(
     `INSERT INTO kb_search_logs (company_id, query, top_k, results_json, created_at, updated_at)
      VALUES (:companyId, :query, :topK, :resultsJson, NOW(), NOW())`,
@@ -441,7 +546,7 @@ aiRoutes.post("/rag/search", isAuth, async (req: any, res) => {
         companyId,
         query: String(query),
         topK: Number(limit) || 5,
-        resultsJson: JSON.stringify(compact)
+        resultsJson: JSON.stringify(rows)
       },
       type: QueryTypes.INSERT
     }
@@ -499,69 +604,6 @@ aiRoutes.get("/kb/stats", isAuth, async (req: any, res) => {
   return res.json(row || { total: 0, synced: 0, pending: 0, categories: 0 });
 });
 
-
-
-aiRoutes.get("/reports/leads", isAuth, async (req: any, res) => {
-  const { companyId } = req.user;
-  const { source = "", from = "", to = "" } = req.query || {};
-
-  const where: string[] = ["company_id = :companyId"];
-  const replacements: any = { companyId };
-  if (String(source || "").trim()) {
-    where.push("source = :source");
-    replacements.source = String(source).trim();
-  }
-  if (String(from || "").trim()) {
-    where.push("created_at >= :from");
-    replacements.from = String(from).trim();
-  }
-  if (String(to || "").trim()) {
-    where.push("created_at <= :to::date + INTERVAL '1 day'");
-    replacements.to = String(to).trim();
-  }
-
-  const whereSql = where.join(" AND ");
-
-  const [totals]: any = await sequelize.query(
-    `SELECT COUNT(*)::int AS "totalLeads",
-            SUM(CASE WHEN COALESCE(campaign_id,'') <> '' THEN 1 ELSE 0 END)::int AS "withCampaign",
-            SUM(CASE WHEN COALESCE(form_id,'') <> '' THEN 1 ELSE 0 END)::int AS "withForm",
-            SUM(CASE WHEN COALESCE(contact_phone,'') <> '' THEN 1 ELSE 0 END)::int AS "withPhone"
-     FROM meta_lead_events
-     WHERE ${whereSql}`,
-    { replacements, type: QueryTypes.SELECT }
-  );
-
-  const bySource = await sequelize.query(
-    `SELECT COALESCE(source,'sin_dato') AS source, COUNT(*)::int AS count
-     FROM meta_lead_events WHERE ${whereSql} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
-    { replacements, type: QueryTypes.SELECT }
-  );
-
-  const byCampaign = await sequelize.query(
-    `SELECT COALESCE(campaign_id,'sin_dato') AS campaign_id, COUNT(*)::int AS count
-     FROM meta_lead_events WHERE ${whereSql} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
-    { replacements, type: QueryTypes.SELECT }
-  );
-
-  const byForm = await sequelize.query(
-    `SELECT COALESCE(form_id,'sin_dato') AS form_id, COUNT(*)::int AS count
-     FROM meta_lead_events WHERE ${whereSql} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
-    { replacements, type: QueryTypes.SELECT }
-  );
-
-  const [withTicket]: any = await sequelize.query(
-    `SELECT COUNT(DISTINCT m.id)::int AS count
-     FROM meta_lead_events m
-     LEFT JOIN contacts c ON REGEXP_REPLACE(COALESCE(c.number,''), '\D', '', 'g') = REGEXP_REPLACE(COALESCE(m.contact_phone,''), '\D', '', 'g')
-     LEFT JOIN tickets t ON t."contactId" = c.id
-     WHERE ${whereSql.replace('company_id', 'm.company_id')} AND t.id IS NOT NULL`,
-    { replacements, type: QueryTypes.SELECT }
-  );
-
-  return res.json({ totals: { ...(totals || {}), withTicket: Number(withTicket?.count || 0) }, bySource, byCampaign, byForm });
-});
-
 aiRoutes.get("/appointments", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
   const { from = "", to = "" } = req.query || {};
@@ -608,6 +650,217 @@ aiRoutes.get("/funnel/stats", isAuth, async (req: any, res) => {
   return res.json(row || { nuevo: 0, contactado: 0, calificado: 0, interesado: 0 });
 });
 
+aiRoutes.get(['/reports/attribution', '/reports/leads'], isAuth, async (req: any, res) => {
+  await ensureMetaLeadTables();
+  const { companyId } = req.user;
+  const { from = '', to = '', source = '', campaign = '', form = '' } = req.query || {};
+
+  const where: string[] = ['company_id = :companyId'];
+  const replacements: any = { companyId };
+
+  if (String(from || '').trim()) {
+    where.push('created_at >= :from');
+    replacements.from = String(from).trim();
+  }
+  if (String(to || '').trim()) {
+    where.push("created_at < (:to::date + INTERVAL '1 day')");
+    replacements.to = String(to).trim();
+  }
+  if (String(source || '').trim()) {
+    where.push('source = :source');
+    replacements.source = String(source).trim();
+  }
+  if (String(campaign || '').trim()) {
+    where.push('LOWER(COALESCE(campaign_id,\'\')) LIKE LOWER(:campaign)');
+    replacements.campaign = `%${String(campaign).trim()}%`;
+  }
+  if (String(form || '').trim()) {
+    where.push(`(LOWER(COALESCE(form_name,'')) LIKE LOWER(:form) OR LOWER(COALESCE(form_id,'')) LIKE LOWER(:form))`);
+    replacements.form = `%${String(form).trim()}%`;
+  }
+
+  const baseWhere = where.join(' AND ');
+
+  // Backfill liviano: resolver nombre de formulario para eventos históricos que solo tienen form_id
+  try {
+    const missingForms: any[] = await sequelize.query(
+      `SELECT DISTINCT form_id
+       FROM meta_lead_events
+       WHERE company_id = :companyId
+         AND COALESCE(form_id,'') <> ''
+         AND COALESCE(form_name,'') = ''
+       ORDER BY form_id ASC
+       LIMIT 20`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+
+    for (const row of missingForms || []) {
+      const formId = String(row?.form_id || '').trim();
+      if (!formId) continue;
+      const resolvedName = await resolveMetaFormName(companyId, formId);
+      if (!resolvedName) continue;
+
+      await sequelize.query(
+        `UPDATE meta_lead_events
+         SET form_name = :formName, updated_at = NOW()
+         WHERE company_id = :companyId
+           AND form_id = :formId
+           AND COALESCE(form_name,'') = ''`,
+        {
+          replacements: { companyId, formId, formName: resolvedName },
+          type: QueryTypes.UPDATE
+        }
+      );
+    }
+  } catch {
+    // no-op: no interrumpir reportes por backfill de nombres
+  }
+
+  const [summary]: any = await sequelize.query(
+    `SELECT
+      COUNT(*)::int AS total_leads,
+      COUNT(DISTINCT NULLIF(REGEXP_REPLACE(COALESCE(contact_phone,''), '\\D', '', 'g'), ''))::int AS unique_phones,
+      COUNT(DISTINCT NULLIF(COALESCE(campaign_id,''), ''))::int AS campaigns,
+      COUNT(DISTINCT NULLIF(COALESCE(form_id,''), ''))::int AS forms
+     FROM meta_lead_events
+     WHERE ${baseWhere}`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const [lifecycle]: any = await sequelize.query(
+    `WITH ev AS (
+      SELECT *
+      FROM meta_lead_events
+      WHERE ${baseWhere}
+    )
+    SELECT
+      COUNT(*)::int AS received_events,
+      SUM(CASE WHEN NULLIF(REGEXP_REPLACE(COALESCE(ev.contact_phone,''), '\\D', '', 'g'), '') IS NULL THEN 1 ELSE 0 END)::int AS no_phone,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1 FROM contacts c
+        WHERE c."companyId" = ev.company_id
+          AND (
+            NULLIF(REGEXP_REPLACE(COALESCE(c.number,''), '\\D', '', 'g'), '') = NULLIF(REGEXP_REPLACE(COALESCE(ev.contact_phone,''), '\\D', '', 'g'), '')
+            OR LOWER(NULLIF(COALESCE(c.email,''), '')) = LOWER(NULLIF(COALESCE(ev.contact_email,''), ''))
+          )
+      ) THEN 1 ELSE 0 END)::int AS converted_contacts,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1
+        FROM contacts c
+        JOIN tickets t ON t."contactId" = c.id AND t."companyId" = ev.company_id
+        WHERE c."companyId" = ev.company_id
+          AND (
+            NULLIF(REGEXP_REPLACE(COALESCE(c.number,''), '\\D', '', 'g'), '') = NULLIF(REGEXP_REPLACE(COALESCE(ev.contact_phone,''), '\\D', '', 'g'), '')
+            OR LOWER(NULLIF(COALESCE(c.email,''), '')) = LOWER(NULLIF(COALESCE(ev.contact_email,''), ''))
+          )
+      ) THEN 1 ELSE 0 END)::int AS with_conversation
+    FROM ev`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const receivedEvents = Number(lifecycle?.received_events || 0);
+  const convertedContacts = Number(lifecycle?.converted_contacts || 0);
+  const withConversation = Number(lifecycle?.with_conversation || 0);
+  const noPhone = Number(lifecycle?.no_phone || 0);
+  const notConverted = Math.max(0, receivedEvents - convertedContacts);
+
+  const lifecycleBreakdown = [
+    { key: 'received_events', label: 'Eventos recibidos', value: receivedEvents },
+    { key: 'converted_contacts', label: 'Convertidos a contacto', value: convertedContacts },
+    { key: 'not_converted', label: 'No convertidos', value: notConverted },
+    { key: 'with_conversation', label: 'Con conversación', value: withConversation },
+    { key: 'no_phone', label: 'Sin teléfono', value: noPhone }
+  ];
+
+  const bySource = await sequelize.query(
+    `SELECT COALESCE(NULLIF(source,''), 'unknown') AS source, COUNT(*)::int AS leads
+     FROM meta_lead_events
+     WHERE ${baseWhere}
+     GROUP BY COALESCE(NULLIF(source,''), 'unknown')
+     ORDER BY leads DESC
+     LIMIT 20`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const byCampaign = await sequelize.query(
+    `SELECT COALESCE(NULLIF(campaign_id,''), 'unknown') AS campaign, COUNT(*)::int AS leads
+     FROM meta_lead_events
+     WHERE ${baseWhere}
+     GROUP BY COALESCE(NULLIF(campaign_id,''), 'unknown')
+     ORDER BY leads DESC
+     LIMIT 30`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const byFormRaw: any[] = await sequelize.query(
+    `SELECT NULLIF(COALESCE(form_id,''), '') AS form_id,
+            NULLIF(COALESCE(form_name,''), '') AS form_name,
+            COUNT(*)::int AS leads
+     FROM meta_lead_events
+     WHERE ${baseWhere}
+     GROUP BY NULLIF(COALESCE(form_id,''), ''), NULLIF(COALESCE(form_name,''), '')
+     ORDER BY leads DESC
+     LIMIT 30`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const byForm = [] as any[];
+  for (const row of byFormRaw || []) {
+    const formId = String(row?.form_id || '').trim();
+    let formName = String(row?.form_name || '').trim();
+
+    if (!formName && formId) {
+      formName = await resolveMetaFormName(companyId, formId);
+      if (formName) {
+        await sequelize.query(
+          `UPDATE meta_lead_events
+           SET form_name = :formName, updated_at = NOW()
+           WHERE company_id = :companyId
+             AND form_id = :formId
+             AND COALESCE(form_name,'') = ''`,
+          {
+            replacements: { companyId, formId, formName },
+            type: QueryTypes.UPDATE
+          }
+        );
+      }
+    }
+
+    byForm.push({
+      form: formName || formId || 'unknown',
+      formId: formId || null,
+      formName: formName || null,
+      leads: Number(row?.leads || 0)
+    });
+  }
+
+  const timeline = await sequelize.query(
+    `SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS leads
+     FROM meta_lead_events
+     WHERE ${baseWhere}
+     GROUP BY created_at::date
+     ORDER BY day DESC
+     LIMIT 31`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  return res.json({
+    summary: {
+      ...(summary || { total_leads: 0, unique_phones: 0, campaigns: 0, forms: 0 }),
+      received_events: receivedEvents,
+      converted_contacts: convertedContacts,
+      not_converted: notConverted,
+      with_conversation: withConversation,
+      no_phone: noPhone
+    },
+    lifecycleBreakdown,
+    bySource,
+    byCampaign,
+    byForm,
+    timeline
+  });
+});
+
 aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
   const { companyId, id: userId } = req.user;
   const { tool, args = {} } = req.body || {};
@@ -631,7 +884,7 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
                email = COALESCE(:email, email),
                business_type = COALESCE(:businessType, business_type),
                needs = COALESCE(:needs, needs),
-               "updatedAt" = NOW()
+               updatedAt = NOW()
            WHERE id = :id`,
           {
             replacements: {
@@ -668,8 +921,14 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
 
     if (tool === "actualizar_lead_score") {
       let contactId = Number(args.contactId || 0);
+      const ticketId = Number(args.ticketId || 0);
       const inboundText = String(args.inboundText || args.text || '').trim();
-      if (!contactId) return fail("contactId requerido");
+
+      if (!contactId && ticketId) {
+        const [t]: any = await sequelize.query(`SELECT "contactId" FROM tickets WHERE id = :ticketId AND "companyId" = :companyId LIMIT 1`, { replacements: { ticketId, companyId }, type: QueryTypes.SELECT });
+        contactId = Number(t?.contactId || 0);
+      }
+      if (!contactId) return fail("contactId o ticketId requerido");
 
       const [existing]: any = await sequelize.query(`SELECT lead_score, "leadStatus" FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`, { replacements: { contactId, companyId }, type: QueryTypes.SELECT });
       const explicitScore = Number.isFinite(Number(args.leadScore)) ? Number(args.leadScore) : null;
@@ -685,14 +944,14 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
     }
 
     if (tool === "agregar_nota") {
-      const contactId = Number(args.contactId || 0);
+      const ticketId = Number(args.ticketId || 0);
       const note = String(args.note || "").trim();
-      if (!contactId || !note) return fail("contactId y note requeridos");
+      if (!ticketId || !note) return fail("ticketId y note requeridos");
 
       await sequelize.query(
         `INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at)
          VALUES (NULL, 'tool', :content, 'manual-note', 0, 0, 0, NOW(), NOW())`,
-        { replacements: { content: `[conversation:${contactId}] ${note}` }, type: QueryTypes.INSERT }
+        { replacements: { content: `[ticket:${ticketId}] ${note}` }, type: QueryTypes.INSERT }
       );
 
       return res.json({ ok: true, tool, result: "note saved" });
@@ -708,12 +967,13 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
 
       const [appt]: any = await sequelize.query(
         `INSERT INTO appointments (company_id, contact_id, ticket_id, starts_at, ends_at, service_type, status, notes, created_at, updated_at)
-         VALUES (:companyId, :contactId, NULL, :startsAt, :endsAt, :serviceType, 'scheduled', :notes, NOW(), NOW())
+         VALUES (:companyId, :contactId, :ticketId, :startsAt, :endsAt, :serviceType, 'scheduled', :notes, NOW(), NOW())
          RETURNING *`,
         {
           replacements: {
             companyId,
             contactId,
+            ticketId: args.ticketId || null,
             startsAt,
             endsAt: end,
             serviceType: args.serviceType || "general",
@@ -782,15 +1042,15 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
     if (tool === "consultar_conocimiento") {
       const query = String(args.query || "");
       const rows = await sequelize.query(
-        `SELECT c.id, c.chunk_text, d.title, d.category,
-                ts_rank_cd(c.chunk_tsv, websearch_to_tsquery('spanish', :query)) AS similarity
+        `SELECT c.chunk_text, d.title, d.category,
+                (CASE WHEN POSITION(LOWER(:query) IN LOWER(c.chunk_text)) > 0 THEN 0.95 ELSE 0.50 END) AS similarity
          FROM kb_chunks c
          JOIN kb_documents d ON d.id = c.document_id
          WHERE d.company_id = :companyId
-           AND c.chunk_tsv @@ websearch_to_tsquery('spanish', :query)
+           AND LOWER(c.chunk_text) LIKE LOWER(:qLike)
          ORDER BY similarity DESC
          LIMIT 5`,
-        { replacements: { companyId, query }, type: QueryTypes.SELECT }
+        { replacements: { companyId, query, qLike: `%${query}%` }, type: QueryTypes.SELECT }
       );
 
       return res.json({ ok: true, tool, result: rows });
@@ -803,20 +1063,19 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
 });
 
 
-aiRoutes.get("/conversations/:conversationId/decisions", isAuth, async (req: any, res) => {
+aiRoutes.get("/tickets/:ticketId/decisions", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
-  const { conversationId } = req.params;
-  const n = Number(conversationId || 0);
+  const { ticketId } = req.params;
   const limit = Math.max(1, Math.min(100, Number(req.query?.limit || 30)));
 
   try {
     const rows = await sequelize.query(
       `SELECT id, ticket_id, company_id, conversation_type, decision_key, reason, guardrail_action, response_preview, created_at
        FROM ai_decision_logs
-       WHERE company_id = :companyId AND (ticket_id = :id OR ticket_id IN (SELECT id FROM tickets WHERE "contactId" = :id) OR ticket_id IS NULL)
+       WHERE company_id = :companyId AND ticket_id = :ticketId
        ORDER BY id DESC
        LIMIT :limit`,
-      { replacements: { companyId, id: n, limit }, type: QueryTypes.SELECT }
+      { replacements: { companyId, ticketId: Number(ticketId), limit }, type: QueryTypes.SELECT }
     );
     return res.json(rows);
   } catch (e: any) {
@@ -899,17 +1158,17 @@ aiRoutes.delete('/templates/:id', isAuth, isAdmin, async (req: any, res) => {
 aiRoutes.post('/templates/suggest', isAuth, async (req: any, res) => {
   await ensureTemplateTables();
   const { companyId } = req.user;
-  const { contactId, query = '' } = req.body || {};
+  const { ticketId, contactId, query = '' } = req.body || {};
   const [row]: any = await sequelize.query(`SELECT * FROM message_templates WHERE company_id = :companyId AND is_active = true ORDER BY id DESC LIMIT 1`, { replacements: { companyId }, type: QueryTypes.SELECT });
   const suggestion = row ? { templateId: row.id, content: row.content, variables: row.variables_json } : null;
   await sequelize.query(`INSERT INTO template_suggestions_logs (company_id, ticket_id, contact_id, query_text, suggested_template_id, suggested_payload_json, created_at)
-    VALUES (:companyId, NULL, :contactId, :queryText, :templateId, :payload, NOW())`, { replacements: { companyId, contactId: contactId || null, queryText: String(query || ''), templateId: suggestion?.templateId || null, payload: JSON.stringify(suggestion || {}) }, type: QueryTypes.INSERT });
+    VALUES (:companyId, :ticketId, :contactId, :queryText, :templateId, :payload, NOW())`, { replacements: { companyId, ticketId: ticketId || null, contactId: contactId || null, queryText: String(query || ''), templateId: suggestion?.templateId || null, payload: JSON.stringify(suggestion || {}) }, type: QueryTypes.INSERT });
   return res.json({ suggestion });
 });
 
 aiRoutes.post('/templates/send', isAuth, async (req: any, res) => {
-  const { templateId, contactId, payload = {} } = req.body || {};
-  return res.json({ ok: true, queued: true, templateId: Number(templateId || 0), contactId: Number(contactId || 0), payload, note: 'Scaffold: conectar envÃ­o real con canal WhatsApp/Cloud' });
+  const { templateId, ticketId, contactId, payload = {} } = req.body || {};
+  return res.json({ ok: true, queued: true, templateId: Number(templateId || 0), ticketId: Number(ticketId || 0), contactId: Number(contactId || 0), payload, note: 'Scaffold: conectar envÃ­o real con canal WhatsApp/Cloud' });
 });
 
 aiRoutes.get('/meta/oauth/start', isAuth, async (req: any, res) => {
@@ -1090,6 +1349,33 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
 });
 
 let metaLeadTablesReady = false;
+const META_LEAD_REPLAY_TTL_SECONDS = 60 * 60 * 48;
+const buildMetaLeadReplayKey = (companyId: number, body: any) => {
+  const eventId = String(body?.event_id || body?.id || '').trim();
+  const leadgenId = String(body?.leadgen_id || body?.lead?.id || '').trim();
+  const pageId = String(body?.page_id || body?.page?.id || '').trim();
+  const fallback = JSON.stringify(body || {}).slice(0, 1800);
+  const base = [companyId, eventId || '-', leadgenId || '-', pageId || '-', fallback].join(':');
+  return `meta-lead:${crypto.createHash('sha1').update(base).digest('hex')}`;
+};
+
+const reserveMetaLeadReplayKey = async (replayKey: string, ttlSeconds = META_LEAD_REPLAY_TTL_SECONDS): Promise<boolean> => {
+  await sequelize.query(`DELETE FROM meta_lead_replay_guard WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`, {
+    replacements: { ttlSeconds },
+    type: QueryTypes.DELETE
+  });
+
+  const rows: any[] = await sequelize.query(
+    `INSERT INTO meta_lead_replay_guard (replay_key, created_at)
+     VALUES (:replayKey, NOW())
+     ON CONFLICT (replay_key) DO NOTHING
+     RETURNING replay_key`,
+    { replacements: { replayKey }, type: QueryTypes.SELECT }
+  );
+
+  return Boolean(rows[0]?.replay_key);
+};
+
 const ensureMetaLeadTables = async () => {
   if (metaLeadTablesReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS meta_lead_events (
@@ -1098,6 +1384,7 @@ const ensureMetaLeadTables = async () => {
     event_id VARCHAR(120),
     page_id VARCHAR(120),
     form_id VARCHAR(120),
+    form_name VARCHAR(255),
     leadgen_id VARCHAR(120),
     ad_id VARCHAR(120),
     campaign_id VARCHAR(120),
@@ -1111,6 +1398,13 @@ const ensureMetaLeadTables = async () => {
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
   )`);
+  await sequelize.query(`ALTER TABLE meta_lead_events ADD COLUMN IF NOT EXISTS form_name VARCHAR(255)`);
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS meta_lead_replay_guard (
+    id SERIAL PRIMARY KEY,
+    replay_key VARCHAR(220) UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  )`);
+  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_lead_replay_guard_key ON meta_lead_replay_guard(replay_key)`);
   metaLeadTablesReady = true;
 };
 
@@ -1134,25 +1428,24 @@ const ensureMetaFormsTag = async (contactId: number) => {
   );
 };
 
+const ensureContactTag = async (contactId: number, tagName: string, color = '#64748B') => {
+  const [tag]: any = await sequelize.query(
+    `INSERT INTO tags (name, color, "createdAt", "updatedAt")
+     VALUES (:tagName, :color, NOW(), NOW())
+     ON CONFLICT (name)
+     DO UPDATE SET "updatedAt" = NOW()
+     RETURNING id`,
+    { replacements: { tagName, color }, type: QueryTypes.SELECT }
+  );
 
+  if (!tag?.id) return;
 
-const fetchMetaLeadFieldData = async (companyId: number, leadgenId: string) => {
-  try {
-    if (!leadgenId) return null;
-    const [conn]: any = await sequelize.query(
-      `SELECT access_token FROM meta_connections WHERE company_id = :companyId AND status = 'connected' ORDER BY id DESC LIMIT 1`,
-      { replacements: { companyId }, type: QueryTypes.SELECT }
-    );
-    const accessToken = String(conn?.access_token || '').trim();
-    if (!accessToken) return null;
-
-    const res = await fetch(`https://graph.facebook.com/v21.0/${leadgenId}?fields=field_data,form_id,ad_id,campaign_id&access_token=${encodeURIComponent(accessToken)}`);
-    const data: any = await res.json().catch(() => ({}));
-    if (!res.ok) return null;
-    return data?.field_data || null;
-  } catch {
-    return null;
-  }
+  await sequelize.query(
+    `INSERT INTO contact_tags ("contactId", "tagId", "createdAt", "updatedAt")
+     VALUES (:contactId, :tagId, NOW(), NOW())
+     ON CONFLICT ("contactId", "tagId") DO NOTHING`,
+    { replacements: { contactId, tagId: Number(tag.id) }, type: QueryTypes.INSERT }
+  );
 };
 
 aiRoutes.get('/meta-leads/webhook', async (req: any, res) => {
@@ -1164,11 +1457,71 @@ aiRoutes.get('/meta-leads/webhook', async (req: any, res) => {
   return res.status(403).json({ ok: false, error: 'verification_failed' });
 });
 
-aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
-  await ensureMetaLeadTables();
-  const body = req.body || {};
-  const webhookValue = body?.entry?.[0]?.changes?.[0]?.value || body?.sample?.value || body?.value || body;
-  let fieldData: any = webhookValue?.form_fields || webhookValue?.field_data || body?.form_fields || body?.field_data || body?.lead?.field_data || {};
+const fetchLeadgenDetails = async (companyId: number, leadgenId: string): Promise<any | null> => {
+  if (!leadgenId) return null;
+  const { clientId, clientSecret } = getMetaOauthConfig();
+  const tokens: string[] = [];
+  if (clientId && clientSecret) tokens.push(`${clientId}|${clientSecret}`);
+
+  const [conn]: any = await sequelize.query(
+    `SELECT access_token FROM meta_connections WHERE company_id = :companyId ORDER BY id DESC LIMIT 1`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+  if (conn?.access_token) tokens.push(String(conn.access_token));
+
+  for (const accessToken of tokens) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const url = new URL(`https://graph.facebook.com/${graphApiVersion}/${encodeURIComponent(leadgenId)}`);
+        url.searchParams.set('fields', 'id,created_time,field_data,form_id,ad_id,campaign_id,adset_id');
+        url.searchParams.set('access_token', accessToken);
+        const resp = await fetch(url.toString());
+        const data: any = await resp.json().catch(() => ({}));
+        if (resp.ok && data?.id) return data;
+        const retryable = Number(resp.status) >= 500 || Number(resp.status) === 429;
+        if (!retryable || attempt === 3) break;
+      } catch {
+        if (attempt === 3) break;
+      }
+      await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
+    }
+  }
+  return null;
+};
+
+const extractMetaLeadEvents = async (body: any, companyId: number): Promise<any[]> => {
+  if (body?.object === 'page' && Array.isArray(body?.entry)) {
+    const events: any[] = [];
+    for (const entry of body.entry) {
+      const pageId = String(entry?.id || '').trim();
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const ch of changes) {
+        const field = String(ch?.field || '').toLowerCase();
+        const value = ch?.value || {};
+        const leadgenId = String(value?.leadgen_id || value?.lead?.id || '').trim();
+        if (field !== 'leadgen' && !leadgenId) continue;
+        const leadDetails = await fetchLeadgenDetails(companyId, leadgenId);
+        events.push({
+          companyId,
+          event_id: String(value?.event_id || `${pageId}:${leadgenId}:${String(value?.created_time || '')}`),
+          page_id: String(value?.page_id || pageId),
+          form_id: String(value?.form_id || leadDetails?.form_id || ''),
+          leadgen_id: leadgenId,
+          ad_id: String(value?.ad_id || leadDetails?.ad_id || ''),
+          campaign_id: String(value?.campaign_id || leadDetails?.campaign_id || ''),
+          adset_id: String(value?.adset_id || value?.adgroup_id || leadDetails?.adset_id || ''),
+          field_data: leadDetails?.field_data || [],
+          _rawPayload: body
+        });
+      }
+    }
+    return events;
+  }
+  return [body || {}];
+};
+
+const processMetaLeadEvent = async (body: any) => {
+  const fieldData = body?.form_fields || body?.field_data || body?.lead?.field_data || {};
   const getField = (k: string) => {
     if (!fieldData) return '';
     if (Array.isArray(fieldData)) {
@@ -1177,133 +1530,195 @@ aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
     }
     return fieldData[k] || '';
   };
-  const companyId = Number(body.companyId || 1);
-  const leadgenIdRaw = String(webhookValue?.leadgen_id || body?.leadgen_id || '');
-  if ((!fieldData || (Array.isArray(fieldData) ? fieldData.length === 0 : Object.keys(fieldData || {}).length === 0)) && leadgenIdRaw) {
-    const fetched = await fetchMetaLeadFieldData(companyId, leadgenIdRaw);
-    if (fetched && (Array.isArray(fetched) ? fetched.length > 0 : Object.keys(fetched || {}).length > 0)) fieldData = fetched;
+
+  const companyId = Number(body.companyId || 0);
+  if (!companyId || Number.isNaN(companyId)) return { ok: false, ingested: false, outreach: false, reason: "missing_company_id" };
+  const replayKey = buildMetaLeadReplayKey(companyId, body);
+  const accepted = await reserveMetaLeadReplayKey(replayKey, META_LEAD_REPLAY_TTL_SECONDS);
+  if (!accepted) return { ok: true, ingested: false, outreach: false, reason: 'replay_blocked' };
+
+  const phoneRaw = String(getField('phone_number') || getField('telefono') || body.phone || '').trim();
+  const phone = phoneRaw.replace(/\D/g, '');
+  const email = String(getField('email') || body.email || '').trim();
+  const name = String(getField('full_name') || getField('nombre') || body.name || '').trim();
+  const formId = String(body.form_id || body?.form?.id || '').trim();
+  const formNameFromPayload = String(body.form_name || body?.form?.name || body?.lead?.form_name || '').trim();
+  const formName = formNameFromPayload || await resolveMetaFormName(companyId, formId);
+
+  await sequelize.query(`INSERT INTO meta_lead_events (company_id, event_id, page_id, form_id, form_name, leadgen_id, ad_id, campaign_id, adset_id, form_fields_json, payload_json, contact_phone, contact_email, contact_name, created_at, updated_at)
+    VALUES (:companyId, :eventId, :pageId, :formId, :formName, :leadgenId, :adId, :campaignId, :adsetId, :formFieldsJson, :payloadJson, :phone, :email, :name, NOW(), NOW())`, {
+    replacements: {
+      companyId,
+      eventId: String(body.event_id || body.id || ''),
+      pageId: String(body.page_id || ''),
+      formId,
+      formName,
+      leadgenId: String(body.leadgen_id || ''),
+      adId: String(body.ad_id || ''),
+      campaignId: String(body.campaign_id || ''),
+      adsetId: String(body.adset_id || ''),
+      formFieldsJson: JSON.stringify(fieldData || {}),
+      payloadJson: JSON.stringify(body._rawPayload || body || {}),
+      phone: phoneRaw,
+      email,
+      name
+    },
+    type: QueryTypes.INSERT
+  });
+
+  const normalizedPhone = phone;
+  const hasRealPhone = Boolean(phone);
+  if (!normalizedPhone) return { ok: true, ingested: true, outreach: false, reason: 'no_phone' };
+
+  let isNewContact = false;
+  let contact: any = await Contact.findOne({ where: { number: normalizedPhone, companyId } } as any);
+  if (!contact) {
+    isNewContact = true;
+    contact = await Contact.create({ name: name || normalizedPhone, number: normalizedPhone, email, companyId, isGroup: false, lead_score: scoreFromText(JSON.stringify(fieldData || {}), 0), leadStatus: 'engaged', needs: JSON.stringify(fieldData || {}).slice(0, 900) } as any);
+  } else {
+    await contact.update({ name: name || contact.name, email: email || contact.email, lead_score: scoreFromText(JSON.stringify(fieldData || {}), Number(contact.lead_score || 0)), leadStatus: 'engaged', needs: JSON.stringify(fieldData || {}).slice(0, 900), updatedAt: new Date() } as any);
   }
-  const syntheticSuffix = String(leadgenIdRaw || Date.now()).replace(/\D/g, '').slice(-8).padStart(8, '0');
-  const syntheticPhone = `54911${syntheticSuffix}`;
-  const phoneRaw = String(
-    getField('phone_number') ||
-      getField('telefono') ||
-      webhookValue?.phone_number ||
-      body.phone ||
-      ''
-  ).trim();
-  const phone = phoneRaw.replace(/\D/g, '') || syntheticPhone;
-  const isSyntheticPhone = phoneRaw.replace(/\D/g, '').length === 0;
-  const formId = String(body.form_id || webhookValue?.form_id || '').trim();
-  const sourceLabel = formId ? `meta_form_${formId}` : 'meta_lead_ads';
-  const email = String(getField('email') || webhookValue?.email || body.email || '').trim();
-  const name = String(getField('full_name') || getField('nombre') || webhookValue?.full_name || body.name || '').trim();
-  const businessType = String(getField('rubro') || getField('business_type') || getField('industry') || '').trim();
-  const leadNeed = String(getField('interes') || getField('interés') || getField('consulta') || getField('necesidad') || getField('mensaje') || '').trim();
-  const needsPayload = leadNeed || JSON.stringify(fieldData || {}).slice(0, 900);
 
-  await sequelize.query(`INSERT INTO meta_lead_events (company_id, event_id, page_id, form_id, leadgen_id, ad_id, campaign_id, adset_id, form_fields_json, payload_json, contact_phone, contact_email, contact_name, created_at, updated_at)
-    VALUES (:companyId, :eventId, :pageId, :formId, :leadgenId, :adId, :campaignId, :adsetId, :formFieldsJson, :payloadJson, :phone, :email, :name, NOW(), NOW())`, {
-      replacements: {
-        companyId,
-        eventId: String(body.event_id || body.id || webhookValue?.leadgen_id || ''),
-        pageId: String(body.page_id || webhookValue?.page_id || body?.entry?.[0]?.id || ''),
-        formId: String(body.form_id || webhookValue?.form_id || ''),
-        leadgenId: String(body.leadgen_id || webhookValue?.leadgen_id || ''),
-        adId: String(body.ad_id || webhookValue?.ad_id || ''),
-        campaignId: String(body.campaign_id || webhookValue?.campaign_id || ''),
-        adsetId: String(body.adset_id || webhookValue?.adset_id || webhookValue?.adgroup_id || ''),
-        formFieldsJson: JSON.stringify(fieldData || {}),
-        payloadJson: JSON.stringify(body || {}),
-        phone: phoneRaw,
-        email,
-        name
-      },
-      type: QueryTypes.INSERT
-    });
+  await ensureMetaFormsTag(Number(contact.id));
 
-  // Si Meta envía payload de prueba sin phone_number, usamos teléfono sintético estable por leadgen_id.
-
-  let contact: any = await Contact.findOne({ where: { number: phone, companyId } } as any);
-  if (!contact) contact = await Contact.create({ name: name || phone, number: phone, email, source: sourceLabel, companyId, isGroup: false, lead_score: scoreFromText(JSON.stringify(fieldData || {}), 0), leadStatus: 'engaged', business_type: businessType || null, needs: needsPayload } as any);
-  else await contact.update({ name: name || contact.name, email: email || contact.email, source: sourceLabel || contact.source, lead_score: scoreFromText(JSON.stringify(fieldData || {}), Number(contact.lead_score || 0)), leadStatus: 'engaged', business_type: businessType || contact.business_type || null, needs: needsPayload || contact.needs || null, updatedAt: new Date() } as any);
-
-  try { await ensureMetaFormsTag(Number(contact.id)); } catch {}
+  const tokkoLeadSync: any = await syncLeadToTokko({
+    name: String(name || contact?.name || '').trim(),
+    phone,
+    email,
+    message: `Lead Meta Ads ${String(formName || '').trim() ? `(form ${String(formName).trim()})` : (String(formId || '').trim() ? `(form ${String(formId).trim()})` : '')}`,
+    source: 'meta-lead-webhook'
+  });
 
   const whatsapp: any = await resolveWhatsapp(companyId);
   let ticket: any = await Ticket.findOne({ where: { contactId: contact.id, whatsappId: whatsapp.id }, order: [['updatedAt', 'DESC']] } as any);
   if (ticket && !['open', 'pending'].includes(String(ticket.status || ''))) ticket = null;
-  if (!ticket) ticket = await Ticket.create({ contactId: contact.id, whatsappId: whatsapp.id, companyId, status: 'pending', unreadMessages: 0, lastMessage: 'Nuevo lead Meta Ads', bot_enabled: true, human_override: false } as any);
+  if (!ticket) ticket = await Ticket.create({ contactId: contact.id, whatsappId: whatsapp.id, companyId, status: 'pending', unreadMessages: 0, lastMessage: 'Nuevo lead Meta Ads' } as any);
 
-  const getLeadFieldValue = (...keys: string[]) => {
-    const tries = keys.map((k) => String(k || '').toLowerCase());
-    if (Array.isArray(fieldData)) {
-      for (const k of tries) {
-        const found: any = fieldData.find((x: any) => String(x?.name || '').toLowerCase() === k);
-        const v = found?.values?.[0];
-        if (v !== undefined && v !== null && String(v).trim()) return String(v).trim();
-      }
-      return '';
+  let firstContactTemplateSent = false;
+  let firstContactTemplateError: string | null = null;
+
+  if (isNewContact) {
+    try {
+      const holaTemplateName = String((getRuntimeSettings() as any).waFirstContactHolaTemplateName || 'hola').trim() || 'hola';
+      await SendMessageService({
+        ticketId: Number(ticket.id),
+        templateName: holaTemplateName,
+        languageCode: 'es_AR'
+      } as any);
+      firstContactTemplateSent = true;
+    } catch (e: any) {
+      firstContactTemplateError = String(e?.message || e || 'hola_template_failed');
+      console.error('[meta-leads] first-contact hola template failed', {
+        contactId: Number(contact.id),
+        ticketId: Number(ticket.id),
+        error: firstContactTemplateError
+      });
     }
-    if (fieldData && typeof fieldData === 'object') {
-      for (const k of tries) {
-        const entry: any = (fieldData as any)[k] ?? (fieldData as any)[k.replace(/[^a-z0-9]/g, '')];
-        if (entry !== undefined && entry !== null && String(entry).trim()) return String(entry).trim();
-      }
-    }
-    return '';
-  };
-
-  const interest = getLeadFieldValue(
-    'interes', 'interés', 'interest', 'consulta', 'necesidad',
-    'property_type', 'tipo_propiedad', 'inmueble', 'producto'
-  );
-  const formContext = getLeadFieldValue('form_name', 'nombre_formulario');
-  const helloName = (name || '').trim() ? ` ${name.trim()}` : '';
-  const normalizedNeed = String(leadNeed || interest || '').trim();
-  const needsReply = normalizedNeed
-    ? `Sobre lo que nos pediste${formContext ? ` en ${formContext}` : ''} ("${normalizedNeed}"): te ayudo con eso ahora mismo. `
-    : '';
-
-  const leadOpeners = [
-    `¡Hola${helloName}! 👋 ${needsReply}Gracias por completar el formulario desde Meta. Si querés, te muestro opciones concretas según eso, o ajustamos por zona/presupuesto/tipo.`,
-    `¡Hola${helloName}! 👋 ${needsReply}¡Gracias por escribirnos desde Meta! Si te parece, arranco con sugerencias alineadas a lo que dejaste en el formulario.`,
-    `¡Hola${helloName}! 👋 ${needsReply}Ya vi tu formulario. ¿Querés que empecemos por opciones sugeridas o preferís que afinemos primero algún detalle?`
-  ];
-  const outreach = leadOpeners[Math.floor(Math.random() * leadOpeners.length)];
-
-  if (isSyntheticPhone) return res.json({ ok: true, ingested: true, outreach: false, skippedReason: 'meta_phone_missing', contactId: contact.id });
-
-  try {
-    const outId = await sendCloudText(phone, outreach, companyId);
-    await Message.create({ id: outId, body: outreach, contactId: contact.id, fromMe: true, read: true, ack: 1, mediaType: 'chat' } as any);
-    await ticket.update({ status: ticket.status === 'pending' ? 'open' : ticket.status, lastMessage: outreach, updatedAt: new Date() } as any);
-  } catch (e: any) {
-    await logIntegrationError({
-      companyId,
-      source: 'meta',
-      severity: 'high',
-      errorCode: 'META_LEAD_OUTREACH_SEND_ERROR',
-      message: String(e?.message || e || 'meta outreach send error'),
-      suggestion: 'Verificar credenciales de WhatsApp Cloud y número vinculado',
-      payload: { phone, contactId: contact.id }
-    });
-    // do not fail webhook ack
   }
 
-  return res.json({ ok: true, ingested: true, outreach: true, contactId: contact.id });
+  return {
+    ok: true,
+    ingested: true,
+    outreach: true,
+    contactId: contact.id,
+    ticketId: ticket.id,
+    firstContactTemplateSent,
+    firstContactTemplateError,
+    tokko: {
+      synced: Boolean(tokkoLeadSync?.ok),
+      skipped: Boolean(tokkoLeadSync?.skipped),
+      statusCode: tokkoLeadSync?.status || null
+    }
+  };
+};
+
+aiRoutes.post('/meta-leads/webhook', featureGate('meta_leads'), async (req: any, res) => {
+  await ensureMetaLeadTables();
+  const rootBody = req.body || {};
+  const companyId = Number(rootBody.companyId || 0);
+  if (!companyId || Number.isNaN(companyId)) return res.status(400).json({ ok: false, error: "companyId is required" });
+  const events = await extractMetaLeadEvents(rootBody, companyId);
+  const results = [] as any[];
+  for (const ev of events) {
+    try {
+      results.push(await processMetaLeadEvent(ev));
+    } catch (e: any) {
+      results.push({ ok: false, error: String(e?.message || e || 'event_failed') });
+    }
+  }
+  const ingestedCount = results.filter((r) => r?.ingested).length;
+  if (ingestedCount > 0) await incrementUsage(companyId, "meta_leads.ingested", ingestedCount);
+  return res.json({ ok: true, ingested: results.some((r) => r?.ingested), events: results.length, results });
+});
+
+
+
+aiRoutes.post('/metrics/ai-rag/event', isAuth, async (req: any, res) => {
+  await ensureAiMetricTables();
+  const companyId = Number(req.user?.companyId || 0);
+  const source = String(req.body?.source || 'ai').slice(0, 40);
+  const tokensIn = Math.max(0, Number(req.body?.tokensIn || 0));
+  const tokensOut = Math.max(0, Number(req.body?.tokensOut || 0));
+  const costUsd = Math.max(0, Number(req.body?.costUsd || 0));
+  const latencyMs = Math.max(0, Number(req.body?.latencyMs || 0));
+  const qualityScore = req.body?.qualityScore == null ? null : Number(req.body.qualityScore);
+
+  await sequelize.query(
+    `INSERT INTO ai_metric_events (company_id, source, tokens_in, tokens_out, cost_usd, latency_ms, quality_score, created_at)
+     VALUES (:companyId, :source, :tokensIn, :tokensOut, :costUsd, :latencyMs, :qualityScore, NOW())`,
+    { replacements: { companyId, source, tokensIn, tokensOut, costUsd, latencyMs, qualityScore }, type: QueryTypes.INSERT }
+  );
+
+  await incrementUsage(companyId, 'ai.tokens_in', tokensIn);
+  await incrementUsage(companyId, 'ai.tokens_out', tokensOut);
+  return res.json({ ok: true });
+});
+
+aiRoutes.get('/metrics/ai-rag', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const month = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
+  await ensureAiMetricTables();
+  const rows: any = await sequelize.query(
+    `SELECT metric_code, metric_value FROM usage_counters WHERE company_id = :companyId AND period_ym = :month AND metric_code LIKE 'ai.%' ORDER BY metric_code`,
+    { replacements: { companyId, month }, type: QueryTypes.SELECT }
+  );
+  const [agg]: any = await sequelize.query(
+    `SELECT COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(AVG(NULLIF(quality_score,0)),0) AS avg_quality, COALESCE(AVG(NULLIF(latency_ms,0)),0) AS avg_latency_ms
+     FROM ai_metric_events
+     WHERE company_id = :companyId AND TO_CHAR(created_at, 'YYYY-MM') = :month`,
+    { replacements: { companyId, month }, type: QueryTypes.SELECT }
+  );
+  return res.json({ ok: true, month, metrics: rows, aggregate: agg || {} });
 });
 
 aiRoutes.get('/meta-leads/context/:phone', isAuth, async (req: any, res) => {
   await ensureMetaLeadTables();
   const { companyId } = req.user;
   const phone = String(req.params.phone || '').replace(/\D/g, '');
-  const [row]: any = await sequelize.query(`SELECT id, form_id, campaign_id, ad_id, contact_name, contact_email, form_fields_json, created_at
+  const [row]: any = await sequelize.query(`SELECT id, form_id, form_name, campaign_id, ad_id, contact_name, contact_email, form_fields_json, created_at
     FROM meta_lead_events
     WHERE company_id = :companyId AND REGEXP_REPLACE(COALESCE(contact_phone,''), '\\D', '', 'g') = :phone
     ORDER BY id DESC LIMIT 1`, { replacements: { companyId, phone }, type: QueryTypes.SELECT });
   return res.json(row || null);
 });
+
+
+let aiMetricTablesReady = false;
+const ensureAiMetricTables = async () => {
+  if (aiMetricTablesReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_metric_events (
+    id SERIAL PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    source VARCHAR(40) NOT NULL DEFAULT 'ai',
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    cost_usd NUMERIC(10,6) NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    quality_score NUMERIC(5,2),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+  aiMetricTablesReady = true;
+};
 
 let crmFeatureTablesReady = false;
 const ensureCrmFeatureTables = async () => {
@@ -1445,13 +1860,13 @@ aiRoutes.get('/sla/overdue', isAuth, async (req: any, res) => {
     }
   }
 
-  return res.json({ slaMinutes, totalOverdue: overdue.length, reassigned, suggestions, conversations: overdue });
+  return res.json({ slaMinutes, totalOverdue: overdue.length, reassigned, suggestions, tickets: overdue });
 });
 
 aiRoutes.get('/notes', isAuth, async (req: any, res) => {
   await ensureCrmFeatureTables();
   const { companyId } = req.user;
-  const entityType = String(req.query.entityType || 'conversation');
+  const entityType = String(req.query.entityType || 'ticket');
   const entityId = Number(req.query.entityId || 0);
   if (!entityId) return res.status(400).json({ error: 'entityId requerido' });
   const rows = await sequelize.query(`SELECT * FROM internal_notes WHERE company_id = :companyId AND entity_type = :entityType AND entity_id = :entityId ORDER BY id DESC`, { replacements: { companyId, entityType, entityId }, type: QueryTypes.SELECT });
@@ -1461,7 +1876,7 @@ aiRoutes.get('/notes', isAuth, async (req: any, res) => {
 aiRoutes.post('/notes', isAuth, async (req: any, res) => {
   await ensureCrmFeatureTables();
   const { companyId, id: userId } = req.user;
-  const entityType = String(req.body?.entityType || 'conversation');
+  const entityType = String(req.body?.entityType || 'ticket');
   const entityId = Number(req.body?.entityId || 0);
   const content = String(req.body?.content || '').trim();
   if (!entityId || !content) return res.status(400).json({ error: 'entityId y content requeridos' });
@@ -1593,13 +2008,14 @@ aiRoutes.post('/routing/resolve', isAuth, async (req: any, res) => {
     if (Array.isArray(r?.tagsAny) && r.tagsAny.length && !r.tagsAny.some((x: string) => tags.includes(String(x).toLowerCase()))) return false;
     return true;
   }) || null;
-  return res.json({ matched: match, assignedUserId: match?.assignUserId || null, routingKey: match?.key || null });
+  return res.json({ matched: match, assignedUserId: match?.assignUserId || null, queue: match?.queue || null, routingKey: match?.key || null });
 });
 
 aiRoutes.post('/routing/execute', isAuth, async (req: any, res) => {
   const { companyId } = req.user;
+  const ticketId = Number(req.body?.ticketId || 0);
   const contactId = Number(req.body?.contactId || 0);
-  if (!contactId) return res.status(400).json({ error: 'contactId requerido' });
+  if (!ticketId && !contactId) return res.status(400).json({ error: 'ticketId o contactId requerido' });
 
   const runtime = getRuntimeSettings();
   let rules: any[] = [];
@@ -1620,69 +2036,174 @@ aiRoutes.post('/routing/execute', isAuth, async (req: any, res) => {
   }) || null;
 
   if (!match) return res.json({ ok: true, applied: false, reason: 'no_rule_match' });
-  if (dryRun) return res.json({ ok: true, applied: false, dryRun: true, matched: match, assignUserId: match?.assignUserId || null });
+  if (dryRun) return res.json({ ok: true, applied: false, dryRun: true, matched: match, assignUserId: match?.assignUserId || null, queue: match?.queue || null });
 
-  await sequelize.query(`UPDATE contacts SET "assignedUserId" = COALESCE(:assignedUserId, "assignedUserId"), "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`, {
-    replacements: { assignedUserId: Number(match?.assignUserId || 0) || null, contactId, companyId },
-    type: QueryTypes.UPDATE
-  });
-
-  return res.json({ ok: true, applied: true, contactId, matched: match, assignUserId: match?.assignUserId || null });
+  if (ticketId) {
+    await sequelize.query(`UPDATE tickets SET "userId" = COALESCE(:userId, "userId"), queue = COALESCE(:queue, queue), "updatedAt" = NOW() WHERE id = :ticketId AND "companyId" = :companyId`, {
+      replacements: { userId: Number(match?.assignUserId || 0) || null, queue: match?.queue ? String(match.queue) : null, ticketId, companyId },
+      type: QueryTypes.UPDATE
+    });
+  }
+  return res.json({ ok: true, applied: true, ticketId: ticketId || null, contactId: contactId || null, matched: match, assignUserId: match?.assignUserId || null, queue: match?.queue || null });
 });
 
-aiRoutes.post('/leads/:contactId/close', isAuth, async (req: any, res) => {
-  const { companyId } = req.user;
-  const contactId = Number(req.params.contactId || 0);
-  const status = String(req.body?.status || 'lost').toLowerCase();
+const applyLeadStatusAndTokkoSync = async ({ companyId, contactId, status, lossReason }: { companyId: number; contactId: number; status: string; lossReason: string }) => {
   const normalizedStatus = status === 'perdido' ? 'lost' : status;
   const validStatus = ['lost', 'won', 'read', 'engaged', 'warm', 'hot', 'new'];
-  if (!validStatus.includes(normalizedStatus)) return res.status(400).json({ error: 'status inválido' });
-  const lossReason = String(req.body?.lossReason || '').trim();
-  if (normalizedStatus === 'lost' && !lossReason) return res.status(400).json({ error: 'lossReason obligatorio para lead perdido' });
+  if (!validStatus.includes(normalizedStatus)) return { error: 'status inválido', statusCode: 400 } as any;
+  if (normalizedStatus === 'lost' && !lossReason) return { error: 'lossReason obligatorio para lead perdido', statusCode: 400 } as any;
 
-  const [contact]: any = await sequelize.query(`SELECT id, needs FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`, { replacements: { contactId, companyId }, type: QueryTypes.SELECT });
-  if (!contact) return res.status(404).json({ error: 'contacto no encontrado' });
+  const [contact]: any = await sequelize.query(
+    `SELECT id, name, number, email, needs FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`,
+    { replacements: { contactId, companyId }, type: QueryTypes.SELECT }
+  );
+  if (!contact) return { error: 'contacto no encontrado', statusCode: 404 } as any;
+
   const mergedNeeds = [String(contact.needs || ''), lossReason ? `\n[LOSS_REASON] ${lossReason}` : ''].join('').slice(0, 900);
-  await sequelize.query(`UPDATE contacts SET "leadStatus" = :leadStatus, needs = :needs, "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`, {
-    replacements: { contactId, companyId, leadStatus: normalizedStatus === 'won' ? 'customer' : normalizedStatus, needs: mergedNeeds },
-    type: QueryTypes.UPDATE
+  await sequelize.query(
+    `UPDATE contacts SET "leadStatus" = :leadStatus, needs = :needs, "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`,
+    {
+      replacements: { contactId, companyId, leadStatus: normalizedStatus === 'won' ? 'customer' : normalizedStatus, needs: mergedNeeds },
+      type: QueryTypes.UPDATE
+    }
+  );
+
+  const tokkoStatusSync: any = await syncLeadStatusToTokko({
+    name: String(contact.name || ''),
+    phone: String(contact.number || '').replace(/\D/g, ''),
+    email: String(contact.email || ''),
+    status: normalizedStatus,
+    lossReason,
+    source: 'lead-close-status-sync'
   });
-  return res.json({ ok: true, contactId, status: normalizedStatus, lossReason: lossReason || null });
-});
+
+  if (tokkoStatusSync?.ok) {
+    await ensureContactTag(Number(contactId), 'tokko_status_synced', '#0EA5E9');
+  } else if (!tokkoStatusSync?.skipped) {
+    await logIntegrationError({
+      companyId,
+      source: 'tokko',
+      severity: 'medium',
+      errorCode: 'TOKKO_STATUS_SYNC_FAILED',
+      message: String(tokkoStatusSync?.error || `tokko status sync failed (${tokkoStatusSync?.status || 'n/a'})`),
+      suggestion: 'Verificar configuración Tokko y endpoint webcontact',
+      payload: { contactId, status: normalizedStatus, lossReason, result: tokkoStatusSync }
+    });
+  }
+
+  return {
+    ok: true,
+    contactId,
+    status: normalizedStatus,
+    lossReason: lossReason || null,
+    tokko: {
+      synced: Boolean(tokkoStatusSync?.ok),
+      skipped: Boolean(tokkoStatusSync?.skipped),
+      statusCode: tokkoStatusSync?.status || null
+    }
+  };
+};
 
 const updateLeadStatusHandler = async (req: any, res: any) => {
   const { companyId } = req.user;
   const contactId = Number(req.params.contactId || 0);
   const status = String(req.body?.status || 'lost').toLowerCase();
-  const normalizedStatus = status === 'perdido' ? 'lost' : status;
-  const validStatus = ['lost', 'won', 'read', 'engaged', 'warm', 'hot', 'new'];
-  if (!validStatus.includes(normalizedStatus)) return res.status(400).json({ error: 'status inválido' });
   const lossReason = String(req.body?.lossReason || '').trim();
-  if (normalizedStatus === 'lost' && !lossReason) return res.status(400).json({ error: 'lossReason obligatorio para lead perdido' });
 
-  const [contact]: any = await sequelize.query(`SELECT id, needs FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`, { replacements: { contactId, companyId }, type: QueryTypes.SELECT });
-  if (!contact) return res.status(404).json({ error: 'contacto no encontrado' });
-  const mergedNeeds = [String(contact.needs || ''), lossReason ? `\n[LOSS_REASON] ${lossReason}` : ''].join('').slice(0, 900);
-  await sequelize.query(`UPDATE contacts SET "leadStatus" = :leadStatus, needs = :needs, "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`, {
-    replacements: { contactId, companyId, leadStatus: normalizedStatus === 'won' ? 'customer' : normalizedStatus, needs: mergedNeeds },
-    type: QueryTypes.UPDATE
-  });
-  return res.json({ ok: true, contactId, status: normalizedStatus, lossReason: lossReason || null });
+  const result = await applyLeadStatusAndTokkoSync({ companyId, contactId, status, lossReason });
+  if (result?.error) return res.status(Number(result.statusCode || 400)).json({ error: result.error });
+  return res.json(result);
 };
 
+aiRoutes.post('/leads/:contactId/close', isAuth, updateLeadStatusHandler);
 aiRoutes.post('/leads/:contactId/status', isAuth, updateLeadStatusHandler);
 aiRoutes.put('/contacts/:contactId/status', isAuth, updateLeadStatusHandler);
+
+aiRoutes.get('/tokko/audit', isAuth, async (req: any, res) => {
+  await ensureCrmFeatureTables();
+  const { companyId } = req.user;
+  const sinceHours = Math.max(1, Math.min(24 * 30, Number(req.query?.sinceHours || 24 * 7)));
+
+  const [sentTagCountRow]: any = await sequelize.query(
+    `SELECT COUNT(DISTINCT ct."contactId")::int AS count
+     FROM contact_tags ct
+     JOIN tags t ON t.id = ct."tagId"
+     JOIN contacts c ON c.id = ct."contactId"
+     WHERE c."companyId" = :companyId
+       AND LOWER(t.name) = 'enviado_tokko'`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+
+  const [statusSyncedTagCountRow]: any = await sequelize.query(
+    `SELECT COUNT(DISTINCT ct."contactId")::int AS count
+     FROM contact_tags ct
+     JOIN tags t ON t.id = ct."tagId"
+     JOIN contacts c ON c.id = ct."contactId"
+     WHERE c."companyId" = :companyId
+       AND LOWER(t.name) = 'tokko_status_synced'`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+
+  const [errorsCountRow]: any = await sequelize.query(
+    `SELECT COUNT(*)::int AS count
+     FROM integration_errors
+     WHERE company_id = :companyId
+       AND source = 'tokko'
+       AND created_at >= NOW() - (:sinceHours::text || ' hours')::interval`,
+    { replacements: { companyId, sinceHours }, type: QueryTypes.SELECT }
+  );
+
+  const recentErrors: any[] = await sequelize.query(
+    `SELECT id, source, severity, error_code, message, suggestion, payload_json, created_at
+     FROM integration_errors
+     WHERE company_id = :companyId
+       AND source = 'tokko'
+     ORDER BY id DESC
+     LIMIT 20`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+
+  const [metaLeadsRow]: any = await sequelize.query(
+    `SELECT COUNT(*)::int AS count
+     FROM meta_lead_events
+     WHERE company_id = :companyId
+       AND created_at >= NOW() - (:sinceHours::text || ' hours')::interval`,
+    { replacements: { companyId, sinceHours }, type: QueryTypes.SELECT }
+  );
+
+  return res.json({
+    ok: true,
+    sinceHours,
+    totals: {
+      metaLeadsInWindow: Number(metaLeadsRow?.count || 0),
+      contactsTaggedEnviadoTokko: Number(sentTagCountRow?.count || 0),
+      contactsTaggedTokkoStatusSynced: Number(statusSyncedTagCountRow?.count || 0),
+      tokkoErrorsInWindow: Number(errorsCountRow?.count || 0)
+    },
+    recentErrors
+  });
+});
+
+aiRoutes.post('/recapture/run-now', isAuth, async (_req: any, res: any) => {
+  try {
+    await CheckInactiveContactsService();
+    return res.json({ ok: true, message: 'recapture scan executed' });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: String(error?.message || error || 'recapture_run_failed') });
+  }
+});
 
 aiRoutes.post('/followups/schedule', isAuth, async (req: any, res) => {
   await ensureCrmFeatureTables();
   const { companyId } = req.user;
+  const ticketId = Number(req.body?.ticketId || 0) || null;
   const contactId = Number(req.body?.contactId || 0) || null;
-  if (!contactId) return res.status(400).json({ error: 'contactId requerido' });
+  if (!ticketId && !contactId) return res.status(400).json({ error: 'ticketId o contactId requerido' });
   const runtime = getRuntimeSettings();
   let days = [1, 3, 7];
   try { days = (JSON.parse(runtime.followUpDaysJson || '[1,3,7]') || []).map((x: any) => Number(x)).filter((x: number) => x > 0); } catch {}
   const baseDate = req.body?.baseDate ? new Date(req.body.baseDate) : new Date();
-  const sequenceGroup = String(req.body?.sequenceGroup || `${companyId}:conversation:${contactId || 0}:${baseDate.toISOString().slice(0, 10)}`);
+  const sequenceGroup = String(req.body?.sequenceGroup || `${companyId}:${ticketId || 0}:${contactId || 0}:${baseDate.toISOString().slice(0, 10)}`);
   const idempotencyPrefix = String(req.body?.idempotencyKey || `${sequenceGroup}`);
   const created: any[] = [];
   const skipped: any[] = [];
@@ -1696,7 +2217,7 @@ aiRoutes.post('/followups/schedule', isAuth, async (req: any, res) => {
     if (existing[0]) { skipped.push(existing[0]); continue; }
     const [row]: any = await sequelize.query(`INSERT INTO followup_sequences (company_id, ticket_id, contact_id, day_offset, template_text, status, scheduled_at, idempotency_key, sequence_group, created_at)
       VALUES (:companyId, :ticketId, :contactId, :dayOffset, :templateText, 'scheduled', :scheduledAt, :idempotencyKey, :sequenceGroup, NOW()) RETURNING *`, {
-      replacements: { companyId, ticketId: null, contactId, dayOffset: day, templateText: `Seguimiento D+${day}` , scheduledAt, idempotencyKey, sequenceGroup },
+      replacements: { companyId, ticketId, contactId, dayOffset: day, templateText: `Seguimiento D+${day}` , scheduledAt, idempotencyKey, sequenceGroup },
       type: QueryTypes.INSERT
     });
     created.push(row);
@@ -1816,61 +2337,6 @@ aiRoutes.post('/dedupe/merge', isAuth, async (req: any, res) => {
   }
 
   return res.json({ ok: true, primaryContactId, mergedFrom: secondaryContactId, matchedBy: { samePhone, sameEmail }, forced: force });
-});
-
-
-
-aiRoutes.get('/link-preview', isAuth, async (req: any, res: any) => {
-  const rawUrl = String(req.query?.url || '').trim();
-  if (!/^https?:\/\//i.test(rawUrl)) return res.status(400).json({ error: 'url inválida' });
-
-  try {
-    const u = new URL(rawUrl);
-    const host = String(u.hostname || '').toLowerCase();
-    if (!host || host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local')) {
-      return res.status(400).json({ error: 'host no permitido' });
-    }
-
-    const r = await fetch(rawUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; CharlottCRM/1.0; +https://login.charlott.ai)',
-        'Accept': 'text/html,application/xhtml+xml'
-      }
-    });
-
-    const html = String(await r.text().catch(() => '')).slice(0, 250000);
-
-    const pickMeta = (name: string) => {
-      const p1 = new RegExp(`<meta[^>]+(?:property|name)=\"${name}\"[^>]+content=\"([^\"]+)\"`, 'i');
-      const p2 = new RegExp(`<meta[^>]+content=\"([^\"]+)\"[^>]+(?:property|name)=\"${name}\"`, 'i');
-      const p3 = new RegExp(`<meta[^>]+(?:property|name)='${name}'[^>]+content='([^']+)'`, 'i');
-      const p4 = new RegExp(`<meta[^>]+content='([^']+)'[^>]+(?:property|name)='${name}'`, 'i');
-      const m = html.match(p1) || html.match(p2) || html.match(p3) || html.match(p4);
-      return String(m?.[1] || '').trim();
-    };
-
-    const titleTag = (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '').trim();
-    const title = pickMeta('og:title') || pickMeta('twitter:title') || titleTag || u.hostname;
-    const description = pickMeta('og:description') || pickMeta('description') || pickMeta('twitter:description');
-    const image = pickMeta('og:image') || pickMeta('twitter:image');
-
-    const abs = (v: string) => {
-      if (!v) return '';
-      try { return new URL(v, rawUrl).toString(); } catch { return ''; }
-    };
-
-    return res.json({
-      ok: true,
-      url: rawUrl,
-      host: u.hostname,
-      title: title.slice(0, 180),
-      description: String(description || '').slice(0, 240),
-      image: abs(image)
-    });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: String(e?.message || 'link_preview_failed') });
-  }
 });
 
 export default aiRoutes;

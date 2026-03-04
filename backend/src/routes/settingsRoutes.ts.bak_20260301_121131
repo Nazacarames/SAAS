@@ -1,0 +1,147 @@
+import { Router } from "express";
+import isAuth from "../middleware/isAuth";
+import isAdmin from "../middleware/isAdmin";
+import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
+const getWaHardeningMetrics = () => ({}) as any;
+const getWaHardeningAlertSnapshot = () => [] as any[];
+import { getSendHardeningAlertSnapshot, getSendHardeningMetrics } from "../services/MessageServices/SendMessageService";
+
+const settingsRoutes = Router();
+const maskKey = (key: string) => (!key ? "" : key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}${"*".repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`);
+
+settingsRoutes.get("/integrations/api-key", isAuth, isAdmin, async (_req, res) => {
+  const apiKey = process.env.INTEGRATIONS_API_KEY || "";
+  return res.json({ configured: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : "" });
+});
+
+settingsRoutes.get("/whatsapp-cloud", isAuth, isAdmin, async (_req, res) => {
+  const settings = getRuntimeSettings();
+  const {
+    waCloudVerifyToken,
+    waCloudAccessToken,
+    waCloudAppSecret,
+    tokkoApiKey,
+    metaLeadAdsAppSecret,
+    ...safeSettings
+  } = settings as any;
+
+  return res.json({
+    configured: {
+      verifyToken: Boolean(waCloudVerifyToken),
+      phoneNumberId: Boolean(settings.waCloudPhoneNumberId),
+      accessToken: Boolean(waCloudAccessToken),
+      appSecret: Boolean(waCloudAppSecret),
+      recapTemplate: Boolean(settings.waRecapTemplateName),
+      tokkoApiKey: Boolean(tokkoApiKey),
+      metaLeadAdsAppSecret: Boolean(metaLeadAdsAppSecret)
+    },
+    settings: {
+      ...safeSettings,
+      waCloudVerifyTokenMasked: waCloudVerifyToken ? maskKey(waCloudVerifyToken) : "",
+      waCloudAccessTokenMasked: waCloudAccessToken ? maskKey(waCloudAccessToken) : "",
+      waCloudAppSecretMasked: waCloudAppSecret ? maskKey(waCloudAppSecret) : "",
+      tokkoApiKeyMasked: tokkoApiKey ? maskKey(tokkoApiKey) : "",
+      metaLeadAdsAppSecretMasked: metaLeadAdsAppSecret ? maskKey(metaLeadAdsAppSecret) : ""
+    }
+  });
+});
+
+settingsRoutes.get("/meta/webhook-status", isAuth, isAdmin, async (_req, res) => {
+  const s = getRuntimeSettings();
+  return res.json({
+    enabled: Boolean(s.metaLeadAdsEnabled),
+    verifyTokenConfigured: Boolean(s.metaLeadAdsWebhookVerifyToken),
+    appIdConfigured: Boolean(s.metaLeadAdsAppId),
+    appSecretConfigured: Boolean(s.metaLeadAdsAppSecret),
+    pageIdConfigured: Boolean(s.metaLeadAdsPageId),
+    callbackUrl: `${process.env.BACKEND_URL || ""}/api/ai/meta-leads/webhook`
+  });
+});
+
+settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_req, res) => {
+  const settings = getRuntimeSettings();
+  return res.json({
+    effectiveConfig: {
+      waOutboundDedupeTtlSeconds: Number(settings.waOutboundDedupeTtlSeconds || 120),
+      waOutboundDedupeFailClosed: Boolean((settings as any).waOutboundDedupeFailClosed),
+      waOutboundRetryMaxAttempts: Number(settings.waOutboundRetryMaxAttempts || 3),
+      waOutboundRetryMaxDelayMs: Number((settings as any).waOutboundRetryMaxDelayMs || 15000),
+      waOutboundRetryOnTimeout: Boolean((settings as any).waOutboundRetryOnTimeout),
+      waOutboundRetryRequireIdempotencyKey: Boolean((settings as any).waOutboundRetryRequireIdempotencyKey),
+      waOutboundRequestTimeoutMs: Number((settings as any).waOutboundRequestTimeoutMs || 12000),
+      waFirstContactHolaTemplateRequired: Boolean((settings as any).waFirstContactHolaTemplateRequired),
+      waInboundReplayTtlSeconds: Number(settings.waInboundReplayTtlSeconds || 86400),
+      waInboundReplayMaxBlocksPerPayload: Number(settings.waInboundReplayMaxBlocksPerPayload || 40),
+      waWebhookPayloadReplayTtlSeconds: Number((settings as any).waWebhookPayloadReplayTtlSeconds || 120),
+      waWebhookPayloadReplayCacheMaxEntries: Number((settings as any).waWebhookPayloadReplayCacheMaxEntries || 5000)
+    },
+    metrics: {
+      inboundWebhook: getWaHardeningMetrics(),
+      outboundSend: getSendHardeningMetrics()
+    },
+    alerts: {
+      inboundWebhook: getWaHardeningAlertSnapshot(),
+      outboundSend: getSendHardeningAlertSnapshot()
+    }
+  });
+});
+
+settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
+  const body = req.body || {};
+  const next = saveRuntimeSettings({
+    waCloudVerifyToken: String(body.waCloudVerifyToken ?? ""),
+    waCloudPhoneNumberId: String(body.waCloudPhoneNumberId ?? ""),
+    waCloudAccessToken: String(body.waCloudAccessToken ?? ""),
+    waCloudAppSecret: String(body.waCloudAppSecret ?? ""),
+    waCloudDefaultWhatsappId: Number(body.waCloudDefaultWhatsappId || 1),
+    waRecapEnabled: typeof body.waRecapEnabled === "boolean" ? body.waRecapEnabled : false,
+    waRecapTemplateName: String(body.waRecapTemplateName ?? ""),
+    waRecapTemplateLang: String(body.waRecapTemplateLang ?? "es_AR"),
+    waRecapInactivityMinutes: Number(body.waRecapInactivityMinutes || 4320),
+    agentGuardrailsEnabled: typeof body.agentGuardrailsEnabled === "boolean" ? body.agentGuardrailsEnabled : true,
+    agentConversationPoliciesJson: String(body.agentConversationPoliciesJson ?? ""),
+    tokkoEnabled: typeof body.tokkoEnabled === "boolean" ? body.tokkoEnabled : false,
+    tokkoApiKey: String(body.tokkoApiKey ?? ""),
+    tokkoBaseUrl: String(body.tokkoBaseUrl ?? "https://www.tokkobroker.com/api/v1"),
+    tokkoLeadsPath: String(body.tokkoLeadsPath ?? "/webcontact/"),
+    tokkoPropertiesPath: String(body.tokkoPropertiesPath ?? "/property/"),
+    tokkoSyncLeadsEnabled: typeof body.tokkoSyncLeadsEnabled === "boolean" ? body.tokkoSyncLeadsEnabled : true,
+    tokkoAgentSearchEnabled: typeof body.tokkoAgentSearchEnabled === "boolean" ? body.tokkoAgentSearchEnabled : true,
+    tokkoSyncContactsEnabled: typeof body.tokkoSyncContactsEnabled === "boolean" ? body.tokkoSyncContactsEnabled : false,
+    tokkoSyncContactTagsEnabled: typeof body.tokkoSyncContactTagsEnabled === "boolean" ? body.tokkoSyncContactTagsEnabled : false,
+    tokkoFallbackToLocalSearch: typeof body.tokkoFallbackToLocalSearch === "boolean" ? body.tokkoFallbackToLocalSearch : true,
+    tokkoDebugLogsEnabled: typeof body.tokkoDebugLogsEnabled === "boolean" ? body.tokkoDebugLogsEnabled : false,
+    tokkoRateLimitEnabled: typeof body.tokkoRateLimitEnabled === "boolean" ? body.tokkoRateLimitEnabled : true,
+    tokkoCooldownSeconds: Number(body.tokkoCooldownSeconds || 10),
+    tokkoSafeWriteMode: typeof body.tokkoSafeWriteMode === "boolean" ? body.tokkoSafeWriteMode : true,
+    metaLeadAdsEnabled: typeof body.metaLeadAdsEnabled === "boolean" ? body.metaLeadAdsEnabled : false,
+    metaLeadAdsWebhookVerifyToken: String(body.metaLeadAdsWebhookVerifyToken ?? ""),
+    metaLeadAdsAppId: String(body.metaLeadAdsAppId ?? ""),
+    metaLeadAdsAppSecret: String(body.metaLeadAdsAppSecret ?? ""),
+    metaLeadAdsPageId: String(body.metaLeadAdsPageId ?? ""),
+    tokkoTabVisible: typeof body.tokkoTabVisible === "boolean" ? body.tokkoTabVisible : true,
+    slaEnabled: typeof body.slaEnabled === "boolean" ? body.slaEnabled : true,
+    slaMinutes: Number(body.slaMinutes || 60),
+    slaAutoReassign: typeof body.slaAutoReassign === "boolean" ? body.slaAutoReassign : false,
+    slaSuggestOnly: typeof body.slaSuggestOnly === "boolean" ? body.slaSuggestOnly : true,
+    followUpEnabled: typeof body.followUpEnabled === "boolean" ? body.followUpEnabled : true,
+    followUpDaysJson: String(body.followUpDaysJson ?? "[1,3,7]"),
+    routingRulesJson: String(body.routingRulesJson ?? "[]"),
+    dedupeStrictEmail: typeof body.dedupeStrictEmail === "boolean" ? body.dedupeStrictEmail : false,
+    waOutboundDedupeTtlSeconds: Number(body.waOutboundDedupeTtlSeconds || 120),
+    waOutboundDedupeFailClosed: typeof body.waOutboundDedupeFailClosed === "boolean" ? body.waOutboundDedupeFailClosed : false,
+    waOutboundRetryMaxAttempts: Number(body.waOutboundRetryMaxAttempts || 3),
+    waOutboundRetryMaxDelayMs: Number(body.waOutboundRetryMaxDelayMs || 15000),
+    waOutboundRetryOnTimeout: typeof body.waOutboundRetryOnTimeout === "boolean" ? body.waOutboundRetryOnTimeout : false,
+    waOutboundRetryRequireIdempotencyKey: typeof body.waOutboundRetryRequireIdempotencyKey === "boolean" ? body.waOutboundRetryRequireIdempotencyKey : true,
+    waOutboundRequestTimeoutMs: Number(body.waOutboundRequestTimeoutMs || 12000),
+    waFirstContactHolaTemplateRequired: typeof body.waFirstContactHolaTemplateRequired === "boolean" ? body.waFirstContactHolaTemplateRequired : true,
+    waInboundReplayTtlSeconds: Number(body.waInboundReplayTtlSeconds || 86400),
+    waInboundReplayMaxBlocksPerPayload: Number(body.waInboundReplayMaxBlocksPerPayload || 40),
+    waWebhookPayloadReplayTtlSeconds: Number(body.waWebhookPayloadReplayTtlSeconds || 120),
+    waWebhookPayloadReplayCacheMaxEntries: Number(body.waWebhookPayloadReplayCacheMaxEntries || 5000)
+  });
+  return res.json({ ok: true, settings: next });
+});
+
+export default settingsRoutes;

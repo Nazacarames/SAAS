@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import isAuth from '../middleware/isAuth';
-import { getRuntimeSettings, saveRuntimeSettings } from '../services/SettingsServices/RuntimeSettingsService';
+import { getRuntimeSettings, saveRuntimeSettings, getRuntimeSettingsForCompany, saveRuntimeSettingsForCompany } from '../services/SettingsServices/RuntimeSettingsService';
+import Company from '../models/Company';
 import { syncTokkoLocationsToKnowledge } from '../services/TokkoServices/TokkoService';
 
 const settingsRoutes = Router();
@@ -11,8 +12,9 @@ const maskKey = (key: string) => {
   return key.slice(0, 4) + "*".repeat(Math.max(4, key.length - 8)) + key.slice(-4);
 };
 
-settingsRoutes.get('/whatsapp-cloud', isAuth, async (_req, res) => {
-  const s = getRuntimeSettings();
+settingsRoutes.get('/whatsapp-cloud', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const s = await getRuntimeSettingsForCompany(companyId);
   return res.json({
     settings: {
       ...s,
@@ -29,10 +31,11 @@ settingsRoutes.get('/whatsapp-cloud', isAuth, async (_req, res) => {
   });
 });
 
-settingsRoutes.put('/whatsapp-cloud', isAuth, async (req, res) => {
+settingsRoutes.put('/whatsapp-cloud', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
   const body = req.body || {};
-  const prev = getRuntimeSettings();
-  const next = saveRuntimeSettings({
+  const prev = await getRuntimeSettingsForCompany(companyId);
+  const next = await saveRuntimeSettingsForCompany(companyId, {
     waCloudVerifyToken: String(body.waCloudVerifyToken ?? ''),
     waCloudPhoneNumberId: String(body.waCloudPhoneNumberId ?? ''),
     waCloudAccessToken: String(body.waCloudAccessToken ?? ''),
@@ -93,7 +96,7 @@ settingsRoutes.put('/whatsapp-cloud', isAuth, async (req, res) => {
       String(prev.tokkoPropertiesPath || '') !== String(next.tokkoPropertiesPath || '');
 
     if (next.tokkoEnabled && next.tokkoApiKey && (tokkoJustEnabled || tokkoCredentialsUpdated)) {
-      tokkoKnowledgeSync = await syncTokkoLocationsToKnowledge(1);
+      tokkoKnowledgeSync = await syncTokkoLocationsToKnowledge(companyId);
     }
   } catch (e: any) {
     tokkoKnowledgeSync = { ok: false, error: String(e?.message || e || 'tokko_kb_sync_error') };
@@ -102,8 +105,9 @@ settingsRoutes.put('/whatsapp-cloud', isAuth, async (req, res) => {
   return res.json({ ok: true, settings: next, tokkoKnowledgeSync });
 });
 
-settingsRoutes.get('/meta/webhook-status', isAuth, async (_req, res) => {
-  const s = getRuntimeSettings();
+settingsRoutes.get('/meta/webhook-status', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const s = await getRuntimeSettingsForCompany(companyId);
   const callback = String(process.env.BACKEND_URL || 'https://login.charlott.ai') + '/api/ai/meta-leads/webhook';
   return res.json({
     verifyTokenConfigured: Boolean(s.metaLeadAdsWebhookVerifyToken),
@@ -111,13 +115,24 @@ settingsRoutes.get('/meta/webhook-status', isAuth, async (_req, res) => {
   });
 });
 
-settingsRoutes.get('/integrations/api-key', isAuth, async (_req, res) => {
-  const apiKey = process.env.INTEGRATIONS_API_KEY || '';
+settingsRoutes.get('/integrations/api-key', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const company: any = await Company.findByPk(companyId);
+  const apiKey = String(company?.integrationApiKey || '');
   return res.json({
     configured: Boolean(apiKey),
     apiKey,
     apiKeyMasked: apiKey ? maskKey(apiKey) : ''
   });
+});
+
+settingsRoutes.put('/integrations/api-key', isAuth, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const apiKey = String(req.body?.apiKey || '').trim();
+  const company: any = await Company.findByPk(companyId);
+  if (!company) return res.status(404).json({ error: 'Company not found' });
+  await company.update({ integrationApiKey: apiKey || null } as any);
+  return res.json({ ok: true, configured: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : '' });
 });
 
 export default settingsRoutes;

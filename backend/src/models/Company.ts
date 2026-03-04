@@ -37,6 +37,9 @@ class Company extends Model {
     @Column
     status: boolean;
 
+    @Column
+    integrationApiKey: string;
+
     @CreatedAt
     createdAt: Date;
 
