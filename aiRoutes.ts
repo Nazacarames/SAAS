@@ -896,6 +896,59 @@ aiRoutes.get(['/reports/attribution', '/reports/leads'], isAuth, async (req: any
   });
 });
 
+const TOOL_MANIFEST = [
+  {
+    name: "upsert_contact",
+    description: "Crea o actualiza un contacto por número",
+    requiredArgs: ["number"],
+    optionalArgs: ["name", "email", "businessType", "needs", "leadScore"]
+  },
+  {
+    name: "agendar_cita",
+    description: "Agenda una cita para un contacto",
+    requiredArgs: ["contactId", "startsAt"],
+    optionalArgs: ["durationMin", "ticketId", "serviceType", "notes"]
+  },
+  {
+    name: "reprogramar_cita",
+    description: "Reprograma una cita existente",
+    requiredArgs: ["appointmentId", "startsAt"],
+    optionalArgs: ["durationMin", "reason"]
+  },
+  {
+    name: "cancelar_cita",
+    description: "Cancela una cita existente",
+    requiredArgs: ["appointmentId"],
+    optionalArgs: ["reason"]
+  },
+  {
+    name: "consultar_conocimiento",
+    description: "Busca fragmentos relevantes en la base de conocimiento",
+    requiredArgs: ["query"],
+    optionalArgs: []
+  },
+  {
+    name: "actualizar_lead_score",
+    description: "Actualiza score y estado del lead",
+    requiredArgs: [],
+    optionalArgs: ["contactId", "ticketId", "leadScore", "inboundText", "text"]
+  },
+  {
+    name: "agregar_nota",
+    description: "Agrega una nota operativa asociada a ticket",
+    requiredArgs: ["ticketId", "note"],
+    optionalArgs: []
+  }
+];
+
+aiRoutes.get("/tools/manifest", isAuth, async (_req: any, res) => {
+  return res.json({ ok: true, tools: TOOL_MANIFEST });
+});
+
+aiRoutes.get("/mcp/tools", isAuth, async (_req: any, res) => {
+  return res.json({ ok: true, tools: TOOL_MANIFEST, protocol: "mcp-like" });
+});
+
 aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
   const { companyId, id: userId } = req.user;
   const { tool, args = {} } = req.body || {};
