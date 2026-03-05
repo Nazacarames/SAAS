@@ -390,6 +390,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
       signatureInvalidBlocked: readCounter(inboundCounters, "inbound.signature_invalid_blocked"),
       signatureInvalidRateLimited: readCounter(inboundCounters, "inbound.signature_invalid_rate_limited"),
       invalidEnvelopeBlocked: readCounter(inboundCounters, "inbound.invalid_envelope_blocked"),
+      invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
       payloadReplayBlocked: readCounter(inboundCounters, "inbound.payload_replay_blocked"),
       payloadReplayGuardInfraErrors: readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error"),
       payloadSizeBlocked: readCounter(inboundCounters, "inbound.payload_size_blocked"),
@@ -427,6 +428,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
   }
   if (summary.inbound.invalidEnvelopeBlocked > 0) {
     recommendations.push("Verificar productores del webhook: se detectaron envelopes inválidos bloqueados por hardening.");
+  }
+  if (summary.inbound.invalidContentTypeBlocked > 0) {
+    recommendations.push("Se bloquearon webhooks con Content-Type no JSON: corregir cliente/proxy para enviar application/json y evitar rechazos 415.");
   }
   if (summary.inbound.payloadReplayBlocked > 0 || summary.inbound.replayMessageBlocked > 0) {
     recommendations.push("Investigar origen de replay (reintentos de proveedor o duplicados de integración).");
