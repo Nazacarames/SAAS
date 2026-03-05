@@ -4,7 +4,7 @@ import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
 import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
-import { getIntegrationHardeningMetrics } from "./integrationRoutes";
+import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
 
 const whatsappCloudRoutes = Router();
@@ -364,6 +364,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
       idempotencyObservedTotal,
       idempotencyCoveragePct,
       missingIdempotencyKeyBlocked: readCounter(outboundCounters, "outbound.missing_idempotency_key_blocked"),
+      idempotencyKeyTooWeakBlocked: readCounter(outboundCounters, "outbound.idempotency_key_too_weak_blocked"),
       retryBlockedNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
         + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key"),
       retryBlockedUnknownTransportNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key"),
@@ -416,6 +417,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
   }
   if (summary.outbound.missingIdempotencyKeyBlocked > 0) {
     recommendations.push("Se bloquearon envíos por falta de Idempotency-Key (modo estricto): actualizar clientes para enviar clave idempotente por request.");
+  }
+  if (summary.outbound.idempotencyKeyTooWeakBlocked > 0) {
+    recommendations.push("Se bloquearon envíos por Idempotency-Key débil: usar claves con entropía real (UUID/ULID) y al menos 2 caracteres distintos.");
   }
   if (summary.outbound.duplicateBlockedByMode.template > 0) {
     recommendations.push("Hay duplicados outbound bloqueados en templates: revisar reintentos del flujo de primer contacto/campañas y propagar Idempotency-Key por envío.");
@@ -751,6 +755,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
   const inbound = getWaHardeningMetrics();
   const outbound = getSendHardeningMetrics();
   const integrationApi = getIntegrationHardeningMetrics();
+  const integrationApiAlerts = getIntegrationHardeningAlertSnapshot();
   const inboundAlerts = getWaHardeningAlertSnapshot();
   const outboundAlerts = getSendHardeningAlertSnapshot();
 
@@ -869,7 +874,8 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
     integrationApiHardening: integrationApi,
     alerts: {
       inbound: inboundAlertsWithRuntime,
-      outbound: outboundAlertsWithRuntime
+      outbound: outboundAlertsWithRuntime,
+      integrationApi: integrationApiAlerts
     },
     signatureHardening,
     webhookPayloadReplayHardening: {
