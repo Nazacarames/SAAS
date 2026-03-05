@@ -30,6 +30,10 @@ const IDEMPOTENCY_KEY_MAX_LENGTH = 120;
 
 const integrationHardeningCounters = new Map<string, number>();
 const integrationHardeningLastAt = new Map<string, string>();
+const integrationHardeningSignalBuckets = new Map<string, number[]>();
+const integrationHardeningSignalThresholds = new Map<string, number>();
+
+const INTEGRATION_HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
 
 const bumpIntegrationHardeningMetric = (metric: string, by = 1): void => {
   const next = (integrationHardeningCounters.get(metric) || 0) + by;
@@ -37,10 +41,46 @@ const bumpIntegrationHardeningMetric = (metric: string, by = 1): void => {
   integrationHardeningLastAt.set(metric, new Date().toISOString());
 };
 
+const pushIntegrationHardeningSignal = (signal: string, threshold: number): void => {
+  const now = Date.now();
+  const safeThreshold = Math.max(1, Number(threshold) || 1);
+  integrationHardeningSignalThresholds.set(signal, safeThreshold);
+
+  const prev = integrationHardeningSignalBuckets.get(signal) || [];
+  const next = prev.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS);
+  next.push(now);
+  integrationHardeningSignalBuckets.set(signal, next);
+};
+
 export const getIntegrationHardeningMetrics = () => ({
   counters: Object.fromEntries(Array.from(integrationHardeningCounters.entries()).sort((a, b) => a[0].localeCompare(b[0]))),
   lastSeenAt: Object.fromEntries(Array.from(integrationHardeningLastAt.entries()).sort((a, b) => a[0].localeCompare(b[0])))
 });
+
+export const getIntegrationHardeningAlertSnapshot = () => {
+  const now = Date.now();
+
+  const pendingAlerts = Array.from(integrationHardeningSignalBuckets.entries())
+    .map(([signal, hits]) => {
+      const threshold = integrationHardeningSignalThresholds.get(signal) || 1;
+      const inWindow = hits.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS).length;
+      return {
+        signal,
+        threshold,
+        inWindow,
+        remaining: Math.max(0, threshold - inWindow),
+        severity: inWindow >= threshold * 3 ? "critical" : "warn",
+        source: "runtime_metrics"
+      };
+    })
+    .filter((entry) => entry.inWindow >= entry.threshold)
+    .sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
+
+  return {
+    windowMs: INTEGRATION_HARDENING_ALERT_WINDOW_MS,
+    pendingAlerts
+  };
+};
 
 const normalizeIdempotencyKey = (raw: string): string => {
   return String(raw || "")
@@ -101,26 +141,38 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   const idempotencyBody = normalizeIdempotencyKey(idempotencyBodyRaw);
 
   if (idempotencyHeaderXRaw && idempotencyHeaderXRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_too_long_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_long_blocked", 3);
     return res.status(400).json({ error: `x-idempotency-key too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
   }
 
   if (idempotencyHeaderStdRaw && idempotencyHeaderStdRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_too_long_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_long_blocked", 3);
     return res.status(400).json({ error: `idempotency-key too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
   }
 
   if (idempotencyBodyRaw && idempotencyBodyRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_too_long_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_long_blocked", 3);
     return res.status(400).json({ error: `body.idempotencyKey too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
   }
 
   if (idempotencyHeaderXRaw && hasInvalidIdempotencyChars(idempotencyHeaderXRaw)) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_chars_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_chars_blocked", 3);
     return res.status(400).json({ error: "x-idempotency-key contains invalid characters" });
   }
 
   if (idempotencyHeaderStdRaw && hasInvalidIdempotencyChars(idempotencyHeaderStdRaw)) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_chars_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_chars_blocked", 3);
     return res.status(400).json({ error: "idempotency-key contains invalid characters" });
   }
 
   if (idempotencyBodyRaw && hasInvalidIdempotencyChars(idempotencyBodyRaw)) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_chars_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_chars_blocked", 3);
     return res.status(400).json({ error: "body.idempotencyKey contains invalid characters" });
   }
 
@@ -137,26 +189,36 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   }
 
   if (idempotencyHeaderX && idempotencyHeaderStd && idempotencyHeaderX !== idempotencyHeaderStd) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_mismatch_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_blocked", 3);
     return res.status(400).json({ error: "idempotency key mismatch between x-idempotency-key and idempotency-key headers" });
   }
 
   const idempotencyHeader = idempotencyHeaderX || idempotencyHeaderStd;
 
   if (idempotencyHeader && idempotencyBody && idempotencyHeader !== idempotencyBody) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_mismatch_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_blocked", 3);
     return res.status(400).json({ error: "idempotency key mismatch between header and body" });
   }
 
   const effectiveIdempotencyKey = idempotencyHeader || idempotencyBody;
 
   if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_required_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_required_blocked", 2);
     return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required by hardening" });
   }
 
   if (resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
+    bumpIntegrationHardeningMetric("outbound.retry_idempotency_key_required_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_retry_idempotency_key_required_blocked", 2);
     return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries" });
   }
 
   if (effectiveIdempotencyKey && effectiveIdempotencyKey.length < resolveOutboundIdempotencyKeyMinLength()) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_too_short_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_short_blocked", 3);
     return res.status(400).json({
       error: `x-idempotency-key too short (min ${resolveOutboundIdempotencyKeyMinLength()})`
     });
@@ -164,10 +226,14 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
   if (effectiveIdempotencyKey && isWeakIdempotencyKey(effectiveIdempotencyKey)) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_too_weak_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_weak_blocked", 3);
     return res.status(400).json({
       error: "x-idempotency-key too weak (use at least 2 distinct characters)"
     });
   }
+
+  bumpIntegrationHardeningMetric("outbound.send_attempt_accepted");
+  pushIntegrationHardeningSignal("outbound_integration_send_attempt_accepted", 50);
 
   const result = await SendOutboundTextService({
     companyId,
