@@ -456,9 +456,10 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
   };
 };
 
-const buildDerivedHardeningAlerts = (inbound: any, outbound: any) => {
+const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi?: any) => {
   const inboundCounters = inbound?.counters || {};
   const outboundCounters = outbound?.counters || {};
+  const integrationApiCounters = integrationApi?.counters || {};
 
   const idempotencyKeyUsed = readCounter(outboundCounters, "outbound.idempotency_key_used");
   const missingIdempotencyKey = readCounter(outboundCounters, "outbound.idempotency_key_missing");
@@ -603,6 +604,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any) => {
     });
   }
 
+  const integrationWeakIdempotencyBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked");
+  if (integrationWeakIdempotencyBlocked >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "integration_api_idempotency_key_too_weak_spike",
+      threshold: 3,
+      inWindow: integrationWeakIdempotencyBlocked,
+      remaining: 0,
+      severity: integrationWeakIdempotencyBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_too_weak_blocked"
+      }
+    });
+  }
+
   const outboundDuplicateBlockedWithoutIdempotency = readCounter(outboundCounters, "outbound.duplicate_blocked_without_idempotency_key");
   if (outboundDuplicateBlockedWithoutIdempotency >= 3) {
     runtimeOutboundAlerts.push({
@@ -719,7 +735,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
   const signatureHardening = resolveWebhookSignatureHardeningState();
   const outboundRetryHardening = resolveOutboundRetryHardeningState();
   const replayFailClosed = resolveWebhookPayloadReplayFailClosed();
-  const derivedAlerts = buildDerivedHardeningAlerts(inbound, outbound);
+  const derivedAlerts = buildDerivedHardeningAlerts(inbound, outbound, integrationApi);
   const runtimeInboundAlerts = [
     ...(signatureHardening.insecureUnsignedWebhookAllowed
       ? [{
