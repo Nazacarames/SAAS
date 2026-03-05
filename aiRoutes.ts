@@ -46,6 +46,12 @@ const normalizeIdempotencyKey = (raw: string): string => {
 
 const hasInvalidIdempotencyChars = (raw: string): boolean => /[^a-zA-Z0-9:_\-.]/.test(String(raw || "").trim());
 
+const isWeakIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeIdempotencyKey(key);
+  if (!normalized) return false;
+  return new Set(normalized.split("")).size < 2;
+};
+
 const resolveWhatsapp = async (companyId: number) => {
   const runtime = getRuntimeSettings();
   const preferredId = Number(runtime.waCloudDefaultWhatsappId || 0);
@@ -1472,6 +1478,13 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
     return res.status(400).json({
       ok: false,
       error: `x-idempotency-key too short (min ${resolveOutboundIdempotencyKeyMinLength()})`
+    });
+  }
+
+  if (effectiveIdempotencyKey && isWeakIdempotencyKey(effectiveIdempotencyKey)) {
+    return res.status(400).json({
+      ok: false,
+      error: "x-idempotency-key too weak (use at least 2 distinct characters)"
     });
   }
 
