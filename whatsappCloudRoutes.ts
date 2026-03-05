@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -55,6 +55,12 @@ const resolveWebhookMaxBodyBytes = (): number => {
   const n = Number((getRuntimeSettings() as any).waWebhookMaxBodyBytes || 262144);
   if (!Number.isFinite(n)) return 262144;
   return Math.max(16 * 1024, Math.min(2 * 1024 * 1024, Math.round(n)));
+};
+
+const isWebhookJsonContentTypeValid = (req: any): boolean => {
+  const raw = String(req.get("content-type") || "").trim().toLowerCase();
+  if (!raw) return false;
+  return raw === "application/json" || raw.startsWith("application/json;");
 };
 
 const ensureWebhookPayloadReplayTable = async () => {
@@ -550,6 +556,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const inboundInvalidContentTypeBlocked = readCounter(inboundCounters, "inbound.invalid_content_type_blocked");
+  if (inboundInvalidContentTypeBlocked >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_invalid_content_type_blocked_spike",
+      threshold: 2,
+      inWindow: inboundInvalidContentTypeBlocked,
+      remaining: 0,
+      severity: inboundInvalidContentTypeBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
   const outboundTimeoutNotRetried = readCounter(outboundCounters, "outbound.cloud_timeout_not_retried");
   if (outboundTimeoutNotRetried >= 3) {
     runtimeOutboundAlerts.push({
@@ -859,6 +877,13 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
 });
 
 whatsappCloudRoutes.post("/webhook", async (req, res) => {
+  if (!isWebhookJsonContentTypeValid(req)) {
+    recordInboundInvalidContentTypeBlocked({
+      contentType: String(req.get("content-type") || "").trim() || null
+    });
+    return res.status(415).json({ error: "Unsupported webhook Content-Type", expected: "application/json" });
+  }
+
   const rawBody = resolveRawBodyForSignature(req);
   const rawBodyBytes = Buffer.byteLength(rawBody, "utf8");
   const maxBodyBytes = resolveWebhookMaxBodyBytes();
