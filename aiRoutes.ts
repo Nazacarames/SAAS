@@ -9,8 +9,7 @@ import Ticket from "../models/Ticket";
 import Message from "../models/Message";
 import Whatsapp from "../models/Whatsapp";
 import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
-const getWaHardeningMetrics = () => ({}) as any;
-const getWaHardeningAlertSnapshot = () => [] as any[];
+import { getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
 const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
@@ -28,6 +27,24 @@ const resolveOutboundIdempotencyKeyMinLength = (): number => {
   if (!Number.isFinite(raw)) return 8;
   return Math.max(4, Math.min(64, Math.round(raw)));
 };
+
+const resolveOutboundRequireIdempotencyKey = (): boolean => {
+  const raw = (getRuntimeSettings() as any)?.waOutboundRequireIdempotencyKey;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return true;
+  return ["1", "true", "yes", "on"].includes(String(raw).trim().toLowerCase());
+};
+
+const IDEMPOTENCY_KEY_MAX_LENGTH = 120;
+
+const normalizeIdempotencyKey = (raw: string): string => {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_\-.]/g, "")
+    .slice(0, IDEMPOTENCY_KEY_MAX_LENGTH);
+};
+
+const hasInvalidIdempotencyChars = (raw: string): boolean => /[^a-zA-Z0-9:_\-.]/.test(String(raw || "").trim());
 
 const resolveWhatsapp = async (companyId: number) => {
   const runtime = getRuntimeSettings();
@@ -1345,13 +1362,57 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
   const text = String(req.body?.text || 'Test exitoso desde Charlott OAuth + WhatsApp Cloud API');
   const templateName = String(req.body?.templateName || '').trim();
   const languageCode = String(req.body?.languageCode || 'en').trim();
-  const idempotencyFromHeader = String(req.headers?.["x-idempotency-key"] || "").trim();
-  const idempotencyFromBody = String(req.body?.idempotencyKey || "").trim();
-  const effectiveIdempotencyKey = String(idempotencyFromHeader || idempotencyFromBody || "").trim();
+  const idempotencyHeaderXRaw = String(req.headers?.["x-idempotency-key"] || "").trim();
+  const idempotencyHeaderStdRaw = String(req.headers?.["idempotency-key"] || "").trim();
+  const idempotencyBodyRaw = String(req.body?.idempotencyKey || "").trim();
+  const idempotencyHeaderX = normalizeIdempotencyKey(idempotencyHeaderXRaw);
+  const idempotencyHeaderStd = normalizeIdempotencyKey(idempotencyHeaderStdRaw);
+  const idempotencyBody = normalizeIdempotencyKey(idempotencyBodyRaw);
+
   if (!to) return res.status(400).json({ ok: false, error: 'missing_to' });
 
+  if (idempotencyHeaderXRaw && idempotencyHeaderXRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    return res.status(400).json({ ok: false, error: `x-idempotency-key too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
+  }
+
+  if (idempotencyHeaderStdRaw && idempotencyHeaderStdRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    return res.status(400).json({ ok: false, error: `idempotency-key too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
+  }
+
+  if (idempotencyBodyRaw && idempotencyBodyRaw.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    return res.status(400).json({ ok: false, error: `body.idempotencyKey too long (max ${IDEMPOTENCY_KEY_MAX_LENGTH})` });
+  }
+
+  if (idempotencyHeaderXRaw && hasInvalidIdempotencyChars(idempotencyHeaderXRaw)) {
+    return res.status(400).json({ ok: false, error: "x-idempotency-key contains invalid characters" });
+  }
+
+  if (idempotencyHeaderStdRaw && hasInvalidIdempotencyChars(idempotencyHeaderStdRaw)) {
+    return res.status(400).json({ ok: false, error: "idempotency-key contains invalid characters" });
+  }
+
+  if (idempotencyBodyRaw && hasInvalidIdempotencyChars(idempotencyBodyRaw)) {
+    return res.status(400).json({ ok: false, error: "body.idempotencyKey contains invalid characters" });
+  }
+
+  if (idempotencyHeaderX && idempotencyHeaderStd && idempotencyHeaderX !== idempotencyHeaderStd) {
+    return res.status(400).json({ ok: false, error: "idempotency key mismatch between x-idempotency-key and idempotency-key headers" });
+  }
+
+  const idempotencyHeader = idempotencyHeaderX || idempotencyHeaderStd;
+
+  if (idempotencyHeader && idempotencyBody && idempotencyHeader !== idempotencyBody) {
+    return res.status(400).json({ ok: false, error: "idempotency key mismatch between header and body" });
+  }
+
+  const effectiveIdempotencyKey = idempotencyHeader || idempotencyBody;
+
+  if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
+    return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required by hardening" });
+  }
+
   if (resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
-    return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required" });
+    return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries" });
   }
 
   if (effectiveIdempotencyKey && effectiveIdempotencyKey.length < resolveOutboundIdempotencyKeyMinLength()) {
