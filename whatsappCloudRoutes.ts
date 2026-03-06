@@ -404,7 +404,8 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       sendAttemptAccepted: readCounter(integrationApiCounters, "outbound.send_attempt_accepted"),
       sendAttemptFailed: readCounter(integrationApiCounters, "outbound.send_attempt_failed"),
       idempotencyKeyInvalidFormatBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_format_blocked"),
-      idempotencyKeyInvalidCharsBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked")
+      idempotencyKeyInvalidCharsBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked"),
+      retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked")
     }
   };
 
@@ -431,6 +432,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.integrationApi.idempotencyKeyInvalidFormatBlocked > 0 || summary.integrationApi.idempotencyKeyInvalidCharsBlocked > 0) {
     recommendations.push("La Integration API rechazó Idempotency-Key por formato inválido: validar allowlist [a-zA-Z0-9:_-.], longitud y normalización en el cliente antes de enviar.");
+  }
+  if (summary.integrationApi.retryBlockedMissingIdempotencyKey > 0) {
+    recommendations.push("La Integration API bloqueó reintentos por falta de Idempotency-Key: enviar clave idempotente fuerte por request para habilitar retry seguro en errores transitorios.");
   }
   if (summary.integrationApi.sendAttemptFailed > 0) {
     recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
@@ -685,6 +689,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.send_attempt_failed"
+      }
+    });
+  }
+
+  const integrationRetryBlockedMissingIdempotency = readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked");
+  if (integrationRetryBlockedMissingIdempotency >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_retry_blocked_missing_idempotency_key",
+      threshold: 1,
+      inWindow: integrationRetryBlockedMissingIdempotency,
+      remaining: 0,
+      severity: integrationRetryBlockedMissingIdempotency >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.retry_idempotency_key_required_blocked"
       }
     });
   }

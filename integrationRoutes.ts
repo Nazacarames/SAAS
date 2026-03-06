@@ -64,12 +64,15 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     .map(([signal, hits]) => {
       const threshold = integrationHardeningSignalThresholds.get(signal) || 1;
       const inWindow = hits.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS).length;
+      const severity = signal === "outbound_integration_retry_idempotency_key_required_blocked"
+        ? (inWindow >= 3 ? "critical" : "warn")
+        : (inWindow >= threshold * 3 ? "critical" : "warn");
       return {
         signal,
         threshold,
         inWindow,
         remaining: Math.max(0, threshold - inWindow),
-        severity: inWindow >= threshold * 3 ? "critical" : "warn",
+        severity,
         source: "runtime_metrics"
       };
     })
@@ -265,7 +268,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
   if (resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     bumpIntegrationHardeningMetric("outbound.retry_idempotency_key_required_blocked");
-    pushIntegrationHardeningSignal("outbound_integration_retry_idempotency_key_required_blocked", 2);
+    pushIntegrationHardeningSignal("outbound_integration_retry_idempotency_key_required_blocked", 1);
     return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries" });
   }
 
