@@ -34,6 +34,32 @@ const integrationHardeningSignalBuckets = new Map<string, number[]>();
 const integrationHardeningSignalThresholds = new Map<string, number>();
 
 const INTEGRATION_HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
+const OUTBOUND_REPLAY_GUARD_TTL_MS = 2 * 60 * 60 * 1000;
+
+type OutboundReplayGuardEntry = {
+  createdAt: number;
+  fingerprint: string;
+  state: "inflight" | "done";
+  response?: any;
+};
+
+const outboundReplayGuard = new Map<string, OutboundReplayGuardEntry>();
+
+const pruneOutboundReplayGuard = (now = Date.now()): void => {
+  for (const [key, entry] of outboundReplayGuard.entries()) {
+    if (now - entry.createdAt > OUTBOUND_REPLAY_GUARD_TTL_MS) {
+      outboundReplayGuard.delete(key);
+    }
+  }
+};
+
+const buildOutboundReplayFingerprint = (payload: any): string => {
+  const whatsappId = String(payload?.whatsappId || "").trim().toLowerCase();
+  const to = String(payload?.to || "").trim();
+  const text = String(payload?.text || "").trim();
+  const contactName = String(payload?.contactName || "").trim().toLowerCase();
+  return `${whatsappId}|${to}|${text}|${contactName}`;
+};
 
 const bumpIntegrationHardeningMetric = (metric: string, by = 1): void => {
   const next = (integrationHardeningCounters.get(metric) || 0) + by;
@@ -293,6 +319,8 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   }
 
   const effectiveIdempotencyKey = idempotencyHeader || idempotencyBody;
+  const replayFingerprint = buildOutboundReplayFingerprint({ whatsappId, to, text, contactName });
+  const replayGuardKey = effectiveIdempotencyKey ? `${companyId}:${effectiveIdempotencyKey}` : "";
 
   if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_required_blocked");
@@ -332,6 +360,48 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     });
   }
 
+  if (replayGuardKey) {
+    pruneOutboundReplayGuard();
+    const existing = outboundReplayGuard.get(replayGuardKey);
+
+    if (existing) {
+      if (existing.fingerprint !== replayFingerprint) {
+        bumpIntegrationHardeningMetric("outbound.idempotency_key_payload_conflict_blocked");
+        pushIntegrationHardeningSignal("outbound_integration_idempotency_key_payload_conflict_blocked", 2);
+        return res.status(409).json({
+          error: "idempotency key reuse with different payload is not allowed",
+          idempotencyKey: effectiveIdempotencyKey
+        });
+      }
+
+      if (existing.state === "done" && existing.response) {
+        bumpIntegrationHardeningMetric("outbound.duplicate_replayed");
+        pushIntegrationHardeningSignal("outbound_integration_duplicate_replayed", 25);
+        return res.status(200).json({
+          ...existing.response,
+          duplicate: true,
+          replayed: true,
+          idempotencyKeyUsed: true
+        });
+      }
+
+      bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+      pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
+      return res.status(202).json({
+        ok: true,
+        processing: true,
+        duplicate: true,
+        idempotencyKeyUsed: true
+      });
+    }
+
+    outboundReplayGuard.set(replayGuardKey, {
+      createdAt: Date.now(),
+      fingerprint: replayFingerprint,
+      state: "inflight"
+    });
+  }
+
   bumpIntegrationHardeningMetric("outbound.send_attempt_accepted");
   pushIntegrationHardeningSignal("outbound_integration_send_attempt_accepted", 50);
 
@@ -345,9 +415,24 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
       idempotencyKey: effectiveIdempotencyKey || undefined
     } as any);
 
+    const responsePayload = { ...result, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) };
+
+    if (replayGuardKey) {
+      outboundReplayGuard.set(replayGuardKey, {
+        createdAt: Date.now(),
+        fingerprint: replayFingerprint,
+        state: "done",
+        response: responsePayload
+      });
+    }
+
     await incrementUsage(companyId, "integrations.messages_sent", 1);
-    return res.status(201).json({ ...result, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) });
+    return res.status(201).json(responsePayload);
   } catch (err: any) {
+    if (replayGuardKey) {
+      outboundReplayGuard.delete(replayGuardKey);
+    }
+
     bumpIntegrationHardeningMetric("outbound.send_attempt_failed");
     pushIntegrationHardeningSignal("outbound_integration_send_attempt_failed", 4);
     throw err;
