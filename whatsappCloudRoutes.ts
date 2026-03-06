@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -205,6 +205,14 @@ const parseSha256SignatureDigest = (signatureHeaderRaw: string): string | null =
   return digest;
 };
 
+const classifySignatureHeader = (signatureHeaderRaw: string): { valid: boolean; reason: "missing" | "malformed" | "ok"; digest: string | null } => {
+  const signatureHeader = String(signatureHeaderRaw || "").trim();
+  if (!signatureHeader) return { valid: false, reason: "missing", digest: null };
+  const digest = parseSha256SignatureDigest(signatureHeader);
+  if (!digest) return { valid: false, reason: "malformed", digest: null };
+  return { valid: true, reason: "ok", digest };
+};
+
 const resolveAllowUnsignedWebhook = (): boolean => {
   const raw = String((getRuntimeSettings() as any).waWebhookAllowUnsigned || "").trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(raw);
@@ -255,12 +263,14 @@ const resolveOutboundRetryHardeningState = () => {
   };
 };
 
-const isWebhookSignatureValid = (req: any): boolean => {
+const isWebhookSignatureValid = (req: any, preclassified?: { valid: boolean; digest: string | null }): boolean => {
   const settings = getRuntimeSettings();
   const appSecret = String(settings.waCloudAppSecret || "").trim();
   if (!appSecret) return resolveAllowUnsignedWebhook();
 
-  const incomingDigest = parseSha256SignatureDigest(String(req.get("x-hub-signature-256") || ""));
+  const incomingDigest = preclassified?.valid
+    ? String(preclassified.digest || "")
+    : parseSha256SignatureDigest(String(req.get("x-hub-signature-256") || ""));
   if (!incomingDigest) return false;
 
   const rawBody = resolveRawBodyForSignature(req);
@@ -393,6 +403,8 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
     },
     inbound: {
       signatureInvalidBlocked: readCounter(inboundCounters, "inbound.signature_invalid_blocked"),
+      signatureMissingBlocked: readCounter(inboundCounters, "inbound.signature_missing_blocked"),
+      signatureMalformedBlocked: readCounter(inboundCounters, "inbound.signature_malformed_blocked"),
       signatureInvalidRateLimited: readCounter(inboundCounters, "inbound.signature_invalid_rate_limited"),
       invalidEnvelopeBlocked: readCounter(inboundCounters, "inbound.invalid_envelope_blocked"),
       invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
@@ -459,6 +471,12 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.outbound.duplicateBlockedByMode.template > 0) {
     recommendations.push("Hay duplicados outbound bloqueados en templates: revisar reintentos del flujo de primer contacto/campañas y propagar Idempotency-Key por envío.");
+  }
+  if (summary.inbound.signatureMissingBlocked > 0) {
+    recommendations.push("Se bloquearon webhooks sin x-hub-signature-256: validar forwarding del header en proxy/WAF antes de la app.");
+  }
+  if (summary.inbound.signatureMalformedBlocked > 0) {
+    recommendations.push("Se bloquearon webhooks con x-hub-signature-256 malformado: verificar formato sha256=<hex64> y normalización de cabeceras en edge.");
   }
   if (summary.inbound.signatureInvalidBlocked > 0) {
     recommendations.push("Revisar origen/IP de firmas inválidas y aplicar allowlist en reverse proxy/WAF.");
@@ -551,6 +569,30 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: replayBlocked,
       remaining: 0,
       severity: replayBlocked >= 15 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundSignatureMissingBlocked = readCounter(inboundCounters, "inbound.signature_missing_blocked");
+  if (inboundSignatureMissingBlocked >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_signature_missing_blocked_spike",
+      threshold: 2,
+      inWindow: inboundSignatureMissingBlocked,
+      remaining: 0,
+      severity: inboundSignatureMissingBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundSignatureMalformedBlocked = readCounter(inboundCounters, "inbound.signature_malformed_blocked");
+  if (inboundSignatureMalformedBlocked >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_signature_malformed_blocked_spike",
+      threshold: 2,
+      inWindow: inboundSignatureMalformedBlocked,
+      remaining: 0,
+      severity: inboundSignatureMalformedBlocked >= 6 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
@@ -1097,16 +1139,43 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
     return res.status(400).json({ error: "Invalid webhook envelope", reason: envelopeValidation.reason });
   }
 
-  if (!isWebhookSignatureValid(req)) {
+  const signatureHeaderRaw = String(req.get("x-hub-signature-256") || "");
+  const signatureHeader = classifySignatureHeader(signatureHeaderRaw);
+  const appSecretConfigured = Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim());
+
+  if (appSecretConfigured && !signatureHeader.valid) {
     const signatureRateLimit = shouldRateLimitInvalidSignatureByIp(req);
 
+    if (signatureHeader.reason === "missing") {
+      recordInboundSignatureMissingBlocked({
+        hasSignatureHeader: false,
+        appSecretConfigured,
+        ip: signatureRateLimit.ip,
+        ipHits: signatureRateLimit.hits,
+        ipMaxHits: signatureRateLimit.maxHits,
+        ipWindowMs: signatureRateLimit.windowMs,
+        reason: "signature_header_missing"
+      });
+    } else if (signatureHeader.reason === "malformed") {
+      recordInboundSignatureMalformedBlocked({
+        hasSignatureHeader: true,
+        appSecretConfigured,
+        ip: signatureRateLimit.ip,
+        ipHits: signatureRateLimit.hits,
+        ipMaxHits: signatureRateLimit.maxHits,
+        ipWindowMs: signatureRateLimit.windowMs,
+        reason: "signature_header_malformed"
+      });
+    }
+
     recordInboundSignatureInvalidBlocked({
-      hasSignatureHeader: Boolean(String(req.get("x-hub-signature-256") || "").trim()),
-      appSecretConfigured: Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim()),
+      hasSignatureHeader: signatureHeader.reason !== "missing",
+      appSecretConfigured,
       ip: signatureRateLimit.ip,
       ipHits: signatureRateLimit.hits,
       ipMaxHits: signatureRateLimit.maxHits,
-      ipWindowMs: signatureRateLimit.windowMs
+      ipWindowMs: signatureRateLimit.windowMs,
+      reason: signatureHeader.reason === "missing" ? "signature_header_missing" : "signature_header_malformed"
     });
 
     if (signatureRateLimit.limited) {
@@ -1114,7 +1183,37 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
         ip: signatureRateLimit.ip,
         hits: signatureRateLimit.hits,
         maxHits: signatureRateLimit.maxHits,
-        windowMs: signatureRateLimit.windowMs
+        windowMs: signatureRateLimit.windowMs,
+        reason: signatureHeader.reason === "missing" ? "signature_header_missing" : "signature_header_malformed"
+      });
+      return res.status(429).json({ error: "Too many invalid webhook signatures" });
+    }
+
+    return res.status(401).json({
+      error: signatureHeader.reason === "missing" ? "Missing webhook signature" : "Malformed webhook signature"
+    });
+  }
+
+  if (!isWebhookSignatureValid(req, signatureHeader)) {
+    const signatureRateLimit = shouldRateLimitInvalidSignatureByIp(req);
+
+    recordInboundSignatureInvalidBlocked({
+      hasSignatureHeader: Boolean(signatureHeaderRaw.trim()),
+      appSecretConfigured,
+      ip: signatureRateLimit.ip,
+      ipHits: signatureRateLimit.hits,
+      ipMaxHits: signatureRateLimit.maxHits,
+      ipWindowMs: signatureRateLimit.windowMs,
+      reason: "signature_digest_mismatch"
+    });
+
+    if (signatureRateLimit.limited) {
+      recordInboundSignatureInvalidRateLimited({
+        ip: signatureRateLimit.ip,
+        hits: signatureRateLimit.hits,
+        maxHits: signatureRateLimit.maxHits,
+        windowMs: signatureRateLimit.windowMs,
+        reason: "signature_digest_mismatch"
       });
       return res.status(429).json({ error: "Too many invalid webhook signatures" });
     }

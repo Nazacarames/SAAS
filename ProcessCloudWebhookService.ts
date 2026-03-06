@@ -361,6 +361,16 @@ export const recordInboundSignatureInvalidBlocked = (context?: Record<string, un
   pushHardeningSignal("inbound_signature_invalid_blocked", 4, context);
 };
 
+export const recordInboundSignatureMissingBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.signature_missing_blocked");
+  pushHardeningSignal("inbound_signature_missing_blocked", 2, context);
+};
+
+export const recordInboundSignatureMalformedBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.signature_malformed_blocked");
+  pushHardeningSignal("inbound_signature_malformed_blocked", 2, context);
+};
+
 export const recordInboundSignatureInvalidRateLimited = (context?: Record<string, unknown>) => {
   bumpHardeningMetric("inbound.signature_invalid_rate_limited");
   pushHardeningSignal("inbound_signature_invalid_rate_limited", 3, context);
