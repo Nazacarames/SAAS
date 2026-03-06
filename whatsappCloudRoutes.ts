@@ -723,6 +723,42 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const integrationIdempotencyMalformedBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_format_blocked")
+    + readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked")
+    + readCounter(integrationApiCounters, "outbound.idempotency_key_too_long_blocked");
+  if (integrationIdempotencyMalformedBlocked >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_malformed_spike",
+      threshold: 3,
+      inWindow: integrationIdempotencyMalformedBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyMalformedBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metrics: [
+          "outbound.idempotency_key_invalid_format_blocked",
+          "outbound.idempotency_key_invalid_chars_blocked",
+          "outbound.idempotency_key_too_long_blocked"
+        ]
+      }
+    });
+  }
+
+  const integrationIdempotencyMismatchBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_mismatch_blocked");
+  if (integrationIdempotencyMismatchBlocked >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_mismatch_spike",
+      threshold: 3,
+      inWindow: integrationIdempotencyMismatchBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyMismatchBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_mismatch_blocked"
+      }
+    });
+  }
+
   const integrationSendAttemptFailed = readCounter(integrationApiCounters, "outbound.send_attempt_failed");
   if (integrationSendAttemptFailed >= 4) {
     runtimeOutboundAlerts.push({
