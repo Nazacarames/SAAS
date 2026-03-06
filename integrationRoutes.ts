@@ -73,8 +73,31 @@ export const getIntegrationHardeningAlertSnapshot = () => {
         source: "runtime_metrics"
       };
     })
-    .filter((entry) => entry.inWindow >= entry.threshold)
-    .sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
+    .filter((entry) => entry.inWindow >= entry.threshold);
+
+  const malformedSignals = [
+    "outbound_integration_idempotency_key_invalid_format_blocked",
+    "outbound_integration_idempotency_key_invalid_chars_blocked"
+  ];
+  const malformedInWindow = malformedSignals.reduce((acc, signal) => {
+    const hits = integrationHardeningSignalBuckets.get(signal) || [];
+    return acc + hits.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS).length;
+  }, 0);
+  const malformedThreshold = 4;
+
+  if (malformedInWindow >= malformedThreshold) {
+    pendingAlerts.push({
+      signal: "outbound_integration_idempotency_key_malformed_spike",
+      threshold: malformedThreshold,
+      inWindow: malformedInWindow,
+      remaining: 0,
+      severity: malformedInWindow >= malformedThreshold * 2 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      includes: malformedSignals
+    } as any);
+  }
+
+  pendingAlerts.sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
 
   return {
     windowMs: INTEGRATION_HARDENING_ALERT_WINDOW_MS,
