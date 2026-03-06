@@ -344,9 +344,10 @@ const readCounter = (counters: Record<string, any> | undefined, key: string): nu
   return Number.isFinite(value) ? value : 0;
 };
 
-const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
+const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any, health: any) => {
   const inboundCounters = inbound?.counters || {};
   const outboundCounters = outbound?.counters || {};
+  const integrationApiCounters = integrationApi?.counters || {};
 
   const idempotencyKeyUsed = readCounter(outboundCounters, "outbound.idempotency_key_used");
   const missingIdempotencyKey = readCounter(outboundCounters, "outbound.idempotency_key_missing");
@@ -398,6 +399,12 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
       payloadSizeBlocked: readCounter(inboundCounters, "inbound.payload_size_blocked"),
       payloadVolumeBlocked: readCounter(inboundCounters, "inbound.payload_volume_blocked"),
       replayMessageBlocked: readCounter(inboundCounters, "inbound.replay_blocked")
+    },
+    integrationApi: {
+      sendAttemptAccepted: readCounter(integrationApiCounters, "outbound.send_attempt_accepted"),
+      sendAttemptFailed: readCounter(integrationApiCounters, "outbound.send_attempt_failed"),
+      idempotencyKeyInvalidFormatBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_format_blocked"),
+      idempotencyKeyInvalidCharsBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked")
     }
   };
 
@@ -421,6 +428,12 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
   }
   if (summary.outbound.idempotencyKeyTooWeakBlocked > 0) {
     recommendations.push("Se bloquearon envíos por Idempotency-Key débil: usar claves con entropía real (UUID/ULID) y al menos 2 caracteres distintos.");
+  }
+  if (summary.integrationApi.idempotencyKeyInvalidFormatBlocked > 0 || summary.integrationApi.idempotencyKeyInvalidCharsBlocked > 0) {
+    recommendations.push("La Integration API rechazó Idempotency-Key por formato inválido: validar allowlist [a-zA-Z0-9:_-.], longitud y normalización en el cliente antes de enviar.");
+  }
+  if (summary.integrationApi.sendAttemptFailed > 0) {
+    recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
   }
   if (summary.outbound.duplicateBlockedByMode.template > 0) {
     recommendations.push("Hay duplicados outbound bloqueados en templates: revisar reintentos del flujo de primer contacto/campañas y propagar Idempotency-Key por envío.");
@@ -661,6 +674,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const integrationSendAttemptFailed = readCounter(integrationApiCounters, "outbound.send_attempt_failed");
+  if (integrationSendAttemptFailed >= 4) {
+    runtimeOutboundAlerts.push({
+      signal: "integration_api_send_attempt_failed_spike",
+      threshold: 4,
+      inWindow: integrationSendAttemptFailed,
+      remaining: 0,
+      severity: integrationSendAttemptFailed >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.send_attempt_failed"
+      }
+    });
+  }
+
   const outboundDuplicateBlockedWithoutIdempotency = readCounter(outboundCounters, "outbound.duplicate_blocked_without_idempotency_key");
   if (outboundDuplicateBlockedWithoutIdempotency >= 3) {
     runtimeOutboundAlerts.push({
@@ -877,7 +905,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
   };
 
   const health = buildHardeningHealth(inboundAlertsWithRuntime, outboundAlertsWithRuntime);
-  const summary = buildHardeningSummary(inbound, outbound, health);
+  const summary = buildHardeningSummary(inbound, outbound, integrationApi, health);
   const failOnAlert = ["1", "true", "yes", "on"].includes(String(req.query?.failOnAlert || "").toLowerCase());
 
   return res.status(health.status !== "ok" && failOnAlert ? 503 : 200).json({
