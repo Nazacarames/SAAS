@@ -303,6 +303,8 @@ const CRITICAL_HARDENING_SIGNALS = new Set([
   "outbound_retry_exhausted",
   "outbound_wbot_retry_exhausted",
   "outbound_dedupe_fail_closed_blocked",
+  "outbound_integration_retry_blocked_missing_idempotency_key",
+  "outbound_integration_idempotency_key_missing_blocked",
   "inbound_signature_invalid_blocked",
   "inbound_payload_replay_blocked"
 ]);
@@ -405,7 +407,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       sendAttemptFailed: readCounter(integrationApiCounters, "outbound.send_attempt_failed"),
       idempotencyKeyInvalidFormatBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_format_blocked"),
       idempotencyKeyInvalidCharsBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked"),
-      retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked")
+      idempotencyKeyMissingBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_required_blocked"),
+      retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked"),
+      idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked")
     }
   };
 
@@ -433,8 +437,14 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.integrationApi.idempotencyKeyInvalidFormatBlocked > 0 || summary.integrationApi.idempotencyKeyInvalidCharsBlocked > 0) {
     recommendations.push("La Integration API rechazó Idempotency-Key por formato inválido: validar allowlist [a-zA-Z0-9:_-.], longitud y normalización en el cliente antes de enviar.");
   }
+  if (summary.integrationApi.idempotencyKeyMissingBlocked > 0) {
+    recommendations.push("La Integration API bloqueó envíos por falta de Idempotency-Key (modo estricto): enviar clave idempotente por request desde el cliente.");
+  }
   if (summary.integrationApi.retryBlockedMissingIdempotencyKey > 0) {
     recommendations.push("La Integration API bloqueó reintentos por falta de Idempotency-Key: enviar clave idempotente fuerte por request para habilitar retry seguro en errores transitorios.");
+  }
+  if (summary.integrationApi.idempotencyKeyTooWeakBlocked > 0) {
+    recommendations.push("La Integration API bloqueó Idempotency-Key débil: usar UUID/ULID o claves con entropía real para evitar colisiones entre requests.");
   }
   if (summary.integrationApi.sendAttemptFailed > 0) {
     recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
@@ -693,6 +703,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const integrationIdempotencyMissingBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_required_blocked");
+  if (integrationIdempotencyMissingBlocked >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_missing_blocked",
+      threshold: 1,
+      inWindow: integrationIdempotencyMissingBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyMissingBlocked >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_required_blocked"
+      }
+    });
+  }
+
   const integrationRetryBlockedMissingIdempotency = readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked");
   if (integrationRetryBlockedMissingIdempotency >= 1) {
     runtimeOutboundAlerts.push({
@@ -704,6 +729,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.retry_idempotency_key_required_blocked"
+      }
+    });
+  }
+
+  const integrationIdempotencyTooWeakBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked");
+  if (integrationIdempotencyTooWeakBlocked >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_too_weak_spike",
+      threshold: 3,
+      inWindow: integrationIdempotencyTooWeakBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyTooWeakBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_too_weak_blocked"
       }
     });
   }
