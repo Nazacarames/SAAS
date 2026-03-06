@@ -168,6 +168,9 @@ const isWeakIdempotencyKey = (key: string): boolean => {
   const compact = normalized.replace(/[:_\-.]/g, "");
   if (isMonotonicSequence(compact)) return true;
 
+  // raw unix timestamps are predictable and often reused in retries/concurrent workers
+  if (/^\d{10,17}$/.test(compact)) return true;
+
   return false;
 };
 
