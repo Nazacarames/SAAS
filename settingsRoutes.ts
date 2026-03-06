@@ -147,6 +147,10 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_mismatch_spike"
   );
 
+  const hasWeakIdempotencySpike = integrationPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_weak_spike"
+  );
+
   const hasInboundInvalidContentTypePressure = inboundPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "inbound_invalid_content_type_blocked"
       || String(entry?.signal || "") === "inbound_invalid_content_type_blocked_spike"
@@ -169,6 +173,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     ...(hasMismatchIdempotencySpike
       ? ["Hay spike de idempotency key mismatch (header↔header / header↔body): unificar la fuente de verdad en el cliente y propagar exactamente la misma key en headers/body para el mismo request."]
       : []),
+    ...(hasWeakIdempotencySpike
+      ? ["Se detecta spike de idempotency keys débiles/cortas: generar UUID/ULID (o equivalente de alta entropía), evitar timestamps secuenciales y respetar mínimo de longitud configurado."]
+      : []),
     ...(hasInboundInvalidContentTypePressure
       ? ["Se están bloqueando webhooks por Content-Type inválido: asegurar application/json en Meta/proxy (sin transformaciones) para evitar 415 y pérdida de eventos."]
       : []),
@@ -185,13 +192,15 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     ? "outbound_integration_idempotency_key_malformed_spike"
     : hasMismatchIdempotencySpike
       ? "outbound_integration_idempotency_key_mismatch_spike"
-      : hasInboundInvalidContentTypePressure
-        ? "inbound_invalid_content_type_blocked_spike"
-        : hasInboundPayloadReplayPressure
-          ? "inbound_replay_spike"
-          : hasInboundReplayGuardFailClosedPressure
-            ? "inbound_payload_replay_guard_fail_closed_blocked"
-            : null;
+      : hasWeakIdempotencySpike
+        ? "outbound_integration_idempotency_key_weak_spike"
+        : hasInboundInvalidContentTypePressure
+          ? "inbound_invalid_content_type_blocked_spike"
+          : hasInboundPayloadReplayPressure
+            ? "inbound_replay_spike"
+            : hasInboundReplayGuardFailClosedPressure
+              ? "inbound_payload_replay_guard_fail_closed_blocked"
+              : null;
 
   return res.json({
     effectiveConfig: {

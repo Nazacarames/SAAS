@@ -283,6 +283,29 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const weakSignals = [
+    "outbound_integration_idempotency_key_too_short_blocked",
+    "outbound_integration_idempotency_key_too_weak_blocked",
+    "outbound_integration_idempotency_key_timestamp_only_blocked"
+  ];
+  const weakInWindow = weakSignals.reduce((acc, signal) => {
+    const hits = integrationHardeningSignalBuckets.get(signal) || [];
+    return acc + hits.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS).length;
+  }, 0);
+  const weakThreshold = 3;
+
+  if (weakInWindow >= weakThreshold) {
+    pendingAlerts.push({
+      signal: "outbound_integration_idempotency_key_weak_spike",
+      threshold: weakThreshold,
+      inWindow: weakInWindow,
+      remaining: 0,
+      severity: weakInWindow >= weakThreshold * 2 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      includes: weakSignals
+    } as any);
+  }
+
   pendingAlerts.sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
 
   return {
