@@ -181,6 +181,17 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
   ];
 
   const primaryOperationalRecommendation = operationalRecommendations[0] || null;
+  const primaryOperationalSignal = hasMalformedIdempotencySpike
+    ? "outbound_integration_idempotency_key_malformed_spike"
+    : hasMismatchIdempotencySpike
+      ? "outbound_integration_idempotency_key_mismatch_spike"
+      : hasInboundInvalidContentTypePressure
+        ? "inbound_invalid_content_type_blocked_spike"
+        : hasInboundPayloadReplayPressure
+          ? "inbound_replay_spike"
+          : hasInboundReplayGuardFailClosedPressure
+            ? "inbound_payload_replay_guard_fail_closed_blocked"
+            : null;
 
   return res.json({
     effectiveConfig: {
@@ -218,6 +229,7 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     },
     recommendations: {
       primaryOperational: primaryOperationalRecommendation,
+      primaryOperationalSignal,
       operational: operationalRecommendations
     }
   });
