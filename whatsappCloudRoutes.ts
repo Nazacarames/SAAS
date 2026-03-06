@@ -738,6 +738,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const outboundDedupeFailClosedBlocked = readCounter(outboundCounters, "outbound.dedupe_fail_closed_blocked");
+  if (outboundDedupeFailClosedBlocked >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_dedupe_fail_closed_blocked",
+      threshold: 1,
+      inWindow: outboundDedupeFailClosedBlocked,
+      remaining: 0,
+      severity: outboundDedupeFailClosedBlocked >= 3 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
   const outboundDedupeEmergencyDuplicateBlocked = readCounter(outboundCounters, "outbound.dedupe_emergency_duplicate_blocked");
   if (outboundDedupeEmergencyDuplicateBlocked >= 2) {
     runtimeOutboundAlerts.push({
