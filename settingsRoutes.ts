@@ -180,6 +180,8 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       : [])
   ];
 
+  const primaryOperationalRecommendation = operationalRecommendations[0] || null;
+
   return res.json({
     effectiveConfig: {
       waOutboundDedupeTtlSeconds: Number(settings.waOutboundDedupeTtlSeconds || 120),
@@ -215,6 +217,7 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       outboundIntegrationApi: integrationApiAlerts
     },
     recommendations: {
+      primaryOperational: primaryOperationalRecommendation,
       operational: operationalRecommendations
     }
   });
