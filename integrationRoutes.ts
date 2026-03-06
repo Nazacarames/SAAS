@@ -100,6 +100,28 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const mismatchSignals = [
+    "outbound_integration_idempotency_key_mismatch_header_header_blocked",
+    "outbound_integration_idempotency_key_mismatch_header_body_blocked"
+  ];
+  const mismatchInWindow = mismatchSignals.reduce((acc, signal) => {
+    const hits = integrationHardeningSignalBuckets.get(signal) || [];
+    return acc + hits.filter((ts) => now - ts < INTEGRATION_HARDENING_ALERT_WINDOW_MS).length;
+  }, 0);
+  const mismatchThreshold = 3;
+
+  if (mismatchInWindow >= mismatchThreshold) {
+    pendingAlerts.push({
+      signal: "outbound_integration_idempotency_key_mismatch_spike",
+      threshold: mismatchThreshold,
+      inWindow: mismatchInWindow,
+      remaining: 0,
+      severity: mismatchInWindow >= mismatchThreshold * 2 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      includes: mismatchSignals
+    } as any);
+  }
+
   pendingAlerts.sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
 
   return {
@@ -247,6 +269,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   if (idempotencyHeaderX && idempotencyHeaderStd && idempotencyHeaderX !== idempotencyHeaderStd) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_mismatch_blocked");
     pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_blocked", 3);
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_header_header_blocked", 3);
     return res.status(400).json({ error: "idempotency key mismatch between x-idempotency-key and idempotency-key headers" });
   }
 
@@ -255,6 +278,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   if (idempotencyHeader && idempotencyBody && idempotencyHeader !== idempotencyBody) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_mismatch_blocked");
     pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_blocked", 3);
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_mismatch_header_body_blocked", 3);
     return res.status(400).json({ error: "idempotency key mismatch between header and body" });
   }
 

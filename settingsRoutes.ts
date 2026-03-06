@@ -143,6 +143,10 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_malformed_spike"
   );
 
+  const hasMismatchIdempotencySpike = integrationPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_mismatch_spike"
+  );
+
   const hasInboundInvalidContentTypePressure = inboundPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "inbound_invalid_content_type_blocked"
       || String(entry?.signal || "") === "inbound_invalid_content_type_blocked_spike"
@@ -161,6 +165,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
   const operationalRecommendations = [
     ...(hasMalformedIdempotencySpike
       ? ["Integración emite idempotency keys malformadas: normalizar a [a-zA-Z0-9:_-.], usar 8-64 chars y enviar SIEMPRE la misma key por retry del mismo mensaje."]
+      : []),
+    ...(hasMismatchIdempotencySpike
+      ? ["Hay spike de idempotency key mismatch (header↔header / header↔body): unificar la fuente de verdad en el cliente y propagar exactamente la misma key en headers/body para el mismo request."]
       : []),
     ...(hasInboundInvalidContentTypePressure
       ? ["Se están bloqueando webhooks por Content-Type inválido: asegurar application/json en Meta/proxy (sin transformaciones) para evitar 415 y pérdida de eventos."]
