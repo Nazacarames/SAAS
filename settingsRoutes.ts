@@ -129,18 +129,47 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
   const settings = getRuntimeSettings();
   const boolWithDefault = parseBoolWithDefault;
   const integrationApiAlerts = getIntegrationHardeningAlertSnapshot();
+  const inboundWebhookAlerts = getWaHardeningAlertSnapshot();
 
   const integrationPendingAlerts = Array.isArray((integrationApiAlerts as any)?.pendingAlerts)
     ? (integrationApiAlerts as any).pendingAlerts
+    : [];
+
+  const inboundPendingAlerts = Array.isArray((inboundWebhookAlerts as any)?.pendingAlerts)
+    ? (inboundWebhookAlerts as any).pendingAlerts
     : [];
 
   const hasMalformedIdempotencySpike = integrationPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_malformed_spike"
   );
 
+  const hasInboundInvalidContentTypePressure = inboundPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "inbound_invalid_content_type_blocked"
+      || String(entry?.signal || "") === "inbound_invalid_content_type_blocked_spike"
+  );
+
+  const hasInboundPayloadReplayPressure = inboundPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "inbound_payload_replay_blocked"
+      || String(entry?.signal || "") === "inbound_replay_spike"
+      || String(entry?.signal || "") === "inbound_replay_block_rate_high"
+  );
+
+  const hasInboundReplayGuardFailClosedPressure = inboundPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "inbound_payload_replay_guard_fail_closed_blocked"
+  );
+
   const operationalRecommendations = [
     ...(hasMalformedIdempotencySpike
       ? ["Integración emite idempotency keys malformadas: normalizar a [a-zA-Z0-9:_-.], usar 8-64 chars y enviar SIEMPRE la misma key por retry del mismo mensaje."]
+      : []),
+    ...(hasInboundInvalidContentTypePressure
+      ? ["Se están bloqueando webhooks por Content-Type inválido: asegurar application/json en Meta/proxy (sin transformaciones) para evitar 415 y pérdida de eventos."]
+      : []),
+    ...(hasInboundPayloadReplayPressure
+      ? ["Hay presión de replay inbound: revisar reintentos duplicados aguas arriba y validar que cada entrega conserve firma/cuerpo consistentes para dedupe estable."]
+      : []),
+    ...(hasInboundReplayGuardFailClosedPressure
+      ? ["El replay guard inbound entró en fail-closed: priorizar salud DB/migraciones de ai_webhook_payload_replay_guard para no bloquear eventos legítimos."]
       : [])
   ];
 
