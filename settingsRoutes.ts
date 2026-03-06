@@ -128,6 +128,21 @@ settingsRoutes.get("/meta/webhook-status", isAuth, isAdmin, async (_req, res) =>
 settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_req, res) => {
   const settings = getRuntimeSettings();
   const boolWithDefault = parseBoolWithDefault;
+  const integrationApiAlerts = getIntegrationHardeningAlertSnapshot();
+
+  const integrationPendingAlerts = Array.isArray((integrationApiAlerts as any)?.pendingAlerts)
+    ? (integrationApiAlerts as any).pendingAlerts
+    : [];
+
+  const hasMalformedIdempotencySpike = integrationPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_malformed_spike"
+  );
+
+  const operationalRecommendations = [
+    ...(hasMalformedIdempotencySpike
+      ? ["Integración emite idempotency keys malformadas: normalizar a [a-zA-Z0-9:_-.], usar 8-64 chars y enviar SIEMPRE la misma key por retry del mismo mensaje."]
+      : [])
+  ];
 
   return res.json({
     effectiveConfig: {
@@ -161,7 +176,10 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     alerts: {
       inboundWebhook: getWaHardeningAlertSnapshot(),
       outboundSend: getSendHardeningAlertSnapshot(),
-      outboundIntegrationApi: getIntegrationHardeningAlertSnapshot()
+      outboundIntegrationApi: integrationApiAlerts
+    },
+    recommendations: {
+      operational: operationalRecommendations
     }
   });
 });
