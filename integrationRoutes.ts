@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { QueryTypes } from "sequelize";
+import sequelize from "../../database";
 import integrationAuth from "../../middleware/integrationAuth";
 import CreateLeadService from "../../services/IntegrationServices/CreateLeadService";
 import SendOutboundTextService from "../../services/IntegrationServices/SendOutboundTextService";
@@ -45,6 +47,50 @@ type OutboundReplayGuardEntry = {
 
 const outboundReplayGuard = new Map<string, OutboundReplayGuardEntry>();
 
+let outboundReplayGuardTableReady = false;
+let outboundReplayGuardLastPruneAt = 0;
+const OUTBOUND_REPLAY_GUARD_PRUNE_INTERVAL_MS = 60 * 1000;
+
+const ensureOutboundReplayGuardTable = async (): Promise<void> => {
+  if (outboundReplayGuardTableReady) return;
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS ai_integration_outbound_replay_guard (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL,
+      idempotency_key VARCHAR(140) NOT NULL,
+      fingerprint VARCHAR(400) NOT NULL,
+      state VARCHAR(16) NOT NULL,
+      response_json TEXT,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      UNIQUE(company_id, idempotency_key)
+    )
+  `);
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_ai_integration_outbound_replay_guard_created_at
+    ON ai_integration_outbound_replay_guard(created_at)
+  `);
+
+  outboundReplayGuardTableReady = true;
+};
+
+const pruneOutboundReplayGuardPersistentIfDue = async (): Promise<void> => {
+  const now = Date.now();
+  if (now - outboundReplayGuardLastPruneAt < OUTBOUND_REPLAY_GUARD_PRUNE_INTERVAL_MS) return;
+  outboundReplayGuardLastPruneAt = now;
+
+  await sequelize.query(
+    `DELETE FROM ai_integration_outbound_replay_guard
+      WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`,
+    {
+      replacements: { ttlSeconds: Math.max(60, Math.round(OUTBOUND_REPLAY_GUARD_TTL_MS / 1000)) },
+      type: QueryTypes.DELETE
+    }
+  );
+};
+
 const pruneOutboundReplayGuard = (now = Date.now()): void => {
   for (const [key, entry] of outboundReplayGuard.entries()) {
     if (now - entry.createdAt > OUTBOUND_REPLAY_GUARD_TTL_MS) {
@@ -59,6 +105,95 @@ const buildOutboundReplayFingerprint = (payload: any): string => {
   const text = String(payload?.text || "").trim();
   const contactName = String(payload?.contactName || "").trim().toLowerCase();
   return `${whatsappId}|${to}|${text}|${contactName}`;
+};
+
+const upsertOutboundReplayGuardPersistentInflight = async (companyId: number, idempotencyKey: string, fingerprint: string): Promise<void> => {
+  await ensureOutboundReplayGuardTable();
+  await pruneOutboundReplayGuardPersistentIfDue();
+
+  await sequelize.query(
+    `INSERT INTO ai_integration_outbound_replay_guard (company_id, idempotency_key, fingerprint, state, response_json, created_at, updated_at)
+     VALUES (:companyId, :idempotencyKey, :fingerprint, 'inflight', NULL, NOW(), NOW())
+     ON CONFLICT (company_id, idempotency_key)
+     DO UPDATE SET
+       fingerprint = EXCLUDED.fingerprint,
+       state = 'inflight',
+       response_json = NULL,
+       updated_at = NOW()`,
+    {
+      replacements: { companyId, idempotencyKey, fingerprint },
+      type: QueryTypes.INSERT
+    }
+  );
+};
+
+const getOutboundReplayGuardPersistent = async (companyId: number, idempotencyKey: string): Promise<{ fingerprint: string; state: "inflight" | "done"; response?: any } | null> => {
+  await ensureOutboundReplayGuardTable();
+  await pruneOutboundReplayGuardPersistentIfDue();
+
+  const rows: any[] = await sequelize.query(
+    `SELECT fingerprint, state, response_json
+     FROM ai_integration_outbound_replay_guard
+     WHERE company_id = :companyId AND idempotency_key = :idempotencyKey
+     LIMIT 1`,
+    {
+      replacements: { companyId, idempotencyKey },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  const row = rows[0];
+  if (!row) return null;
+
+  let response: any;
+  if (row.response_json) {
+    try {
+      response = JSON.parse(String(row.response_json));
+    } catch {
+      response = undefined;
+    }
+  }
+
+  return {
+    fingerprint: String(row.fingerprint || ""),
+    state: String(row.state || "inflight") === "done" ? "done" : "inflight",
+    response
+  };
+};
+
+const markOutboundReplayGuardPersistentDone = async (companyId: number, idempotencyKey: string, fingerprint: string, response: any): Promise<void> => {
+  await ensureOutboundReplayGuardTable();
+
+  await sequelize.query(
+    `UPDATE ai_integration_outbound_replay_guard
+     SET state = 'done',
+         fingerprint = :fingerprint,
+         response_json = :responseJson,
+         updated_at = NOW()
+     WHERE company_id = :companyId AND idempotency_key = :idempotencyKey`,
+    {
+      replacements: {
+        companyId,
+        idempotencyKey,
+        fingerprint,
+        responseJson: JSON.stringify(response || {})
+      },
+      type: QueryTypes.UPDATE
+    }
+  );
+};
+
+const clearOutboundReplayGuardPersistent = async (companyId: number, idempotencyKey: string): Promise<void> => {
+  await ensureOutboundReplayGuardTable();
+
+  await sequelize.query(
+    `DELETE FROM ai_integration_outbound_replay_guard
+     WHERE company_id = :companyId AND idempotency_key = :idempotencyKey`,
+    {
+      replacements: { companyId, idempotencyKey },
+      type: QueryTypes.DELETE
+    }
+  );
 };
 
 const bumpIntegrationHardeningMetric = (metric: string, by = 1): void => {
@@ -361,6 +496,49 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   }
 
   if (replayGuardKey) {
+    let replayGuardInfraFailed = false;
+
+    try {
+      const persistentExisting = await getOutboundReplayGuardPersistent(companyId, effectiveIdempotencyKey);
+
+      if (persistentExisting) {
+        if (persistentExisting.fingerprint !== replayFingerprint) {
+          bumpIntegrationHardeningMetric("outbound.idempotency_key_payload_conflict_blocked");
+          pushIntegrationHardeningSignal("outbound_integration_idempotency_key_payload_conflict_blocked", 2);
+          return res.status(409).json({
+            error: "idempotency key reuse with different payload is not allowed",
+            idempotencyKey: effectiveIdempotencyKey
+          });
+        }
+
+        if (persistentExisting.state === "done" && persistentExisting.response) {
+          bumpIntegrationHardeningMetric("outbound.duplicate_replayed");
+          pushIntegrationHardeningSignal("outbound_integration_duplicate_replayed", 25);
+          return res.status(200).json({
+            ...persistentExisting.response,
+            duplicate: true,
+            replayed: true,
+            idempotencyKeyUsed: true
+          });
+        }
+
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+        pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
+        return res.status(202).json({
+          ok: true,
+          processing: true,
+          duplicate: true,
+          idempotencyKeyUsed: true
+        });
+      }
+
+      await upsertOutboundReplayGuardPersistentInflight(companyId, effectiveIdempotencyKey, replayFingerprint);
+    } catch {
+      replayGuardInfraFailed = true;
+      bumpIntegrationHardeningMetric("outbound.replay_guard_infra_error");
+      pushIntegrationHardeningSignal("outbound_integration_replay_guard_infra_error", 2);
+    }
+
     pruneOutboundReplayGuard();
     const existing = outboundReplayGuard.get(replayGuardKey);
 
@@ -400,6 +578,10 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
       fingerprint: replayFingerprint,
       state: "inflight"
     });
+
+    if (replayGuardInfraFailed) {
+      bumpIntegrationHardeningMetric("outbound.replay_guard_memory_fallback_used");
+    }
   }
 
   bumpIntegrationHardeningMetric("outbound.send_attempt_accepted");
@@ -424,6 +606,13 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         state: "done",
         response: responsePayload
       });
+
+      try {
+        await markOutboundReplayGuardPersistentDone(companyId, effectiveIdempotencyKey, replayFingerprint, responsePayload);
+      } catch {
+        bumpIntegrationHardeningMetric("outbound.replay_guard_mark_done_infra_error");
+        pushIntegrationHardeningSignal("outbound_integration_replay_guard_mark_done_infra_error", 2);
+      }
     }
 
     await incrementUsage(companyId, "integrations.messages_sent", 1);
@@ -431,6 +620,13 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   } catch (err: any) {
     if (replayGuardKey) {
       outboundReplayGuard.delete(replayGuardKey);
+
+      try {
+        await clearOutboundReplayGuardPersistent(companyId, effectiveIdempotencyKey);
+      } catch {
+        bumpIntegrationHardeningMetric("outbound.replay_guard_clear_infra_error");
+        pushIntegrationHardeningSignal("outbound_integration_replay_guard_clear_infra_error", 2);
+      }
     }
 
     bumpIntegrationHardeningMetric("outbound.send_attempt_failed");
