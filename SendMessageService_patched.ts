@@ -184,6 +184,13 @@ const isMonotonicSequence = (value: string): boolean => {
   return true;
 };
 
+const isTimestampOnlyIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeClientIdempotencyKey(key);
+  if (!normalized) return false;
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  return /^\d{10,17}$/.test(compact);
+};
+
 const isWeakClientIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeClientIdempotencyKey(key);
   if (!normalized) return false;
@@ -194,6 +201,9 @@ const isWeakClientIdempotencyKey = (key: string): boolean => {
   // strip separators to catch weak synthetic keys like "12345678" or "abcdefghi"
   const compact = normalized.replace(/[:_\-.]/g, "");
   if (isMonotonicSequence(compact)) return true;
+
+  // raw unix timestamps are predictable and often reused in retries/concurrent workers
+  if (/^\d{10,17}$/.test(compact)) return true;
 
   return false;
 };
@@ -713,6 +723,19 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
       minLength: resolveOutboundIdempotencyKeyMinLength()
     });
     throw new AppError(`Hardening: Idempotency-Key demasiado corto (min ${resolveOutboundIdempotencyKeyMinLength()})`, 400);
+  }
+
+  if (cleanIdempotencyKey && isTimestampOnlyIdempotencyKey(cleanIdempotencyKey)) {
+    bumpHardeningMetric("outbound.idempotency_key_timestamp_only_blocked");
+    pushHardeningSignal("outbound_idempotency_key_timestamp_only_blocked", 2, {
+      ticketId: ticket.id
+    });
+    bumpHardeningMetric("outbound.idempotency_key_too_weak_blocked");
+    pushHardeningSignal("outbound_idempotency_key_too_weak_blocked", 3, {
+      ticketId: ticket.id,
+      weakReason: "timestamp_only"
+    });
+    throw new AppError("Hardening: Idempotency-Key timestamp-only no permitido (usar UUID/ULID o clave con entropía real)", 400);
   }
 
   if (cleanIdempotencyKey && isWeakClientIdempotencyKey(cleanIdempotencyKey)) {

@@ -157,6 +157,13 @@ const isMonotonicSequence = (value: string): boolean => {
   return true;
 };
 
+const isTimestampOnlyIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeIdempotencyKey(key);
+  if (!normalized) return false;
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  return /^\d{10,17}$/.test(compact);
+};
+
 const isWeakIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeIdempotencyKey(key);
   if (!normalized) return false;
@@ -304,6 +311,16 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_short_blocked", 3);
     return res.status(400).json({
       error: `x-idempotency-key too short (min ${resolveOutboundIdempotencyKeyMinLength()})`
+    });
+  }
+
+  if (effectiveIdempotencyKey && isTimestampOnlyIdempotencyKey(effectiveIdempotencyKey)) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_timestamp_only_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_timestamp_only_blocked", 2);
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_too_weak_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_weak_blocked", 3);
+    return res.status(400).json({
+      error: "x-idempotency-key timestamp-only not allowed (use UUID/ULID or high-entropy key)"
     });
   }
 

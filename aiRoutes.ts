@@ -46,10 +46,40 @@ const normalizeIdempotencyKey = (raw: string): string => {
 
 const hasInvalidIdempotencyChars = (raw: string): boolean => /[^a-zA-Z0-9:_\-.]/.test(String(raw || "").trim());
 
+const isMonotonicSequence = (value: string): boolean => {
+  if (value.length < 6) return false;
+  let direction = 0;
+
+  for (let i = 1; i < value.length; i++) {
+    const prev = value.charCodeAt(i - 1);
+    const curr = value.charCodeAt(i);
+    const delta = curr - prev;
+
+    if (delta !== 1 && delta !== -1) return false;
+    if (direction === 0) direction = delta;
+    if (delta !== direction) return false;
+  }
+
+  return true;
+};
+
+const isTimestampOnlyIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeIdempotencyKey(key);
+  if (!normalized) return false;
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  return /^\d{10,17}$/.test(compact);
+};
+
 const isWeakIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeIdempotencyKey(key);
   if (!normalized) return false;
-  return new Set(normalized.split("")).size < 2;
+  if (new Set(normalized.split("")).size < 2) return true;
+
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  if (isMonotonicSequence(compact)) return true;
+  if (/^\d{10,17}$/.test(compact)) return true;
+
+  return false;
 };
 
 const resolveWhatsapp = async (companyId: number) => {
@@ -1481,10 +1511,17 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
     });
   }
 
+  if (effectiveIdempotencyKey && isTimestampOnlyIdempotencyKey(effectiveIdempotencyKey)) {
+    return res.status(400).json({
+      ok: false,
+      error: "x-idempotency-key timestamp-only not allowed (use UUID/ULID or high-entropy key)"
+    });
+  }
+
   if (effectiveIdempotencyKey && isWeakIdempotencyKey(effectiveIdempotencyKey)) {
     return res.status(400).json({
       ok: false,
-      error: "x-idempotency-key too weak (use at least 2 distinct characters)"
+      error: "x-idempotency-key too weak (use at least 2 distinct, non-sequential characters)"
     });
   }
 

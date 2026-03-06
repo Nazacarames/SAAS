@@ -368,6 +368,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       idempotencyCoveragePct,
       missingIdempotencyKeyBlocked: readCounter(outboundCounters, "outbound.missing_idempotency_key_blocked"),
       idempotencyKeyTooWeakBlocked: readCounter(outboundCounters, "outbound.idempotency_key_too_weak_blocked"),
+      idempotencyKeyTimestampOnlyBlocked: readCounter(outboundCounters, "outbound.idempotency_key_timestamp_only_blocked"),
       retryBlockedNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
         + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key"),
       retryBlockedUnknownTransportNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key"),
@@ -409,7 +410,8 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       idempotencyKeyInvalidCharsBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked"),
       idempotencyKeyMissingBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_required_blocked"),
       retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked"),
-      idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked")
+      idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked"),
+      idempotencyKeyTimestampOnlyBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked")
     }
   };
 
@@ -434,6 +436,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.outbound.idempotencyKeyTooWeakBlocked > 0) {
     recommendations.push("Se bloquearon envíos por Idempotency-Key débil: usar claves con entropía real (UUID/ULID) y al menos 2 caracteres distintos.");
   }
+  if (summary.outbound.idempotencyKeyTimestampOnlyBlocked > 0) {
+    recommendations.push("Se bloquearon envíos por Idempotency-Key timestamp-only: evitar timestamps crudos y usar UUID/ULID para reducir colisiones y reintentos duplicados.");
+  }
   if (summary.integrationApi.idempotencyKeyInvalidFormatBlocked > 0 || summary.integrationApi.idempotencyKeyInvalidCharsBlocked > 0) {
     recommendations.push("La Integration API rechazó Idempotency-Key por formato inválido: validar allowlist [a-zA-Z0-9:_-.], longitud y normalización en el cliente antes de enviar.");
   }
@@ -445,6 +450,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.integrationApi.idempotencyKeyTooWeakBlocked > 0) {
     recommendations.push("La Integration API bloqueó Idempotency-Key débil: usar UUID/ULID o claves con entropía real para evitar colisiones entre requests.");
+  }
+  if (summary.integrationApi.idempotencyKeyTimestampOnlyBlocked > 0) {
+    recommendations.push("La Integration API bloqueó Idempotency-Key timestamp-only: evitar timestamps crudos y generar claves únicas con entropía real por request.");
   }
   if (summary.integrationApi.sendAttemptFailed > 0) {
     recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
@@ -673,6 +681,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const outboundTimestampOnlyIdempotencyBlocked = readCounter(outboundCounters, "outbound.idempotency_key_timestamp_only_blocked");
+  if (outboundTimestampOnlyIdempotencyBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_idempotency_key_timestamp_only_blocked_spike",
+      threshold: 2,
+      inWindow: outboundTimestampOnlyIdempotencyBlocked,
+      remaining: 0,
+      severity: outboundTimestampOnlyIdempotencyBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
   const integrationWeakIdempotencyBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked");
   if (integrationWeakIdempotencyBlocked >= 3) {
     runtimeOutboundAlerts.push({
@@ -684,6 +704,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.idempotency_key_too_weak_blocked"
+      }
+    });
+  }
+
+  const integrationTimestampOnlyIdempotencyBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked");
+  if (integrationTimestampOnlyIdempotencyBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "integration_api_idempotency_key_timestamp_only_spike",
+      threshold: 2,
+      inWindow: integrationTimestampOnlyIdempotencyBlocked,
+      remaining: 0,
+      severity: integrationTimestampOnlyIdempotencyBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_timestamp_only_blocked"
       }
     });
   }
