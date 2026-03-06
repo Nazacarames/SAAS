@@ -92,11 +92,35 @@ const normalizeIdempotencyKey = (raw: string): string => {
 
 const hasInvalidIdempotencyChars = (raw: string): boolean => /[^a-zA-Z0-9:_\-.]/.test(String(raw || "").trim());
 
+const isMonotonicSequence = (value: string): boolean => {
+  if (value.length < 6) return false;
+  let direction = 0;
+
+  for (let i = 1; i < value.length; i++) {
+    const prev = value.charCodeAt(i - 1);
+    const curr = value.charCodeAt(i);
+    const delta = curr - prev;
+
+    if (delta !== 1 && delta !== -1) return false;
+    if (direction === 0) direction = delta;
+    if (delta !== direction) return false;
+  }
+
+  return true;
+};
+
 const isWeakIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeIdempotencyKey(key);
   if (!normalized) return false;
+
   // low-entropy keys (single-char repeated) increase cross-request collision risk and can break safe retries
-  return new Set(normalized).size < 2;
+  if (new Set(normalized).size < 2) return true;
+
+  // strip separators to catch weak synthetic keys like "12345678" or "abcdefghi"
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  if (isMonotonicSequence(compact)) return true;
+
+  return false;
 };
 
 integrationRoutes.use(integrationAuth);
@@ -177,14 +201,20 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   }
 
   if (idempotencyHeaderXRaw && !idempotencyHeaderX) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_format_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_format_blocked", 3);
     return res.status(400).json({ error: "x-idempotency-key inválido" });
   }
 
   if (idempotencyHeaderStdRaw && !idempotencyHeaderStd) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_format_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_format_blocked", 3);
     return res.status(400).json({ error: "idempotency-key inválido" });
   }
 
   if (idempotencyBodyRaw && !idempotencyBody) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_invalid_format_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_invalid_format_blocked", 3);
     return res.status(400).json({ error: "body.idempotencyKey inválido" });
   }
 
@@ -228,24 +258,30 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     bumpIntegrationHardeningMetric("outbound.idempotency_key_too_weak_blocked");
     pushIntegrationHardeningSignal("outbound_integration_idempotency_key_too_weak_blocked", 3);
     return res.status(400).json({
-      error: "x-idempotency-key too weak (use at least 2 distinct characters)"
+      error: "x-idempotency-key too weak (use at least 2 distinct, non-sequential characters)"
     });
   }
 
   bumpIntegrationHardeningMetric("outbound.send_attempt_accepted");
   pushIntegrationHardeningSignal("outbound_integration_send_attempt_accepted", 50);
 
-  const result = await SendOutboundTextService({
-    companyId,
-    whatsappId,
-    to,
-    text,
-    contactName,
-    idempotencyKey: effectiveIdempotencyKey || undefined
-  } as any);
+  try {
+    const result = await SendOutboundTextService({
+      companyId,
+      whatsappId,
+      to,
+      text,
+      contactName,
+      idempotencyKey: effectiveIdempotencyKey || undefined
+    } as any);
 
-  await incrementUsage(companyId, "integrations.messages_sent", 1);
-  return res.status(201).json({ ...result, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) });
+    await incrementUsage(companyId, "integrations.messages_sent", 1);
+    return res.status(201).json({ ...result, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) });
+  } catch (err: any) {
+    bumpIntegrationHardeningMetric("outbound.send_attempt_failed");
+    pushIntegrationHardeningSignal("outbound_integration_send_attempt_failed", 4);
+    throw err;
+  }
 });
 
 export default integrationRoutes;
