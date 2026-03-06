@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -394,6 +394,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
       invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
       payloadReplayBlocked: readCounter(inboundCounters, "inbound.payload_replay_blocked"),
       payloadReplayGuardInfraErrors: readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error"),
+      payloadReplayGuardFailClosedBlocked: readCounter(inboundCounters, "inbound.payload_replay_guard_fail_closed_blocked"),
       payloadSizeBlocked: readCounter(inboundCounters, "inbound.payload_size_blocked"),
       payloadVolumeBlocked: readCounter(inboundCounters, "inbound.payload_volume_blocked"),
       replayMessageBlocked: readCounter(inboundCounters, "inbound.replay_blocked")
@@ -441,6 +442,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, health: any) => {
   }
   if (summary.inbound.payloadReplayGuardInfraErrors > 0) {
     recommendations.push("Se activó fallback en memoria del guard de replay de payload: revisar disponibilidad DB/migraciones para recuperar persistencia.");
+  }
+  if (summary.inbound.payloadReplayGuardFailClosedBlocked > 0) {
+    recommendations.push("Hubo webhooks bloqueados por fail-closed del guard de replay: restaurar conectividad/health de DB para evitar pérdida de eventos inbound legítimos.");
   }
   if (summary.inbound.payloadSizeBlocked > 0 || summary.inbound.payloadVolumeBlocked > 0) {
     recommendations.push("Se bloquearon payloads por tamaño/volumen: revisar productores y ajustar batching para evitar drops legítimos.");
@@ -548,6 +552,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: inboundPayloadSizeBlocked,
       remaining: 0,
       severity: inboundPayloadSizeBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundReplayGuardFailClosedBlocked = readCounter(inboundCounters, "inbound.payload_replay_guard_fail_closed_blocked");
+  if (inboundReplayGuardFailClosedBlocked >= 1) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_payload_replay_guard_fail_closed_blocked",
+      threshold: 1,
+      inWindow: inboundReplayGuardFailClosedBlocked,
+      remaining: 0,
+      severity: inboundReplayGuardFailClosedBlocked >= 5 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
@@ -943,7 +959,11 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
       });
       return res.status(202).json({ ok: true, ignored: true, reason: "payload_replay_blocked" });
     }
-  } catch (replayGuardError) {
+  } catch (replayGuardError: any) {
+    recordInboundPayloadReplayGuardFailClosedBlocked({
+      reason: "payload_replay_guard_unavailable_fail_closed",
+      error: replayGuardError?.message || String(replayGuardError)
+    });
     return res.status(503).json({ error: "Webhook replay guard unavailable (fail-closed)" });
   }
 

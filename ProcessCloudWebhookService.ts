@@ -376,6 +376,11 @@ export const recordInboundPayloadReplayGuardInfraError = (context?: Record<strin
   pushHardeningSignal("inbound_payload_replay_guard_infra_error", 2, context);
 };
 
+export const recordInboundPayloadReplayGuardFailClosedBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.payload_replay_guard_fail_closed_blocked");
+  pushHardeningSignal("inbound_payload_replay_guard_fail_closed_blocked", 2, context);
+};
+
 export const recordInboundPayloadOversizeBlocked = (context?: Record<string, unknown>) => {
   bumpHardeningMetric("inbound.payload_size_blocked");
   pushHardeningSignal("inbound_payload_size_blocked", 2, context);
