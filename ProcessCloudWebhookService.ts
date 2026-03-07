@@ -329,6 +329,17 @@ export const getWaHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const outboundProviderTotalObserved = Number(counters["outbound.provider_send_failed"] || 0) + Number(counters["outbound.cloud_send_ok"] || 0);
+  if (outboundProviderTotalObserved >= 20 && Number(derived.outboundProviderFailureRate || 0) >= 0.1) {
+    pendingAlerts.push({
+      signal: "outbound_provider_failure_rate_high",
+      threshold: 0.1,
+      inWindow: Number(derived.outboundProviderFailureRate || 0),
+      remaining: 0,
+      sampleSize: outboundProviderTotalObserved
+    } as any);
+  }
+
   return {
     windowMs: HARDENING_ALERT_WINDOW_MS,
     pendingAlerts: pendingAlerts.sort((a: any, b: any) => {
