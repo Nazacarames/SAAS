@@ -91,6 +91,8 @@ const ensureOutboundDedupeTable = async () => {
   if (outboundDedupeTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_dedupe (id SERIAL PRIMARY KEY, dedupe_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_dedupe_key ON ai_outbound_dedupe(dedupe_key)`);
+  // pruning runs every minute; keep created_at indexed to avoid full scans under outbound retry bursts
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_outbound_dedupe_created_at ON ai_outbound_dedupe(created_at)`);
   outboundDedupeTableReady = true;
 };
 
@@ -149,6 +151,8 @@ const ensureInboundReplayTable = async () => {
   if (inboundReplayTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_inbound_replay_guard (id SERIAL PRIMARY KEY, replay_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_inbound_replay_guard_key ON ai_inbound_replay_guard(replay_key)`);
+  // replay-prune runs every minute; created_at index keeps delete cost bounded when webhook volume spikes
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_inbound_replay_guard_created_at ON ai_inbound_replay_guard(created_at)`);
   inboundReplayTableReady = true;
 };
 
