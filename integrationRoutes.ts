@@ -763,6 +763,18 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
     recommendations.push("Replay-guard storage had infra errors: check DB availability/latency for ai_integration_outbound_replay_guard.");
   }
 
+  if (Number(counters["outbound.replay_guard_memory_fallback_used"] || 0) > 0) {
+    recommendations.push("Replay-guard fallback to in-memory mode was used: restore DB persistence for ai_integration_outbound_replay_guard to keep idempotency protection across restarts.");
+  }
+
+  if (Number(counters["outbound.replay_guard_mark_done_infra_error"] || 0) > 0) {
+    recommendations.push("Replay-guard failed to persist DONE state after a send: investigate DB/write errors to avoid duplicate replays after worker restarts.");
+  }
+
+  if (Number(counters["outbound.replay_guard_clear_infra_error"] || 0) > 0) {
+    recommendations.push("Replay-guard failed to clear idempotency entries after failed sends: check DB deletes/locks to prevent stale inflight blocking.");
+  }
+
   if (Number(counters["outbound.duplicate_inflight_stale_recovered"] || 0) > 0) {
     recommendations.push("Stale inflight recoveries observed: review worker/provider latency if sends frequently exceed stale inflight threshold.");
   }
