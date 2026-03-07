@@ -604,6 +604,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
     if (replayGuardInfraFailed) {
       bumpIntegrationHardeningMetric("outbound.replay_guard_memory_fallback_used");
+      pushIntegrationHardeningSignal("outbound_integration_replay_guard_memory_fallback_used", 1);
     }
   }
 

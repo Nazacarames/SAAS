@@ -425,7 +425,8 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       idempotencyKeyMissingBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_required_blocked"),
       retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked"),
       idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked"),
-      idempotencyKeyTimestampOnlyBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked")
+      idempotencyKeyTimestampOnlyBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked"),
+      replayGuardMemoryFallbackUsed: readCounter(integrationApiCounters, "outbound.replay_guard_memory_fallback_used")
     }
   };
 
@@ -470,6 +471,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.integrationApi.sendAttemptFailed > 0) {
     recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
+  }
+  if (summary.integrationApi.replayGuardMemoryFallbackUsed > 0) {
+    recommendations.push("Integration API está usando fallback en memoria del replay guard outbound: revisar disponibilidad DB/migraciones de ai_integration_outbound_replay_guard para recuperar persistencia cross-restart.");
   }
   if (summary.outbound.duplicateBlockedByMode.template > 0) {
     recommendations.push("Hay duplicados outbound bloqueados en templates: revisar reintentos del flujo de primer contacto/campañas y propagar Idempotency-Key por envío.");
@@ -799,6 +803,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.idempotency_key_mismatch_blocked"
+      }
+    });
+  }
+
+  const integrationReplayGuardMemoryFallbackUsed = readCounter(integrationApiCounters, "outbound.replay_guard_memory_fallback_used");
+  if (integrationReplayGuardMemoryFallbackUsed >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_replay_guard_memory_fallback_used",
+      threshold: 1,
+      inWindow: integrationReplayGuardMemoryFallbackUsed,
+      remaining: 0,
+      severity: integrationReplayGuardMemoryFallbackUsed >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.replay_guard_memory_fallback_used"
       }
     });
   }
