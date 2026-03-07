@@ -375,10 +375,11 @@ const resolveHardeningSignalCount = (entry: any): number => {
   return 0;
 };
 
-const buildHardeningHealth = (inboundAlerts: any, outboundAlerts: any) => {
+const buildHardeningHealth = (inboundAlerts: any, outboundAlerts: any, integrationAlerts?: any) => {
   const pendingAlerts = [
     ...(Array.isArray(inboundAlerts?.pendingAlerts) ? inboundAlerts.pendingAlerts : []),
-    ...(Array.isArray(outboundAlerts?.pendingAlerts) ? outboundAlerts.pendingAlerts : [])
+    ...(Array.isArray(outboundAlerts?.pendingAlerts) ? outboundAlerts.pendingAlerts : []),
+    ...(Array.isArray(integrationAlerts?.pendingAlerts) ? integrationAlerts.pendingAlerts : [])
   ];
 
   const pendingAlertCount = pendingAlerts.length;
@@ -1174,7 +1175,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
     ]
   };
 
-  const health = buildHardeningHealth(inboundAlertsWithRuntime, outboundAlertsWithRuntime);
+  const health = buildHardeningHealth(inboundAlertsWithRuntime, outboundAlertsWithRuntime, integrationApiAlerts);
   const summary = buildHardeningSummary(inbound, outbound, integrationApi, health);
   const failOnAlert = ["1", "true", "yes", "on"].includes(String(req.query?.failOnAlert || "").toLowerCase());
 
