@@ -65,7 +65,12 @@ const resolveOutboundDedupeMemoryMaxEntries = () => {
   return Math.max(200, Math.min(20000, Math.round(n)));
 };
 
-const resolveOutboundDedupeFailClosed = () => Boolean((getRuntimeSettings() as any).waOutboundDedupeFailClosed);
+const parseBooleanRuntimeSetting = (raw: any, defaultValue: boolean): boolean => {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return defaultValue;
+  return ["1", "true", "yes", "on"].includes(String(raw).trim().toLowerCase());
+};
+
+const resolveOutboundDedupeFailClosed = () => parseBooleanRuntimeSetting((getRuntimeSettings() as any).waOutboundDedupeFailClosed, true);
 
 const trimOutboundDedupeMemory = (maxEntries: number) => {
   if (outboundDedupeMemory.size <= maxEntries) return;
