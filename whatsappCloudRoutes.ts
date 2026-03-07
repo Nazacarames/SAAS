@@ -106,10 +106,45 @@ const resolveSignatureInvalidRateLimitMaxHits = (): number => {
   return Math.max(2, Math.min(200, Math.round(n)));
 };
 
+const normalizeIpToken = (rawIp: string): string => {
+  const cleaned = String(rawIp || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+  if (!cleaned) return "";
+
+  // x-forwarded-for entries can include ports (e.g. 203.0.113.7:443)
+  const withoutPort = cleaned.includes(":") && !cleaned.includes(".")
+    ? cleaned
+    : cleaned.replace(/:\d+$/, "");
+
+  // normalize common IPv6-mapped IPv4 form
+  if (withoutPort.startsWith("::ffff:")) {
+    return withoutPort.slice("::ffff:".length);
+  }
+
+  return withoutPort;
+};
+
+const pickClientIpFromForwarded = (forwardedHeader: string): string => {
+  const tokens = String(forwardedHeader || "")
+    .split(",")
+    .map((x) => normalizeIpToken(x))
+    .filter(Boolean);
+
+  for (const token of tokens) {
+    // ignore obvious placeholders/unknown hops
+    if (token === "unknown" || token === "-" || token === "null") continue;
+    return token;
+  }
+
+  return "";
+};
+
 const resolveRequesterIp = (req: any): string => {
-  const forwarded = String(req.get("x-forwarded-for") || "").split(",")[0].trim();
-  const direct = String(req.ip || req.socket?.remoteAddress || "").trim();
-  const candidate = forwarded || direct || "unknown";
+  const direct = normalizeIpToken(String(req.ip || req.socket?.remoteAddress || ""));
+  const forwarded = pickClientIpFromForwarded(String(req.get("x-forwarded-for") || ""));
+
+  // Prefer Express-resolved req.ip when available (respects trust proxy config),
+  // fallback to x-forwarded-for only when direct is missing/unknown.
+  const candidate = direct && direct !== "unknown" ? direct : (forwarded || "unknown");
   return candidate.slice(0, 120);
 };
 
