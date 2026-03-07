@@ -353,6 +353,28 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const retryWithoutKeyBlocked = Number(integrationHardeningCounters.get("outbound.retry_idempotency_key_required_blocked") || 0);
+  const retryKeyDisciplineObserved = retryWithoutKeyBlocked + sendAttemptAccepted;
+  const retryWithoutKeyRate = retryKeyDisciplineObserved > 0
+    ? retryWithoutKeyBlocked / retryKeyDisciplineObserved
+    : 0;
+
+  if (retryKeyDisciplineObserved >= 20 && retryWithoutKeyRate >= 0.1) {
+    pendingAlerts.push({
+      signal: "outbound_integration_retry_without_idempotency_key_rate_high",
+      threshold: 0.1,
+      inWindow: Number(retryWithoutKeyRate.toFixed(4)),
+      remaining: 0,
+      severity: retryWithoutKeyRate >= 0.2 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      sampleSize: retryKeyDisciplineObserved,
+      breakdown: {
+        retryWithoutKeyBlocked,
+        sendAttemptAccepted
+      }
+    } as any);
+  }
+
   pendingAlerts.sort((a, b) => Number(b.inWindow || 0) - Number(a.inWindow || 0) || a.signal.localeCompare(b.signal));
 
   return {
@@ -749,6 +771,14 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
 
   if (duplicateInflightPressureAlert) {
     recommendations.push("High inflight duplicate pressure: add jittered exponential backoff and cap concurrent retries per idempotency key to reduce duplicate collisions while previous sends are still processing.");
+  }
+
+  const retryWithoutKeyRateAlert = Array.isArray((alerts as any)?.pendingAlerts)
+    ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_retry_without_idempotency_key_rate_high")
+    : null;
+
+  if (retryWithoutKeyRateAlert) {
+    recommendations.push("High retry-without-key rate: persist one stable x-idempotency-key per logical outbound send and reuse it for every retry attempt (transport timeout, 5xx, or connection reset).");
   }
 
   if (Number(counters["outbound.retry_idempotency_key_required_blocked"] || 0) > 0) {
