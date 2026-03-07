@@ -151,6 +151,13 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_weak_spike"
   );
 
+  const hasOutboundReplayGuardFallbackPressure = integrationPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "outbound_integration_replay_guard_memory_fallback_used"
+      || String(entry?.signal || "") === "outbound_integration_replay_guard_infra_error"
+      || String(entry?.signal || "") === "outbound_integration_replay_guard_mark_done_infra_error"
+      || String(entry?.signal || "") === "outbound_integration_replay_guard_clear_infra_error"
+  );
+
   const hasInboundInvalidContentTypePressure = inboundPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "inbound_invalid_content_type_blocked"
       || String(entry?.signal || "") === "inbound_invalid_content_type_blocked_spike"
@@ -176,6 +183,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     ...(hasWeakIdempotencySpike
       ? ["Se detecta spike de idempotency keys débiles/cortas: generar UUID/ULID (o equivalente de alta entropía), evitar timestamps secuenciales y respetar mínimo de longitud configurado."]
       : []),
+    ...(hasOutboundReplayGuardFallbackPressure
+      ? ["La Integration API está en fallback de replay guard (memoria o errores de persistencia): revisar salud DB/migraciones de ai_integration_outbound_replay_guard para mantener dedupe/idempotencia cross-restart y entre réplicas."]
+      : []),
     ...(hasInboundInvalidContentTypePressure
       ? ["Se están bloqueando webhooks por Content-Type inválido: asegurar application/json en Meta/proxy (sin transformaciones) para evitar 415 y pérdida de eventos."]
       : []),
@@ -194,7 +204,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       ? "outbound_integration_idempotency_key_mismatch_spike"
       : hasWeakIdempotencySpike
         ? "outbound_integration_idempotency_key_weak_spike"
-        : hasInboundInvalidContentTypePressure
+        : hasOutboundReplayGuardFallbackPressure
+          ? "outbound_integration_replay_guard_memory_fallback_used"
+          : hasInboundInvalidContentTypePressure
           ? "inbound_invalid_content_type_blocked_spike"
           : hasInboundPayloadReplayPressure
             ? "inbound_replay_spike"
