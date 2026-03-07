@@ -67,6 +67,8 @@ const ensureWebhookPayloadReplayTable = async () => {
   if (webhookPayloadReplayTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_webhook_payload_replay_guard (id SERIAL PRIMARY KEY, replay_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_webhook_payload_replay_guard_key ON ai_webhook_payload_replay_guard(replay_key)`);
+  // prune runs cada minuto; mantener created_at indexado evita full scans cuando crece el guard
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_webhook_payload_replay_guard_created_at ON ai_webhook_payload_replay_guard(created_at)`);
   webhookPayloadReplayTableReady = true;
 };
 
@@ -259,6 +261,15 @@ const resolveAllowUnsignedWebhook = (): boolean => {
   return ["1", "true", "yes", "on"].includes(raw);
 };
 
+const parseBooleanRuntimeSetting = (value: unknown, defaultValue: boolean): boolean => {
+  if (typeof value === "boolean") return value;
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return defaultValue;
+};
+
 const resolveWebhookSignatureHardeningState = () => {
   const settings = getRuntimeSettings();
   const appSecretConfigured = Boolean(String(settings.waCloudAppSecret || "").trim());
@@ -290,8 +301,8 @@ const resolveOutboundRetryHardeningState = () => {
   const allowRetryWithoutIdempotencyRaw = String(settings.waOutboundAllowRetryWithoutIdempotencyKey ?? "").trim().toLowerCase();
   const allowRetryWithoutIdempotency = ["1", "true", "yes", "on"].includes(allowRetryWithoutIdempotencyRaw);
 
-  const dedupeFailClosed = Boolean(settings.waOutboundDedupeFailClosed);
-  const timeoutRetryEnabled = Boolean(settings.waOutboundRetryOnTimeout);
+  const dedupeFailClosed = parseBooleanRuntimeSetting(settings.waOutboundDedupeFailClosed, true);
+  const timeoutRetryEnabled = parseBooleanRuntimeSetting(settings.waOutboundRetryOnTimeout, false);
 
   return {
     retryRequiresIdempotencyKey,
@@ -698,6 +709,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: inboundReplayGuardFailClosedBlocked,
       remaining: 0,
       severity: inboundReplayGuardFailClosedBlocked >= 5 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundReplayGuardInfraErrors = readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error");
+  if (inboundReplayGuardInfraErrors >= 1) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_payload_replay_guard_infra_error",
+      threshold: 1,
+      inWindow: inboundReplayGuardInfraErrors,
+      remaining: 0,
+      severity: inboundReplayGuardInfraErrors >= 3 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
