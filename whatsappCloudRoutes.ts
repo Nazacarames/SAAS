@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -147,6 +147,12 @@ const trimWebhookPayloadReplayCache = (maxEntries: number) => {
     webhookPayloadReplayCache.delete(key);
     removed += 1;
     if (removed >= overflow) break;
+  }
+  if (removed > 0) {
+    recordInboundPayloadReplayCacheTrimmed(removed, {
+      cacheSizeAfterTrim: webhookPayloadReplayCache.size,
+      maxEntries
+    });
   }
 };
 

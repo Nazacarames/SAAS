@@ -381,6 +381,13 @@ export const recordInboundPayloadReplayBlocked = (context?: Record<string, unkno
   pushHardeningSignal("inbound_payload_replay_blocked", 4, context);
 };
 
+export const recordInboundPayloadReplayCacheTrimmed = (removed: number, context?: Record<string, unknown>) => {
+  const trimmed = Math.max(0, Math.round(Number(removed) || 0));
+  if (trimmed <= 0) return;
+  bumpHardeningMetric("inbound.payload_replay_cache_trimmed", trimmed);
+  pushHardeningSignal("inbound_payload_replay_cache_trimmed", 10, { removed: trimmed, ...context });
+};
+
 export const recordInboundPayloadReplayGuardInfraError = (context?: Record<string, unknown>) => {
   bumpHardeningMetric("inbound.payload_replay_guard_infra_error");
   pushHardeningSignal("inbound_payload_replay_guard_infra_error", 2, context);
