@@ -309,7 +309,30 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     } as any);
   }
 
-  pendingAlerts.sort((a, b) => b.inWindow - a.inWindow || a.signal.localeCompare(b.signal));
+  const duplicateReplayed = Number(integrationHardeningCounters.get("outbound.duplicate_replayed") || 0);
+  const duplicateInflightBlocked = Number(integrationHardeningCounters.get("outbound.duplicate_inflight_blocked") || 0);
+  const sendAttemptAccepted = Number(integrationHardeningCounters.get("outbound.send_attempt_accepted") || 0);
+  const duplicateObserved = duplicateReplayed + duplicateInflightBlocked + sendAttemptAccepted;
+  const duplicateReplayRate = duplicateObserved > 0 ? duplicateReplayed / duplicateObserved : 0;
+
+  if (duplicateObserved >= 20 && duplicateReplayRate >= 0.2) {
+    pendingAlerts.push({
+      signal: "outbound_integration_duplicate_replay_rate_high",
+      threshold: 0.2,
+      inWindow: Number(duplicateReplayRate.toFixed(4)),
+      remaining: 0,
+      severity: duplicateReplayRate >= 0.35 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      sampleSize: duplicateObserved,
+      breakdown: {
+        duplicateReplayed,
+        duplicateInflightBlocked,
+        sendAttemptAccepted
+      }
+    } as any);
+  }
+
+  pendingAlerts.sort((a, b) => Number(b.inWindow || 0) - Number(a.inWindow || 0) || a.signal.localeCompare(b.signal));
 
   return {
     windowMs: INTEGRATION_HARDENING_ALERT_WINDOW_MS,

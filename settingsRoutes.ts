@@ -151,6 +151,10 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     (entry: any) => String(entry?.signal || "") === "outbound_integration_idempotency_key_weak_spike"
   );
 
+  const hasOutboundDuplicateReplayRateHigh = integrationPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "outbound_integration_duplicate_replay_rate_high"
+  );
+
   const hasOutboundReplayGuardFallbackPressure = integrationPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "outbound_integration_replay_guard_memory_fallback_used"
       || String(entry?.signal || "") === "outbound_integration_replay_guard_infra_error"
@@ -183,6 +187,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     ...(hasWeakIdempotencySpike
       ? ["Se detecta spike de idempotency keys débiles/cortas: generar UUID/ULID (o equivalente de alta entropía), evitar timestamps secuenciales y respetar mínimo de longitud configurado."]
       : []),
+    ...(hasOutboundDuplicateReplayRateHigh
+      ? ["La tasa de replay outbound está alta: consolidar retries del cliente sobre una única idempotency key por mensaje, evitar reenqueues paralelos y auditar por tenant los replays 200 duplicate=true para cortar bucles de reintento."]
+      : []),
     ...(hasOutboundReplayGuardFallbackPressure
       ? ["La Integration API está en fallback de replay guard (memoria o errores de persistencia): revisar salud DB/migraciones de ai_integration_outbound_replay_guard para mantener dedupe/idempotencia cross-restart y entre réplicas."]
       : []),
@@ -204,15 +211,17 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       ? "outbound_integration_idempotency_key_mismatch_spike"
       : hasWeakIdempotencySpike
         ? "outbound_integration_idempotency_key_weak_spike"
-        : hasOutboundReplayGuardFallbackPressure
-          ? "outbound_integration_replay_guard_memory_fallback_used"
-          : hasInboundInvalidContentTypePressure
-          ? "inbound_invalid_content_type_blocked_spike"
-          : hasInboundPayloadReplayPressure
-            ? "inbound_replay_spike"
-            : hasInboundReplayGuardFailClosedPressure
-              ? "inbound_payload_replay_guard_fail_closed_blocked"
-              : null;
+        : hasOutboundDuplicateReplayRateHigh
+          ? "outbound_integration_duplicate_replay_rate_high"
+          : hasOutboundReplayGuardFallbackPressure
+            ? "outbound_integration_replay_guard_memory_fallback_used"
+            : hasInboundInvalidContentTypePressure
+            ? "inbound_invalid_content_type_blocked_spike"
+            : hasInboundPayloadReplayPressure
+              ? "inbound_replay_spike"
+              : hasInboundReplayGuardFailClosedPressure
+                ? "inbound_payload_replay_guard_fail_closed_blocked"
+                : null;
 
   return res.json({
     effectiveConfig: {
