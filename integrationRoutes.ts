@@ -332,6 +332,27 @@ export const getIntegrationHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const duplicateInflightPressureObserved = duplicateInflightBlocked + sendAttemptAccepted;
+  const duplicateInflightPressureRate = duplicateInflightPressureObserved > 0
+    ? duplicateInflightBlocked / duplicateInflightPressureObserved
+    : 0;
+
+  if (duplicateInflightPressureObserved >= 20 && duplicateInflightPressureRate >= 0.3) {
+    pendingAlerts.push({
+      signal: "outbound_integration_duplicate_inflight_pressure_high",
+      threshold: 0.3,
+      inWindow: Number(duplicateInflightPressureRate.toFixed(4)),
+      remaining: 0,
+      severity: duplicateInflightPressureRate >= 0.5 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      sampleSize: duplicateInflightPressureObserved,
+      breakdown: {
+        duplicateInflightBlocked,
+        sendAttemptAccepted
+      }
+    } as any);
+  }
+
   pendingAlerts.sort((a, b) => Number(b.inWindow || 0) - Number(a.inWindow || 0) || a.signal.localeCompare(b.signal));
 
   return {
@@ -704,6 +725,57 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     pushIntegrationHardeningSignal("outbound_integration_send_attempt_failed", 4);
     throw err;
   }
+});
+
+integrationRoutes.get("/messages/hardening-status", featureGate("integrations_api"), async (req: any, res) => {
+  const companyId = Number(req.integrationCompanyId);
+  const metrics = getIntegrationHardeningMetrics();
+  const alerts = getIntegrationHardeningAlertSnapshot();
+  const counters = (metrics as any)?.counters || {};
+
+  const recommendations: string[] = [];
+
+  const duplicateReplayRateAlert = Array.isArray((alerts as any)?.pendingAlerts)
+    ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_duplicate_replay_rate_high")
+    : null;
+
+  if (duplicateReplayRateAlert) {
+    recommendations.push("High duplicate replay rate: ensure producer retries reuse the same stable idempotency key per logical send and avoid blind retry loops.");
+  }
+
+  const duplicateInflightPressureAlert = Array.isArray((alerts as any)?.pendingAlerts)
+    ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_duplicate_inflight_pressure_high")
+    : null;
+
+  if (duplicateInflightPressureAlert) {
+    recommendations.push("High inflight duplicate pressure: add jittered exponential backoff and cap concurrent retries per idempotency key to reduce duplicate collisions while previous sends are still processing.");
+  }
+
+  if (Number(counters["outbound.retry_idempotency_key_required_blocked"] || 0) > 0) {
+    recommendations.push("Some retry attempts were blocked due to missing idempotency key: set x-idempotency-key on initial request and persist it across retries.");
+  }
+
+  if (Number(counters["outbound.idempotency_key_payload_conflict_blocked"] || 0) > 0) {
+    recommendations.push("Idempotency key payload conflicts detected: never reuse the same key for different (to/text/contactName/whatsappId) payloads.");
+  }
+
+  if (Number(counters["outbound.replay_guard_infra_error"] || 0) > 0) {
+    recommendations.push("Replay-guard storage had infra errors: check DB availability/latency for ai_integration_outbound_replay_guard.");
+  }
+
+  if (Number(counters["outbound.duplicate_inflight_stale_recovered"] || 0) > 0) {
+    recommendations.push("Stale inflight recoveries observed: review worker/provider latency if sends frequently exceed stale inflight threshold.");
+  }
+
+  return res.json({
+    ok: true,
+    companyId,
+    hardening: {
+      metrics,
+      alerts,
+      recommendations
+    }
+  });
 });
 
 export default integrationRoutes;
