@@ -268,6 +268,8 @@ const ensureOutboundDedupeTable = async () => {
   if (outboundDedupeTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_dedupe (id SERIAL PRIMARY KEY, dedupe_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_dedupe_key ON ai_outbound_dedupe(dedupe_key)`);
+  // pruning runs frequently; keep created_at indexed to avoid table scans when dedupe grows
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_outbound_dedupe_created_at ON ai_outbound_dedupe(created_at)`);
   outboundDedupeTableReady = true;
 };
 
