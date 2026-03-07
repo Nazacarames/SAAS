@@ -314,7 +314,9 @@ const CRITICAL_HARDENING_SIGNALS = new Set([
   "outbound_wbot_retry_exhausted",
   "outbound_dedupe_fail_closed_blocked",
   "outbound_integration_retry_blocked_missing_idempotency_key",
+  "outbound_integration_retry_idempotency_key_required_blocked", // backward-compatible signal name from integrationRoutes
   "outbound_integration_idempotency_key_missing_blocked",
+  "outbound_integration_idempotency_key_required_blocked", // backward-compatible signal name from integrationRoutes
   "inbound_signature_invalid_blocked",
   "inbound_payload_replay_blocked"
 ]);
