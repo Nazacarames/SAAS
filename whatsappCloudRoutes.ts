@@ -57,6 +57,12 @@ const resolveWebhookMaxBodyBytes = (): number => {
   return Math.max(16 * 1024, Math.min(2 * 1024 * 1024, Math.round(n)));
 };
 
+const resolveWebhookSignatureHeaderMaxLength = (): number => {
+  const n = Number((getRuntimeSettings() as any).waWebhookSignatureHeaderMaxLength || 200);
+  if (!Number.isFinite(n)) return 200;
+  return Math.max(80, Math.min(512, Math.round(n)));
+};
+
 const isWebhookJsonContentTypeValid = (req: any): boolean => {
   const raw = String(req.get("content-type") || "").trim().toLowerCase();
   if (!raw) return false;
@@ -1250,6 +1256,42 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
   }
 
   const signatureHeaderRaw = String(req.get("x-hub-signature-256") || "");
+  const signatureHeaderMaxLength = resolveWebhookSignatureHeaderMaxLength();
+  if (signatureHeaderRaw.length > signatureHeaderMaxLength) {
+    const signatureRateLimit = shouldRateLimitInvalidSignatureByIp(req);
+    recordInboundSignatureMalformedBlocked({
+      hasSignatureHeader: true,
+      appSecretConfigured: Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim()),
+      ip: signatureRateLimit.ip,
+      ipHits: signatureRateLimit.hits,
+      ipMaxHits: signatureRateLimit.maxHits,
+      ipWindowMs: signatureRateLimit.windowMs,
+      reason: "signature_header_too_long",
+      observedLength: signatureHeaderRaw.length,
+      maxLength: signatureHeaderMaxLength
+    });
+    recordInboundSignatureInvalidBlocked({
+      hasSignatureHeader: true,
+      appSecretConfigured: Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim()),
+      ip: signatureRateLimit.ip,
+      ipHits: signatureRateLimit.hits,
+      ipMaxHits: signatureRateLimit.maxHits,
+      ipWindowMs: signatureRateLimit.windowMs,
+      reason: "signature_header_too_long"
+    });
+    if (signatureRateLimit.limited) {
+      recordInboundSignatureInvalidRateLimited({
+        ip: signatureRateLimit.ip,
+        hits: signatureRateLimit.hits,
+        maxHits: signatureRateLimit.maxHits,
+        windowMs: signatureRateLimit.windowMs,
+        reason: "signature_header_too_long"
+      });
+      return res.status(429).json({ error: "Too many invalid webhook signatures" });
+    }
+    return res.status(400).json({ error: "Webhook signature header too long" });
+  }
+
   const signatureHeader = classifySignatureHeader(signatureHeaderRaw);
   const appSecretConfigured = Boolean(String(getRuntimeSettings().waCloudAppSecret || "").trim());
 
