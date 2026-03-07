@@ -326,6 +326,7 @@ const CRITICAL_HARDENING_SIGNALS = new Set([
   "outbound_integration_retry_blocked_missing_idempotency_key",
   "outbound_integration_retry_idempotency_key_required_blocked", // backward-compatible signal name from integrationRoutes
   "outbound_integration_idempotency_key_missing_blocked",
+  "outbound_integration_idempotency_key_payload_conflict_blocked",
   "outbound_integration_idempotency_key_required_blocked", // backward-compatible signal name from integrationRoutes
   "inbound_signature_invalid_blocked",
   "inbound_payload_replay_blocked"
@@ -436,6 +437,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked"),
       idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked"),
       idempotencyKeyTimestampOnlyBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked"),
+      idempotencyKeyPayloadConflictBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_payload_conflict_blocked"),
       replayGuardMemoryFallbackUsed: readCounter(integrationApiCounters, "outbound.replay_guard_memory_fallback_used")
     }
   };
@@ -478,6 +480,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.integrationApi.idempotencyKeyTimestampOnlyBlocked > 0) {
     recommendations.push("La Integration API bloqueó Idempotency-Key timestamp-only: evitar timestamps crudos y generar claves únicas con entropía real por request.");
+  }
+  if (summary.integrationApi.idempotencyKeyPayloadConflictBlocked > 0) {
+    recommendations.push("La Integration API detectó reutilización de Idempotency-Key con payload distinto: asegurar una clave única por intento lógico y no reusar la misma clave con otro contenido.");
   }
   if (summary.integrationApi.sendAttemptFailed > 0) {
     recommendations.push("Hubo fallos reales en envíos outbound de Integration API: revisar logs de provider/credenciales y aplicar retry del lado cliente con Idempotency-Key fuerte para evitar duplicados.");
@@ -813,6 +818,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.idempotency_key_mismatch_blocked"
+      }
+    });
+  }
+
+  const integrationIdempotencyPayloadConflictBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_payload_conflict_blocked");
+  if (integrationIdempotencyPayloadConflictBlocked >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_payload_conflict_blocked",
+      threshold: 1,
+      inWindow: integrationIdempotencyPayloadConflictBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyPayloadConflictBlocked >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_payload_conflict_blocked"
       }
     });
   }
