@@ -158,13 +158,19 @@ type OutboundPayload = {
   caption?: string;
 };
 
+const OUTBOUND_IDEMPOTENCY_KEY_MAX_LENGTH = 120;
+
 const normalizeClientIdempotencyKey = (rawKey: string): string => {
   const cleaned = String(rawKey || "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9:_\-.]/g, "")
-    .slice(0, 120);
+    .slice(0, OUTBOUND_IDEMPOTENCY_KEY_MAX_LENGTH);
   return cleaned;
+};
+
+const hasInvalidClientIdempotencyChars = (rawKey: string): boolean => {
+  return /[^a-zA-Z0-9:_\-.]/.test(String(rawKey || ""));
 };
 
 const isMonotonicSequence = (value: string): boolean => {
@@ -382,6 +388,13 @@ const resolveOutboundRetryRequireIdempotencyKey = (): boolean => {
   return ["1", "true", "yes", "on"].includes(String(raw).toLowerCase());
 };
 
+const resolveOutboundAllowRetryWithoutIdempotencyKey = (): boolean => {
+  const raw = (getRuntimeSettings() as any).waOutboundAllowRetryWithoutIdempotencyKey;
+  // hardening default: even if retry-idempotency requirement is relaxed, keep retries blocked unless explicitly enabled
+  if (raw === undefined || raw === null || String(raw).trim() === "") return false;
+  return ["1", "true", "yes", "on"].includes(String(raw).toLowerCase());
+};
+
 const resolveOutboundRequireIdempotencyKey = (): boolean => {
   const raw = (getRuntimeSettings() as any).waOutboundRequireIdempotencyKey;
   // hardening default: missing idempotency key increases duplicate risk across retries/restarts
@@ -459,8 +472,18 @@ const sendViaWbot = async (
   const contactNumber = `${String(toRaw || "").replace(/\D/g, "")}@s.whatsapp.net`;
   const text = String(payload.text || "");
   const maxAttempts = Math.max(1, Math.min(6, Number(getRuntimeSettings().waOutboundRetryMaxAttempts || 3)));
-  const allowRetry = !resolveOutboundRetryRequireIdempotencyKey() || hasClientIdempotencyKey;
+  const allowRetryWithoutIdempotency = resolveOutboundAllowRetryWithoutIdempotencyKey();
+  const allowRetry = hasClientIdempotencyKey || (!resolveOutboundRetryRequireIdempotencyKey() && allowRetryWithoutIdempotency);
   const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+
+  if (!hasClientIdempotencyKey && maxAttempts > 1 && !allowRetry) {
+    bumpHardeningMetric("outbound.wbot_retry_blocked_without_idempotency_policy");
+    pushHardeningSignal("outbound_wbot_retry_blocked_without_idempotency_policy", 3, {
+      maxAttempts,
+      retryRequireIdempotencyKey: resolveOutboundRetryRequireIdempotencyKey(),
+      allowRetryWithoutIdempotency
+    });
+  }
   let lastErr: any;
 
   for (let attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
@@ -537,9 +560,23 @@ const sendViaCloud = async (
   }
 
   const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  const retryRequireIdempotencyKey = resolveOutboundRetryRequireIdempotencyKey();
+  const allowRetryWithoutIdempotency = resolveOutboundAllowRetryWithoutIdempotencyKey();
+  const allowRetry = hasClientIdempotencyKey || (!retryRequireIdempotencyKey && allowRetryWithoutIdempotency);
+  const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+
+  if (!hasClientIdempotencyKey && maxAttempts > 1 && !allowRetry) {
+    bumpHardeningMetric("outbound.cloud_retry_blocked_without_idempotency_policy");
+    pushHardeningSignal("outbound_cloud_retry_blocked_without_idempotency_policy", 3, {
+      maxAttempts,
+      retryRequireIdempotencyKey,
+      allowRetryWithoutIdempotency
+    });
+  }
+
   let lastErr: any;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
     try {
       const controller = new AbortController();
       const requestTimeoutMs = resolveOutboundRequestTimeoutMs();
@@ -550,7 +587,13 @@ const sendViaCloud = async (
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${settings.waCloudAccessToken}`,
-          ...(cleanClientIdempotencyKey ? { "X-Idempotency-Key": cleanClientIdempotencyKey } : {})
+          ...(cleanClientIdempotencyKey
+            ? {
+                // keep both canonical and de-facto header names for upstream/proxy compatibility
+                "Idempotency-Key": cleanClientIdempotencyKey,
+                "X-Idempotency-Key": cleanClientIdempotencyKey
+              }
+            : {})
         },
         body: JSON.stringify(
           payload.mode === "template"
@@ -607,8 +650,8 @@ const sendViaCloud = async (
       }
 
       const cloudCode = Number(data?.error?.code);
-      if (!isRetryableCloudFailure(resp.status, cloudCode) || attempt === maxAttempts) {
-        if (attempt === maxAttempts) {
+      if (!isRetryableCloudFailure(resp.status, cloudCode) || attempt === effectiveMaxAttempts) {
+        if (attempt === effectiveMaxAttempts) {
           pushHardeningSignal("outbound_retry_exhausted", 3, { status: resp.status, cloudCode });
         }
         throw new AppError(data?.error?.message || "Error al enviar mensaje", resp.status || 500);
@@ -640,7 +683,7 @@ const sendViaCloud = async (
         }
       }
 
-      if (attempt === maxAttempts) {
+      if (attempt === effectiveMaxAttempts) {
         pushHardeningSignal("outbound_retry_exhausted", 3, {
           status: Number(err?.statusCode || err?.status) || undefined,
           reason: isAbortTimeout ? "timeout" : undefined
@@ -707,9 +750,26 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     .trim();
   const cleanLanguageCode = String(languageCode || "es_AR").trim() || "es_AR";
-  const cleanIdempotencyKey = normalizeClientIdempotencyKey(String(idempotencyKey || ""));
+  const rawIdempotencyKey = String(idempotencyKey || "").trim();
+  const cleanIdempotencyKey = normalizeClientIdempotencyKey(rawIdempotencyKey);
 
-  if (String(idempotencyKey || "").trim() && !cleanIdempotencyKey) {
+  if (rawIdempotencyKey.length > OUTBOUND_IDEMPOTENCY_KEY_MAX_LENGTH) {
+    bumpHardeningMetric("outbound.idempotency_key_too_long_blocked");
+    pushHardeningSignal("outbound_idempotency_key_too_long_blocked", 3, {
+      ticketId: ticket.id,
+      observedLength: rawIdempotencyKey.length,
+      maxLength: OUTBOUND_IDEMPOTENCY_KEY_MAX_LENGTH
+    });
+    throw new AppError(`Hardening: Idempotency-Key demasiado largo (max ${OUTBOUND_IDEMPOTENCY_KEY_MAX_LENGTH})`, 400);
+  }
+
+  if (rawIdempotencyKey && hasInvalidClientIdempotencyChars(rawIdempotencyKey)) {
+    bumpHardeningMetric("outbound.idempotency_key_invalid_chars_blocked");
+    pushHardeningSignal("outbound_idempotency_key_invalid_chars_blocked", 3, { ticketId: ticket.id });
+    throw new AppError("Hardening: Idempotency-Key contiene caracteres inválidos", 400);
+  }
+
+  if (rawIdempotencyKey && !cleanIdempotencyKey) {
     bumpHardeningMetric("outbound.invalid_idempotency_key_blocked");
     pushHardeningSignal("outbound_invalid_idempotency_key_blocked", 3, { ticketId: ticket.id });
     throw new AppError("Idempotency-Key invalido", 400);

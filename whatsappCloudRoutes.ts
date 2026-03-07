@@ -246,12 +246,16 @@ const resolveOutboundRetryHardeningState = () => {
     ? true
     : ["1", "true", "yes", "on"].includes(requireIdempotencyRaw);
 
+  const allowRetryWithoutIdempotencyRaw = String(settings.waOutboundAllowRetryWithoutIdempotencyKey ?? "").trim().toLowerCase();
+  const allowRetryWithoutIdempotency = ["1", "true", "yes", "on"].includes(allowRetryWithoutIdempotencyRaw);
+
   const dedupeFailClosed = Boolean(settings.waOutboundDedupeFailClosed);
   const timeoutRetryEnabled = Boolean(settings.waOutboundRetryOnTimeout);
 
   return {
     retryRequiresIdempotencyKey,
-    insecureRetryWithoutIdempotencyAllowed: !retryRequiresIdempotencyKey,
+    allowRetryWithoutIdempotency,
+    insecureRetryWithoutIdempotencyAllowed: !retryRequiresIdempotencyKey || allowRetryWithoutIdempotency,
     managedRetryRequiresIdempotencyKey,
     insecureManagedRetryWithoutIdempotencyAllowed: !managedRetryRequiresIdempotencyKey,
     outboundRequiresIdempotencyKey,
