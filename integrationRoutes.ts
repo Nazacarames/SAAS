@@ -45,6 +45,8 @@ type OutboundReplayGuardEntry = {
   response?: any;
 };
 
+const OUTBOUND_REPLAY_GUARD_INFLIGHT_STALE_MS = 90 * 1000;
+
 const outboundReplayGuard = new Map<string, OutboundReplayGuardEntry>();
 
 let outboundReplayGuardTableReady = false;
@@ -127,12 +129,12 @@ const upsertOutboundReplayGuardPersistentInflight = async (companyId: number, id
   );
 };
 
-const getOutboundReplayGuardPersistent = async (companyId: number, idempotencyKey: string): Promise<{ fingerprint: string; state: "inflight" | "done"; response?: any } | null> => {
+const getOutboundReplayGuardPersistent = async (companyId: number, idempotencyKey: string): Promise<{ fingerprint: string; state: "inflight" | "done"; createdAtMs: number; response?: any } | null> => {
   await ensureOutboundReplayGuardTable();
   await pruneOutboundReplayGuardPersistentIfDue();
 
   const rows: any[] = await sequelize.query(
-    `SELECT fingerprint, state, response_json
+    `SELECT fingerprint, state, response_json, created_at
      FROM ai_integration_outbound_replay_guard
      WHERE company_id = :companyId AND idempotency_key = :idempotencyKey
      LIMIT 1`,
@@ -157,6 +159,7 @@ const getOutboundReplayGuardPersistent = async (companyId: number, idempotencyKe
   return {
     fingerprint: String(row.fingerprint || ""),
     state: String(row.state || "inflight") === "done" ? "done" : "inflight",
+    createdAtMs: row.created_at ? Date.parse(String(row.created_at)) || 0 : 0,
     response
   };
 };
@@ -545,14 +548,26 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
           });
         }
 
-        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
-        pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
-        return res.status(202).json({
-          ok: true,
-          processing: true,
-          duplicate: true,
-          idempotencyKeyUsed: true
-        });
+        const persistentInflightAgeMs = persistentExisting.createdAtMs > 0
+          ? Math.max(0, Date.now() - persistentExisting.createdAtMs)
+          : 0;
+        const persistentInflightStale = persistentInflightAgeMs >= OUTBOUND_REPLAY_GUARD_INFLIGHT_STALE_MS;
+
+        if (!persistentInflightStale) {
+          bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+          pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
+          return res.status(202).json({
+            ok: true,
+            processing: true,
+            duplicate: true,
+            idempotencyKeyUsed: true
+          });
+        }
+
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
+        pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_stale_recovered", 2);
+        await clearOutboundReplayGuardPersistent(companyId, effectiveIdempotencyKey);
+        outboundReplayGuard.delete(replayGuardKey);
       }
 
       await upsertOutboundReplayGuardPersistentInflight(companyId, effectiveIdempotencyKey, replayFingerprint);
@@ -586,14 +601,23 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         });
       }
 
-      bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
-      pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
-      return res.status(202).json({
-        ok: true,
-        processing: true,
-        duplicate: true,
-        idempotencyKeyUsed: true
-      });
+      const memoryInflightAgeMs = Math.max(0, Date.now() - existing.createdAt);
+      const memoryInflightStale = memoryInflightAgeMs >= OUTBOUND_REPLAY_GUARD_INFLIGHT_STALE_MS;
+
+      if (!memoryInflightStale) {
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+        pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
+        return res.status(202).json({
+          ok: true,
+          processing: true,
+          duplicate: true,
+          idempotencyKeyUsed: true
+        });
+      }
+
+      bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
+      pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_stale_recovered", 2);
+      outboundReplayGuard.delete(replayGuardKey);
     }
 
     outboundReplayGuard.set(replayGuardKey, {
