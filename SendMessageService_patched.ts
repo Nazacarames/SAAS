@@ -20,7 +20,15 @@ const resolveOutboundDedupeTtlSeconds = () => {
   return Math.max(30, Math.min(900, Math.round(n)));
 };
 
-const resolveOutboundDedupeFailClosed = () => Boolean((getRuntimeSettings() as any).waOutboundDedupeFailClosed);
+const resolveOutboundDedupeFailClosed = (): boolean => {
+  const raw = (getRuntimeSettings() as any).waOutboundDedupeFailClosed;
+  if (typeof raw === "boolean") return raw;
+  const normalized = String(raw ?? "").trim().toLowerCase();
+  if (!normalized) return true; // secure default
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return true;
+};
 
 const resolveOutboundDedupeMemoryMaxEntries = (): number => {
   const n = Number((getRuntimeSettings() as any).waOutboundDedupeMemoryMaxEntries || 5000);
