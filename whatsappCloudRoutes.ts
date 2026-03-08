@@ -563,6 +563,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.inbound.signatureInvalidRateLimited > 0) {
     recommendations.push("Se activó rate-limit por firmas inválidas: bloquear IPs ofensivas en edge (WAF/proxy) y revisar intentos de spoofing.");
   }
+  if (summary.inbound.signatureInvalidBlocked >= 5 && (summary.inbound.payloadReplayBlocked + summary.inbound.replayMessageBlocked) >= 3) {
+    recommendations.push("Correlación alta entre firmas inválidas y replay inbound: tratar como presión de spoofing/replay, endurecer allowlist IP en edge y verificar drift/reintentos del proveedor para separar ataque de degradación operativa.");
+  }
   if (summary.inbound.invalidEnvelopeBlocked > 0) {
     recommendations.push("Verificar productores del webhook: se detectaron envelopes inválidos bloqueados por hardening.");
   }
@@ -655,6 +658,34 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const inboundSignatureInvalidBlocked = readCounter(inboundCounters, "inbound.signature_invalid_blocked");
+  if (inboundSignatureInvalidBlocked >= 5) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_signature_invalid_spike",
+      threshold: 5,
+      inWindow: inboundSignatureInvalidBlocked,
+      remaining: 0,
+      severity: inboundSignatureInvalidBlocked >= 20 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const spoofingPressureObserved = inboundSignatureInvalidBlocked + replayBlocked;
+  if (inboundSignatureInvalidBlocked >= 5 && replayBlocked >= 3 && spoofingPressureObserved >= 10) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_signature_replay_correlation_pressure_high",
+      threshold: 10,
+      inWindow: spoofingPressureObserved,
+      remaining: 0,
+      severity: spoofingPressureObserved >= 25 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        signatureInvalidBlocked: inboundSignatureInvalidBlocked,
+        replayBlocked
+      }
+    });
+  }
+
   const inboundSignatureMissingBlocked = readCounter(inboundCounters, "inbound.signature_missing_blocked");
   if (inboundSignatureMissingBlocked >= 2) {
     runtimeInboundAlerts.push({
@@ -675,18 +706,6 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: inboundSignatureMalformedBlocked,
       remaining: 0,
       severity: inboundSignatureMalformedBlocked >= 6 ? "critical" : "warn",
-      source: "derived_metrics"
-    });
-  }
-
-  const inboundSignatureInvalidBlocked = readCounter(inboundCounters, "inbound.signature_invalid_blocked");
-  if (inboundSignatureInvalidBlocked >= 5) {
-    runtimeInboundAlerts.push({
-      signal: "inbound_signature_invalid_spike",
-      threshold: 5,
-      inWindow: inboundSignatureInvalidBlocked,
-      remaining: 0,
-      severity: inboundSignatureInvalidBlocked >= 20 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
