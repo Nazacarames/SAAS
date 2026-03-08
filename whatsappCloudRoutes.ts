@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardMemoryFallbackUsed, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -232,6 +232,10 @@ const reserveWebhookPayloadReplay = async (req: any): Promise<boolean> => {
     }
 
     console.error("[wa-hardening] payload replay persistent guard unavailable; using memory fallback", {
+      error: errorMessage
+    });
+    recordInboundPayloadReplayGuardMemoryFallbackUsed({
+      failClosed: false,
       error: errorMessage
     });
 
@@ -476,6 +480,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
       payloadReplayBlocked: readCounter(inboundCounters, "inbound.payload_replay_blocked"),
       payloadReplayGuardInfraErrors: readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error"),
+      payloadReplayGuardMemoryFallbackUsed: readCounter(inboundCounters, "inbound.payload_replay_guard_memory_fallback_used"),
       payloadReplayGuardFailClosedBlocked: readCounter(inboundCounters, "inbound.payload_replay_guard_fail_closed_blocked"),
       payloadSizeBlocked: readCounter(inboundCounters, "inbound.payload_size_blocked"),
       payloadVolumeBlocked: readCounter(inboundCounters, "inbound.payload_volume_blocked"),
@@ -569,6 +574,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.inbound.payloadReplayGuardInfraErrors > 0) {
     recommendations.push("Se activó fallback en memoria del guard de replay de payload: revisar disponibilidad DB/migraciones para recuperar persistencia.");
+  }
+  if (summary.inbound.payloadReplayGuardMemoryFallbackUsed > 0) {
+    recommendations.push("El guard de replay inbound está operando en fallback de memoria: restaurar persistencia (DB) para evitar huecos de replay entre reinicios/réplicas.");
   }
   if (summary.inbound.payloadReplayGuardFailClosedBlocked > 0) {
     recommendations.push("Hubo webhooks bloqueados por fail-closed del guard de replay: restaurar conectividad/health de DB para evitar pérdida de eventos inbound legítimos.");
@@ -727,6 +735,18 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: inboundReplayGuardInfraErrors,
       remaining: 0,
       severity: inboundReplayGuardInfraErrors >= 3 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundReplayGuardMemoryFallbackUsed = readCounter(inboundCounters, "inbound.payload_replay_guard_memory_fallback_used");
+  if (inboundReplayGuardMemoryFallbackUsed >= 1) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_payload_replay_guard_memory_fallback_used",
+      threshold: 1,
+      inWindow: inboundReplayGuardMemoryFallbackUsed,
+      remaining: 0,
+      severity: inboundReplayGuardMemoryFallbackUsed >= 3 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
