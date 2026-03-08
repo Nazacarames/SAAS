@@ -548,6 +548,13 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
   const retryRequiresIdempotency = resolveManagedReplyRetryRequireIdempotencyKey();
   const allowRetry = !retryRequiresIdempotency;
   const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+  if (maxAttempts > 1 && !allowRetry) {
+    bumpHardeningMetric("outbound.cloud_retry_blocked_without_idempotency_policy");
+    pushHardeningSignal("outbound_cloud_retry_blocked_without_idempotency_policy", 3, {
+      maxAttempts,
+      retryRequiresIdempotency
+    });
+  }
   let lastError: any = null;
 
   for (let attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
