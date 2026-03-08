@@ -14,10 +14,23 @@ let outboundDedupeLastPruneAt = 0;
 const OUTBOUND_DEDUPE_TTL_SECONDS = 120;
 const OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS = 60 * 1000;
 const emergencyOutboundDedupe = new Map<string, number>();
+const resolveOutboundRetryWindowFloorSeconds = (): number => {
+  const settings = getRuntimeSettings() as any;
+  const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  const timeoutMs = Math.max(1000, Math.min(45000, Math.round(Number(settings.waOutboundRequestTimeoutMs || 12000))));
+  const maxDelayMs = Math.max(500, Math.min(60000, Math.round(Number(settings.waOutboundRetryMaxDelayMs || 15000))));
+
+  // keep dedupe reservation alive across full retry window (+ small post-send race buffer)
+  const floorMs = (maxAttempts * (timeoutMs + maxDelayMs)) + 30_000;
+  return Math.max(60, Math.ceil(floorMs / 1000));
+};
+
 const resolveOutboundDedupeTtlSeconds = () => {
-  const n = Number(getRuntimeSettings().waOutboundDedupeTtlSeconds || OUTBOUND_DEDUPE_TTL_SECONDS);
-  if (!Number.isFinite(n)) return OUTBOUND_DEDUPE_TTL_SECONDS;
-  return Math.max(30, Math.min(900, Math.round(n)));
+  const configured = Number((getRuntimeSettings() as any).waOutboundDedupeTtlSeconds || OUTBOUND_DEDUPE_TTL_SECONDS);
+  const configuredSafe = Number.isFinite(configured) ? Math.round(configured) : OUTBOUND_DEDUPE_TTL_SECONDS;
+  const retryWindowFloor = resolveOutboundRetryWindowFloorSeconds();
+  const effective = Math.max(configuredSafe, retryWindowFloor);
+  return Math.max(30, Math.min(900, effective));
 };
 
 const resolveOutboundDedupeFailClosed = (): boolean => {
@@ -144,7 +157,11 @@ const normalizeTemplateLocaleForDedupe = (rawLocale: string): string => {
 };
 
 const normalizeTemplateVariableForDedupe = (rawValue: unknown): string => {
-  return String(rawValue ?? "")
+  const canonical = typeof rawValue === "string"
+    ? rawValue
+    : stableStringify(rawValue);
+
+  return String(canonical ?? "")
     .normalize("NFKC")
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .replace(/\s+/g, " ")
