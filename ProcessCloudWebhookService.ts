@@ -53,10 +53,23 @@ const resolveInboundReplayMaxBlocksPerPayload = () => {
   return Math.max(5, Math.min(500, Math.round(n)));
 };
 
+const resolveOutboundRetryWindowFloorSeconds = (): number => {
+  const settings = getRuntimeSettings() as any;
+  const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
+  const timeoutMs = Math.max(1000, Math.min(45000, Math.round(Number(settings.waOutboundRequestTimeoutMs || 12000))));
+  const maxDelayMs = Math.max(500, Math.min(60000, Math.round(Number(settings.waOutboundRetryMaxDelayMs || 15000))));
+
+  // keep managed-reply dedupe reservation alive for whole retry window (+ post-send race buffer)
+  const floorMs = (maxAttempts * (timeoutMs + maxDelayMs)) + 30_000;
+  return Math.max(60, Math.ceil(floorMs / 1000));
+};
+
 const resolveOutboundDedupeTtlSeconds = () => {
   const n = Number(getRuntimeSettings().waOutboundDedupeTtlSeconds || 120);
-  if (!Number.isFinite(n)) return 120;
-  return Math.max(30, Math.min(900, Math.round(n)));
+  const configured = Number.isFinite(n) ? Math.round(n) : 120;
+  const retryWindowFloor = resolveOutboundRetryWindowFloorSeconds();
+  const effective = Math.max(configured, retryWindowFloor);
+  return Math.max(30, Math.min(900, effective));
 };
 
 const resolveOutboundDedupeMemoryMaxEntries = () => {
