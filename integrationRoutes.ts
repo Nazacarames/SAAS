@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
@@ -37,6 +38,7 @@ const integrationHardeningSignalThresholds = new Map<string, number>();
 
 const INTEGRATION_HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const OUTBOUND_REPLAY_GUARD_TTL_MS = 2 * 60 * 60 * 1000;
+const OUTBOUND_REPLAY_GUARD_MEMORY_MAX_ENTRIES_DEFAULT = 50000;
 
 type OutboundReplayGuardEntry = {
   createdAt: number;
@@ -101,32 +103,55 @@ const pruneOutboundReplayGuard = (now = Date.now()): void => {
   }
 };
 
-const buildOutboundReplayFingerprint = (payload: any): string => {
-  const whatsappId = String(payload?.whatsappId || "").trim().toLowerCase();
-  const to = String(payload?.to || "").trim();
-  const text = String(payload?.text || "").trim();
-  const contactName = String(payload?.contactName || "").trim().toLowerCase();
-  return `${whatsappId}|${to}|${text}|${contactName}`;
+const resolveOutboundReplayGuardMemoryMaxEntries = (): number => {
+  const raw = Number((getRuntimeSettings() as any)?.waOutboundReplayGuardMemoryMaxEntries);
+  if (!Number.isFinite(raw)) return OUTBOUND_REPLAY_GUARD_MEMORY_MAX_ENTRIES_DEFAULT;
+  return Math.max(500, Math.min(500000, Math.round(raw)));
 };
 
-const upsertOutboundReplayGuardPersistentInflight = async (companyId: number, idempotencyKey: string, fingerprint: string): Promise<void> => {
+const normalizeOutboundReplayText = (raw: unknown): string => String(raw || "")
+  .replace(/[\u200B-\u200D\uFEFF]/g, "")
+  .replace(/\s+/g, " ")
+  .trim();
+
+const normalizeOutboundReplayPhone = (raw: unknown): string => String(raw || "")
+  .replace(/[^\d+]/g, "")
+  .trim();
+
+const buildOutboundReplayFingerprint = (payload: any): string => {
+  const whatsappId = String(payload?.whatsappId || "").trim().toLowerCase();
+  const to = normalizeOutboundReplayPhone(payload?.to);
+  const text = normalizeOutboundReplayText(payload?.text)
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .toLowerCase();
+  const contactName = normalizeOutboundReplayText(payload?.contactName)
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .toLowerCase();
+
+  // keep replay fingerprint stable and bounded for persistent guard storage (VARCHAR(400))
+  // while preserving low collision risk across long outbound texts.
+  const canonical = JSON.stringify({ whatsappId, to, text, contactName });
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+};
+
+const tryReserveOutboundReplayGuardPersistentInflight = async (companyId: number, idempotencyKey: string, fingerprint: string): Promise<boolean> => {
   await ensureOutboundReplayGuardTable();
   await pruneOutboundReplayGuardPersistentIfDue();
 
-  await sequelize.query(
+  const rows: any[] = await sequelize.query(
     `INSERT INTO ai_integration_outbound_replay_guard (company_id, idempotency_key, fingerprint, state, response_json, created_at, updated_at)
      VALUES (:companyId, :idempotencyKey, :fingerprint, 'inflight', NULL, NOW(), NOW())
-     ON CONFLICT (company_id, idempotency_key)
-     DO UPDATE SET
-       fingerprint = EXCLUDED.fingerprint,
-       state = 'inflight',
-       response_json = NULL,
-       updated_at = NOW()`,
+     ON CONFLICT (company_id, idempotency_key) DO NOTHING
+     RETURNING id`,
     {
       replacements: { companyId, idempotencyKey, fingerprint },
-      type: QueryTypes.INSERT
+      type: QueryTypes.SELECT
     }
   );
+
+  return Boolean(rows[0]?.id);
 };
 
 const getOutboundReplayGuardPersistent = async (companyId: number, idempotencyKey: string): Promise<{ fingerprint: string; state: "inflight" | "done"; createdAtMs: number; response?: any } | null> => {
@@ -216,6 +241,26 @@ const pushIntegrationHardeningSignal = (signal: string, threshold: number): void
   integrationHardeningSignalBuckets.set(signal, next);
 };
 
+const enforceOutboundReplayGuardMemoryCapacity = (): void => {
+  const maxEntries = resolveOutboundReplayGuardMemoryMaxEntries();
+  if (outboundReplayGuard.size <= maxEntries) return;
+
+  const overflow = outboundReplayGuard.size - maxEntries;
+  const keysByOldest = Array.from(outboundReplayGuard.entries())
+    .sort((a, b) => a[1].createdAt - b[1].createdAt)
+    .slice(0, overflow)
+    .map(([key]) => key);
+
+  for (const key of keysByOldest) {
+    outboundReplayGuard.delete(key);
+  }
+
+  if (keysByOldest.length > 0) {
+    bumpIntegrationHardeningMetric("outbound.replay_guard_memory_evicted", keysByOldest.length);
+    pushIntegrationHardeningSignal("outbound_integration_replay_guard_memory_evicted", 1);
+  }
+};
+
 export const getIntegrationHardeningMetrics = () => ({
   counters: Object.fromEntries(Array.from(integrationHardeningCounters.entries()).sort((a, b) => a[0].localeCompare(b[0]))),
   lastSeenAt: Object.fromEntries(Array.from(integrationHardeningLastAt.entries()).sort((a, b) => a[0].localeCompare(b[0])))
@@ -289,7 +334,8 @@ export const getIntegrationHardeningAlertSnapshot = () => {
   const weakSignals = [
     "outbound_integration_idempotency_key_too_short_blocked",
     "outbound_integration_idempotency_key_too_weak_blocked",
-    "outbound_integration_idempotency_key_timestamp_only_blocked"
+    "outbound_integration_idempotency_key_timestamp_only_blocked",
+    "outbound_integration_idempotency_key_placeholder_blocked"
   ];
   const weakInWindow = weakSignals.reduce((acc, signal) => {
     const hits = integrationHardeningSignalBuckets.get(signal) || [];
@@ -336,6 +382,11 @@ export const getIntegrationHardeningAlertSnapshot = () => {
   const duplicateInflightPressureRate = duplicateInflightPressureObserved > 0
     ? duplicateInflightBlocked / duplicateInflightPressureObserved
     : 0;
+  const duplicateInflightStaleRecovered = Number(integrationHardeningCounters.get("outbound.duplicate_inflight_stale_recovered") || 0);
+  const duplicateInflightStaleObserved = duplicateInflightStaleRecovered + duplicateInflightBlocked;
+  const duplicateInflightStaleRecoveryRate = duplicateInflightStaleObserved > 0
+    ? duplicateInflightStaleRecovered / duplicateInflightStaleObserved
+    : 0;
 
   if (duplicateInflightPressureObserved >= 20 && duplicateInflightPressureRate >= 0.3) {
     pendingAlerts.push({
@@ -349,6 +400,44 @@ export const getIntegrationHardeningAlertSnapshot = () => {
       breakdown: {
         duplicateInflightBlocked,
         sendAttemptAccepted
+      }
+    } as any);
+  }
+
+  const replayGuardReservationConflict = Number(integrationHardeningCounters.get("outbound.replay_guard_reservation_conflict") || 0);
+  const replayGuardReservationObserved = replayGuardReservationConflict + sendAttemptAccepted;
+  const replayGuardReservationConflictRate = replayGuardReservationObserved > 0
+    ? replayGuardReservationConflict / replayGuardReservationObserved
+    : 0;
+
+  if (replayGuardReservationObserved >= 20 && replayGuardReservationConflictRate >= 0.15) {
+    pendingAlerts.push({
+      signal: "outbound_integration_replay_guard_reservation_conflict_rate_high",
+      threshold: 0.15,
+      inWindow: Number(replayGuardReservationConflictRate.toFixed(4)),
+      remaining: 0,
+      severity: replayGuardReservationConflictRate >= 0.3 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      sampleSize: replayGuardReservationObserved,
+      breakdown: {
+        replayGuardReservationConflict,
+        sendAttemptAccepted
+      }
+    } as any);
+  }
+
+  if (duplicateInflightStaleObserved >= 10 && duplicateInflightStaleRecoveryRate >= 0.15) {
+    pendingAlerts.push({
+      signal: "outbound_integration_duplicate_inflight_stale_recovery_rate_high",
+      threshold: 0.15,
+      inWindow: Number(duplicateInflightStaleRecoveryRate.toFixed(4)),
+      remaining: 0,
+      severity: duplicateInflightStaleRecoveryRate >= 0.3 ? "critical" : "warn",
+      source: "runtime_metrics_derived",
+      sampleSize: duplicateInflightStaleObserved,
+      breakdown: {
+        duplicateInflightStaleRecovered,
+        duplicateInflightBlocked
       }
     } as any);
   }
@@ -417,6 +506,16 @@ const isTimestampOnlyIdempotencyKey = (key: string): boolean => {
   return /^\d{10,17}$/.test(compact);
 };
 
+const isRepeatedPattern = (value: string): boolean => {
+  if (value.length < 8) return false;
+  for (let size = 1; size <= Math.min(6, Math.floor(value.length / 2)); size++) {
+    if (value.length % size !== 0) continue;
+    const chunk = value.slice(0, size);
+    if (chunk.repeat(value.length / size) === value) return true;
+  }
+  return false;
+};
+
 const isWeakIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeIdempotencyKey(key);
   if (!normalized) return false;
@@ -428,10 +527,65 @@ const isWeakIdempotencyKey = (key: string): boolean => {
   const compact = normalized.replace(/[:_\-.]/g, "");
   if (isMonotonicSequence(compact)) return true;
 
+  // repeated chunks like "abcabcabc" or "12121212" are low-entropy and collision-prone
+  if (isRepeatedPattern(compact)) return true;
+
   // raw unix timestamps are predictable and often reused in retries/concurrent workers
   if (/^\d{10,17}$/.test(compact)) return true;
 
   return false;
+};
+
+const isPlaceholderIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeIdempotencyKey(key);
+  if (!normalized) return false;
+
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  const placeholders = new Set([
+    "idempotency",
+    "idempotencykey",
+    "key",
+    "requestid",
+    "messageid",
+    "retry",
+    "test",
+    "demo",
+    "sample",
+    "default"
+  ]);
+
+  return placeholders.has(compact);
+};
+
+const parseRetryAttempt = (raw: unknown): number | null => {
+  if (raw === undefined || raw === null) return null;
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded < 1 || rounded > 1000) return null;
+  return rounded;
+};
+
+const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRaw: string | null } => {
+  const candidates = [
+    req.headers?.["x-retry-attempt"],
+    req.headers?.["retry-attempt"],
+    req.headers?.["x-attempt"],
+    req.body?.retryAttempt,
+    req.body?.attempt
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null) continue;
+    const candidateRaw = String(candidate).trim();
+    if (!candidateRaw) continue;
+
+    const parsed = parseRetryAttempt(candidateRaw);
+    if (parsed !== null) return { retryAttempt: parsed, invalidRaw: null };
+    return { retryAttempt: null, invalidRaw: candidateRaw.slice(0, 80) };
+  }
+
+  return { retryAttempt: null, invalidRaw: null };
 };
 
 integrationRoutes.use(integrationAuth);
@@ -548,6 +702,18 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
   const effectiveIdempotencyKey = idempotencyHeader || idempotencyBody;
   const replayFingerprint = buildOutboundReplayFingerprint({ whatsappId, to, text, contactName });
   const replayGuardKey = effectiveIdempotencyKey ? `${companyId}:${effectiveIdempotencyKey}` : "";
+  const retryAttemptResolution = resolveRetryAttempt(req);
+  const retryAttempt = retryAttemptResolution.retryAttempt;
+  const isExplicitRetry = retryAttempt !== null && retryAttempt > 1;
+
+  if (retryAttemptResolution.invalidRaw) {
+    bumpIntegrationHardeningMetric("outbound.retry_attempt_invalid_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_retry_attempt_invalid_blocked", 3);
+    return res.status(400).json({
+      error: "retryAttempt invalid (allowed integer range: 1..1000)",
+      retryAttempt: retryAttemptResolution.invalidRaw
+    });
+  }
 
   if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_required_blocked");
@@ -555,10 +721,10 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required by hardening" });
   }
 
-  if (resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
+  if (isExplicitRetry && resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     bumpIntegrationHardeningMetric("outbound.retry_idempotency_key_required_blocked");
     pushIntegrationHardeningSignal("outbound_integration_retry_idempotency_key_required_blocked", 1);
-    return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries" });
+    return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries (retryAttempt > 1)" });
   }
 
   if (effectiveIdempotencyKey && effectiveIdempotencyKey.length < resolveOutboundIdempotencyKeyMinLength()) {
@@ -587,6 +753,14 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     });
   }
 
+  if (effectiveIdempotencyKey && isPlaceholderIdempotencyKey(effectiveIdempotencyKey)) {
+    bumpIntegrationHardeningMetric("outbound.idempotency_key_placeholder_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_idempotency_key_placeholder_blocked", 3);
+    return res.status(400).json({
+      error: "x-idempotency-key generic placeholder not allowed (use unique UUID/ULID per logical send)"
+    });
+  }
+
   if (replayGuardKey) {
     let replayGuardInfraFailed = false;
 
@@ -605,6 +779,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
         if (persistentExisting.state === "done" && persistentExisting.response) {
           bumpIntegrationHardeningMetric("outbound.duplicate_replayed");
+          bumpIntegrationHardeningMetric("outbound.duplicate_replayed_source.persistent");
           pushIntegrationHardeningSignal("outbound_integration_duplicate_replayed", 25);
           return res.status(200).json({
             ...persistentExisting.response,
@@ -621,6 +796,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
         if (!persistentInflightStale) {
           bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+          bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.persistent");
           pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
           return res.status(202).json({
             ok: true,
@@ -631,12 +807,53 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         }
 
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered_source.persistent");
         pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_stale_recovered", 2);
         await clearOutboundReplayGuardPersistent(companyId, effectiveIdempotencyKey);
         outboundReplayGuard.delete(replayGuardKey);
       }
 
-      await upsertOutboundReplayGuardPersistentInflight(companyId, effectiveIdempotencyKey, replayFingerprint);
+      const persistentReserved = await tryReserveOutboundReplayGuardPersistentInflight(companyId, effectiveIdempotencyKey, replayFingerprint);
+      if (!persistentReserved) {
+        bumpIntegrationHardeningMetric("outbound.replay_guard_reservation_conflict");
+        pushIntegrationHardeningSignal("outbound_integration_replay_guard_reservation_conflict", 1);
+
+        const racedExisting = await getOutboundReplayGuardPersistent(companyId, effectiveIdempotencyKey);
+        if (racedExisting) {
+          if (racedExisting.fingerprint !== replayFingerprint) {
+            bumpIntegrationHardeningMetric("outbound.idempotency_key_payload_conflict_blocked");
+            pushIntegrationHardeningSignal("outbound_integration_idempotency_key_payload_conflict_blocked", 2);
+            return res.status(409).json({
+              error: "idempotency key reuse with different payload is not allowed",
+              idempotencyKey: effectiveIdempotencyKey
+            });
+          }
+
+          if (racedExisting.state === "done" && racedExisting.response) {
+            bumpIntegrationHardeningMetric("outbound.replay_guard_reservation_conflict_outcome.replayed");
+            bumpIntegrationHardeningMetric("outbound.duplicate_replayed");
+            bumpIntegrationHardeningMetric("outbound.duplicate_replayed_source.persistent");
+            pushIntegrationHardeningSignal("outbound_integration_duplicate_replayed", 25);
+            return res.status(200).json({
+              ...racedExisting.response,
+              duplicate: true,
+              replayed: true,
+              idempotencyKeyUsed: true
+            });
+          }
+        }
+
+        bumpIntegrationHardeningMetric("outbound.replay_guard_reservation_conflict_outcome.processing");
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.persistent");
+        pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
+        return res.status(202).json({
+          ok: true,
+          processing: true,
+          duplicate: true,
+          idempotencyKeyUsed: true
+        });
+      }
     } catch {
       replayGuardInfraFailed = true;
       bumpIntegrationHardeningMetric("outbound.replay_guard_infra_error");
@@ -658,6 +875,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
       if (existing.state === "done" && existing.response) {
         bumpIntegrationHardeningMetric("outbound.duplicate_replayed");
+        bumpIntegrationHardeningMetric("outbound.duplicate_replayed_source.memory");
         pushIntegrationHardeningSignal("outbound_integration_duplicate_replayed", 25);
         return res.status(200).json({
           ...existing.response,
@@ -672,6 +890,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
 
       if (!memoryInflightStale) {
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
+        bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.memory");
         pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
         return res.status(202).json({
           ok: true,
@@ -682,6 +901,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
       }
 
       bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
+      bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered_source.memory");
       pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_stale_recovered", 2);
       outboundReplayGuard.delete(replayGuardKey);
     }
@@ -691,6 +911,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
       fingerprint: replayFingerprint,
       state: "inflight"
     });
+    enforceOutboundReplayGuardMemoryCapacity();
 
     if (replayGuardInfraFailed) {
       bumpIntegrationHardeningMetric("outbound.replay_guard_memory_fallback_used");
@@ -720,6 +941,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         state: "done",
         response: responsePayload
       });
+      enforceOutboundReplayGuardMemoryCapacity();
 
       try {
         await markOutboundReplayGuardPersistentDone(companyId, effectiveIdempotencyKey, replayFingerprint, responsePayload);
@@ -773,6 +995,22 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
     recommendations.push("High inflight duplicate pressure: add jittered exponential backoff and cap concurrent retries per idempotency key to reduce duplicate collisions while previous sends are still processing.");
   }
 
+  const replayGuardReservationConflictRateAlert = Array.isArray((alerts as any)?.pendingAlerts)
+    ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_replay_guard_reservation_conflict_rate_high")
+    : null;
+
+  if (replayGuardReservationConflictRateAlert) {
+    recommendations.push("High replay-guard reservation conflict rate: reduce parallel retries per logical send (single-flight per idempotency key) and add small random retry jitter to prevent same-key worker stampedes.");
+  }
+
+  const duplicateInflightStaleRecoveryRateAlert = Array.isArray((alerts as any)?.pendingAlerts)
+    ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_duplicate_inflight_stale_recovery_rate_high")
+    : null;
+
+  if (duplicateInflightStaleRecoveryRateAlert) {
+    recommendations.push("High stale inflight recovery rate: increase provider timeout budget and tune worker retry backoff/concurrency so inflight sends can settle before retries re-enter.");
+  }
+
   const retryWithoutKeyRateAlert = Array.isArray((alerts as any)?.pendingAlerts)
     ? (alerts as any).pendingAlerts.find((a: any) => a?.signal === "outbound_integration_retry_without_idempotency_key_rate_high")
     : null;
@@ -785,8 +1023,16 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
     recommendations.push("Some retry attempts were blocked due to missing idempotency key: set x-idempotency-key on initial request and persist it across retries.");
   }
 
+  if (Number(counters["outbound.retry_attempt_invalid_blocked"] || 0) > 0) {
+    recommendations.push("Invalid retryAttempt values were blocked: send a strict integer between 1 and 1000 in retry headers/body to avoid bypassing retry hardening rules.");
+  }
+
   if (Number(counters["outbound.idempotency_key_payload_conflict_blocked"] || 0) > 0) {
     recommendations.push("Idempotency key payload conflicts detected: never reuse the same key for different (to/text/contactName/whatsappId) payloads.");
+  }
+
+  if (Number(counters["outbound.idempotency_key_placeholder_blocked"] || 0) > 0) {
+    recommendations.push("Generic placeholder idempotency keys were blocked: generate a unique UUID/ULID per logical outbound send and persist it across retries only for that same payload.");
   }
 
   if (Number(counters["outbound.replay_guard_infra_error"] || 0) > 0) {
@@ -795,6 +1041,10 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
 
   if (Number(counters["outbound.replay_guard_memory_fallback_used"] || 0) > 0) {
     recommendations.push("Replay-guard fallback to in-memory mode was used: restore DB persistence for ai_integration_outbound_replay_guard to keep idempotency protection across restarts.");
+  }
+
+  if (Number(counters["outbound.replay_guard_memory_evicted"] || 0) > 0) {
+    recommendations.push("Replay-guard in-memory entries were evicted due to capacity: increase waOutboundReplayGuardMemoryMaxEntries or restore DB-backed replay guard to preserve dedupe coverage.");
   }
 
   if (Number(counters["outbound.replay_guard_mark_done_infra_error"] || 0) > 0) {
@@ -809,12 +1059,21 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
     recommendations.push("Stale inflight recoveries observed: review worker/provider latency if sends frequently exceed stale inflight threshold.");
   }
 
+  const replayGuardReservationConflict = Number(counters["outbound.replay_guard_reservation_conflict"] || 0);
+  const replayGuardReservationConflictOutcomeReplayed = Number(counters["outbound.replay_guard_reservation_conflict_outcome.replayed"] || 0);
+  const replayGuardReservationConflictOutcomeProcessing = Number(counters["outbound.replay_guard_reservation_conflict_outcome.processing"] || 0);
+
   return res.json({
     ok: true,
     companyId,
     hardening: {
       metrics,
       alerts,
+      summary: {
+        replayGuardReservationConflict,
+        replayGuardReservationConflictOutcomeReplayed,
+        replayGuardReservationConflictOutcomeProcessing
+      },
       recommendations
     }
   });

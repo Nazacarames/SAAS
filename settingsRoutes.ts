@@ -173,6 +173,11 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       || String(entry?.signal || "") === "inbound_replay_block_rate_high"
   );
 
+  const hasInboundTimestampSkewPressure = inboundPendingAlerts.some(
+    (entry: any) => String(entry?.signal || "") === "inbound_timestamp_outside_allowed_skew"
+      || String(entry?.signal || "") === "inbound_timestamp_outside_allowed_skew_spike"
+  );
+
   const hasInboundReplayGuardFailClosedPressure = inboundPendingAlerts.some(
     (entry: any) => String(entry?.signal || "") === "inbound_payload_replay_guard_fail_closed_blocked"
   );
@@ -199,6 +204,9 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
     ...(hasInboundPayloadReplayPressure
       ? ["Hay presión de replay inbound: revisar reintentos duplicados aguas arriba y validar que cada entrega conserve firma/cuerpo consistentes para dedupe estable."]
       : []),
+    ...(hasInboundTimestampSkewPressure
+      ? ["Hay bloqueos por timestamp fuera de ventana inbound: verificar NTP/clock skew en productores y latencia de colas/reintentos para evitar descartes legítimos por stale/future timestamps."]
+      : []),
     ...(hasInboundReplayGuardFailClosedPressure
       ? ["El replay guard inbound entró en fail-closed: priorizar salud DB/migraciones de ai_webhook_payload_replay_guard para no bloquear eventos legítimos."]
       : [])
@@ -219,9 +227,11 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
             ? "inbound_invalid_content_type_blocked_spike"
             : hasInboundPayloadReplayPressure
               ? "inbound_replay_spike"
-              : hasInboundReplayGuardFailClosedPressure
-                ? "inbound_payload_replay_guard_fail_closed_blocked"
-                : null;
+              : hasInboundTimestampSkewPressure
+                ? "inbound_timestamp_outside_allowed_skew"
+                : hasInboundReplayGuardFailClosedPressure
+                  ? "inbound_payload_replay_guard_fail_closed_blocked"
+                  : null;
 
   return res.json({
     effectiveConfig: {
@@ -231,6 +241,7 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       waOutboundRetryMaxDelayMs: Number((settings as any).waOutboundRetryMaxDelayMs || 15000),
       waOutboundRetryOnTimeout: boolWithDefault((settings as any).waOutboundRetryOnTimeout, false),
       waOutboundRetryRequireIdempotencyKey: boolWithDefault((settings as any).waOutboundRetryRequireIdempotencyKey, true),
+      waOutboundAllowRetryWithoutIdempotencyKey: boolWithDefault((settings as any).waOutboundAllowRetryWithoutIdempotencyKey, false),
       waManagedReplyRetryRequireIdempotencyKey: boolWithDefault((settings as any).waManagedReplyRetryRequireIdempotencyKey, true),
       waOutboundRequireIdempotencyKey: boolWithDefault((settings as any).waOutboundRequireIdempotencyKey, true),
       waOutboundIdempotencyKeyMinLength: Number((settings as any).waOutboundIdempotencyKeyMinLength || 8),
@@ -243,6 +254,7 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       waWebhookPayloadReplayFailClosed: boolWithDefault((settings as any).waWebhookPayloadReplayFailClosed, true),
       waWebhookAllowUnsigned: boolWithDefault((settings as any).waWebhookAllowUnsigned, false),
       waWebhookMaxBodyBytes: Number((settings as any).waWebhookMaxBodyBytes || 262144),
+      waWebhookSignatureHeaderMaxLength: Number((settings as any).waWebhookSignatureHeaderMaxLength || 200),
       waWebhookSignatureInvalidRateLimitWindowSeconds: Number((settings as any).waWebhookSignatureInvalidRateLimitWindowSeconds || 60),
       waWebhookSignatureInvalidRateLimitMaxHits: Number((settings as any).waWebhookSignatureInvalidRateLimitMaxHits || 8),
       waOutboundDedupeMemoryMaxEntries: Number((settings as any).waOutboundDedupeMemoryMaxEntries || 5000)
@@ -313,6 +325,7 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waOutboundRetryMaxDelayMs: Number(body.waOutboundRetryMaxDelayMs || 15000),
     waOutboundRetryOnTimeout: typeof body.waOutboundRetryOnTimeout === "boolean" ? body.waOutboundRetryOnTimeout : false,
     waOutboundRetryRequireIdempotencyKey: typeof body.waOutboundRetryRequireIdempotencyKey === "boolean" ? body.waOutboundRetryRequireIdempotencyKey : true,
+    waOutboundAllowRetryWithoutIdempotencyKey: typeof body.waOutboundAllowRetryWithoutIdempotencyKey === "boolean" ? body.waOutboundAllowRetryWithoutIdempotencyKey : false,
     waManagedReplyRetryRequireIdempotencyKey: typeof body.waManagedReplyRetryRequireIdempotencyKey === "boolean" ? body.waManagedReplyRetryRequireIdempotencyKey : true,
     waOutboundRequireIdempotencyKey: typeof body.waOutboundRequireIdempotencyKey === "boolean" ? body.waOutboundRequireIdempotencyKey : true,
     waOutboundIdempotencyKeyMinLength: Number(body.waOutboundIdempotencyKeyMinLength || 8),
@@ -325,6 +338,7 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waWebhookPayloadReplayFailClosed: typeof body.waWebhookPayloadReplayFailClosed === "boolean" ? body.waWebhookPayloadReplayFailClosed : true,
     waWebhookAllowUnsigned: typeof body.waWebhookAllowUnsigned === "boolean" ? body.waWebhookAllowUnsigned : false,
     waWebhookMaxBodyBytes: Number(body.waWebhookMaxBodyBytes || 262144),
+    waWebhookSignatureHeaderMaxLength: Number(body.waWebhookSignatureHeaderMaxLength || 200),
     waWebhookSignatureInvalidRateLimitWindowSeconds: Number(body.waWebhookSignatureInvalidRateLimitWindowSeconds || 60),
     waWebhookSignatureInvalidRateLimitMaxHits: Number(body.waWebhookSignatureInvalidRateLimitMaxHits || 8),
     waOutboundDedupeMemoryMaxEntries: Number(body.waOutboundDedupeMemoryMaxEntries || 5000)

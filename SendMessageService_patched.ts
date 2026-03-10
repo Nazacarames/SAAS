@@ -11,9 +11,13 @@ import { QueryTypes } from "sequelize";
 
 let outboundDedupeTableReady = false;
 let outboundDedupeLastPruneAt = 0;
+let outboundIdempotencyPayloadGuardTableReady = false;
+let outboundIdempotencyPayloadGuardLastPruneAt = 0;
 const OUTBOUND_DEDUPE_TTL_SECONDS = 120;
 const OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS = 60 * 1000;
+const OUTBOUND_IDEMPOTENCY_PAYLOAD_GUARD_PRUNE_INTERVAL_MS = 60 * 1000;
 const emergencyOutboundDedupe = new Map<string, number>();
+const outboundIdempotencyPayloadFingerprints = new Map<string, { fingerprint: string; expiresAt: number }>();
 const resolveOutboundRetryWindowFloorSeconds = (): number => {
   const settings = getRuntimeSettings() as any;
   const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
@@ -49,8 +53,15 @@ const resolveOutboundDedupeMemoryMaxEntries = (): number => {
   return Math.max(100, Math.min(50000, Math.round(n)));
 };
 
+const resolveOutboundIdempotencyPayloadMemoryMaxEntries = (): number => {
+  const n = Number((getRuntimeSettings() as any).waOutboundIdempotencyPayloadMemoryMaxEntries || 10000);
+  if (!Number.isFinite(n)) return 10000;
+  return Math.max(200, Math.min(100000, Math.round(n)));
+};
+
 const HARDENING_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const hardeningSignalBuckets = new Map<string, number[]>();
+const hardeningSignalThresholds = new Map<string, number>();
 const hardeningMetricCounters = new Map<string, number>();
 const hardeningMetricLastAt = new Map<string, string>();
 
@@ -71,21 +82,80 @@ export const getSendHardeningMetrics = () => ({
 
 export const getSendHardeningAlertSnapshot = () => {
   const now = Date.now();
-  const pendingAlerts = Array.from(hardeningSignalBuckets.entries())
-    .map(([signal, hits]) => ({
-      signal,
-      count: hits.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS).length
-    }))
-    .filter((item) => item.count > 0)
-    .sort((a, b) => b.count - a.count || a.signal.localeCompare(b.signal));
+  const pendingAlerts: Array<Record<string, unknown>> = Array.from(hardeningSignalBuckets.entries())
+    .map(([signal, hits]) => {
+      const threshold = hardeningSignalThresholds.get(signal) || 0;
+      const inWindow = hits.filter((ts) => now - ts < HARDENING_ALERT_WINDOW_MS).length;
+      return {
+        signal,
+        threshold,
+        inWindow,
+        remaining: Math.max(0, threshold - inWindow)
+      };
+    })
+    .filter((item) => Number(item.threshold) > 0 && Number(item.inWindow) > 0)
+    .sort((a, b) => Number(b.inWindow) - Number(a.inWindow) || String(a.signal).localeCompare(String(b.signal)));
+
+  const counters = getSendHardeningMetrics().counters as Record<string, number>;
+  const toNum = (key: string) => Number(counters[key] || 0);
+  const safeRate = (num: number, den: number) => (den > 0 ? Number((num / den).toFixed(4)) : 0);
+
+  const duplicateBlocked = toNum("outbound.duplicate_blocked");
+  const dedupeReserved = toNum("outbound.dedupe_reserved");
+  const providerFailed = toNum("outbound.provider_send_failed");
+  const cloudOk = toNum("outbound.cloud_send_ok");
+  const wbotOk = toNum("outbound.wbot_send_ok");
+  const idempotencyKeyUsed = toNum("outbound.idempotency_key_used");
+  const idempotencyPayloadConflictBlocked = toNum("outbound.idempotency_key_payload_conflict_blocked");
+
+  const duplicateObserved = duplicateBlocked + dedupeReserved;
+  const providerObserved = providerFailed + cloudOk + wbotOk;
+
+  const duplicateRate = safeRate(duplicateBlocked, duplicateObserved);
+  if (duplicateObserved >= 20 && duplicateRate >= 0.2) {
+    pendingAlerts.push({
+      signal: "outbound_duplicate_block_rate_high",
+      threshold: 0.2,
+      inWindow: duplicateRate,
+      remaining: 0,
+      sampleSize: duplicateObserved
+    });
+  }
+
+  const providerFailureRate = safeRate(providerFailed, providerObserved);
+  if (providerObserved >= 20 && providerFailureRate >= 0.1) {
+    pendingAlerts.push({
+      signal: "outbound_provider_failure_rate_high",
+      threshold: 0.1,
+      inWindow: providerFailureRate,
+      remaining: 0,
+      sampleSize: providerObserved
+    });
+  }
+
+  const idempotencyPayloadConflictRate = safeRate(idempotencyPayloadConflictBlocked, idempotencyKeyUsed);
+  if (idempotencyKeyUsed >= 10 && idempotencyPayloadConflictRate >= 0.05) {
+    pendingAlerts.push({
+      signal: "outbound_idempotency_key_payload_conflict_rate_high",
+      threshold: 0.05,
+      inWindow: idempotencyPayloadConflictRate,
+      remaining: 0,
+      sampleSize: idempotencyKeyUsed,
+      breakdown: {
+        idempotencyPayloadConflictBlocked,
+        idempotencyKeyUsed
+      }
+    });
+  }
 
   return {
     windowMs: HARDENING_ALERT_WINDOW_MS,
-    pendingAlerts
+    pendingAlerts: pendingAlerts.sort((a, b) => Number(b.count || b.inWindow || 0) - Number(a.count || a.inWindow || 0) || String(a.signal).localeCompare(String(b.signal)))
   };
 };
 
 const pushHardeningSignal = (signal: string, threshold: number, context?: Record<string, unknown>) => {
+  hardeningSignalThresholds.set(signal, Math.max(1, Number(threshold) || 1));
   bumpHardeningMetric(`signal.${signal}`);
   const now = Date.now();
   const prev = hardeningSignalBuckets.get(signal) || [];
@@ -222,6 +292,16 @@ const isTimestampOnlyIdempotencyKey = (key: string): boolean => {
   return /^\d{10,17}$/.test(compact);
 };
 
+const isRepeatedPattern = (value: string): boolean => {
+  if (value.length < 8) return false;
+  for (let size = 1; size <= Math.min(6, Math.floor(value.length / 2)); size++) {
+    if (value.length % size !== 0) continue;
+    const chunk = value.slice(0, size);
+    if (chunk.repeat(value.length / size) === value) return true;
+  }
+  return false;
+};
+
 const isWeakClientIdempotencyKey = (key: string): boolean => {
   const normalized = normalizeClientIdempotencyKey(key);
   if (!normalized) return false;
@@ -233,10 +313,34 @@ const isWeakClientIdempotencyKey = (key: string): boolean => {
   const compact = normalized.replace(/[:_\-.]/g, "");
   if (isMonotonicSequence(compact)) return true;
 
+  // repeated chunks like "abcabcabc" or "12121212" are low-entropy and collision-prone
+  if (isRepeatedPattern(compact)) return true;
+
   // raw unix timestamps are predictable and often reused in retries/concurrent workers
   if (/^\d{10,17}$/.test(compact)) return true;
 
   return false;
+};
+
+const isPlaceholderClientIdempotencyKey = (key: string): boolean => {
+  const normalized = normalizeClientIdempotencyKey(key);
+  if (!normalized) return false;
+
+  const compact = normalized.replace(/[:_\-.]/g, "");
+  const placeholders = new Set([
+    "idempotency",
+    "idempotencykey",
+    "key",
+    "requestid",
+    "messageid",
+    "retry",
+    "test",
+    "demo",
+    "sample",
+    "default"
+  ]);
+
+  return placeholders.has(compact);
 };
 
 const stableStringify = (value: any): string => {
@@ -249,8 +353,87 @@ const stableStringify = (value: any): string => {
   return JSON.stringify(value);
 };
 
+const buildOutboundPayloadFingerprint = (payload: OutboundPayload): string => {
+  const normalized = payload.mode === "text"
+    ? { mode: "text", text: normalizeForDedupe(String(payload.text || "")) }
+    : payload.mode === "template"
+      ? {
+          mode: "template",
+          templateName: String(payload.templateName || "").trim().toLowerCase(),
+          languageCode: normalizeTemplateLocaleForDedupe(String(payload.languageCode || "es_AR")),
+          templateVariables: Array.isArray(payload.templateVariables)
+            ? payload.templateVariables.map((x) => normalizeTemplateVariableForDedupe(x)).filter(Boolean)
+            : []
+        }
+      : {
+          mode: "media",
+          mediaType: String(payload.mediaType || "image").toLowerCase(),
+          mediaUrl: normalizeMediaUrlForDedupe(String(payload.mediaUrl || "")),
+          caption: normalizeForDedupe(String(payload.caption || ""))
+        };
+
+  return crypto.createHash("sha1").update(stableStringify(normalized)).digest("hex");
+};
+
+const trimOutboundIdempotencyPayloadFingerprints = (maxEntries: number) => {
+  if (outboundIdempotencyPayloadFingerprints.size <= maxEntries) return;
+  const overflow = outboundIdempotencyPayloadFingerprints.size - maxEntries;
+  let trimmed = 0;
+  for (const key of outboundIdempotencyPayloadFingerprints.keys()) {
+    outboundIdempotencyPayloadFingerprints.delete(key);
+    trimmed += 1;
+    if (trimmed >= overflow) break;
+  }
+
+  if (trimmed > 0) {
+    bumpHardeningMetric("outbound.idempotency_payload_memory_evicted", trimmed);
+    pushHardeningSignal("outbound_idempotency_payload_memory_evicted", 5, {
+      trimmed,
+      maxEntries
+    });
+  }
+};
+
+const assertIdempotencyPayloadConsistency = (
+  scopeKey: string,
+  payloadFingerprint: string,
+  ttlSeconds: number
+): { ok: boolean; previousFingerprint?: string } => {
+  const now = Date.now();
+  let expiredCleaned = 0;
+  for (const [key, value] of outboundIdempotencyPayloadFingerprints.entries()) {
+    if (value.expiresAt <= now) {
+      outboundIdempotencyPayloadFingerprints.delete(key);
+      expiredCleaned += 1;
+    }
+  }
+  if (expiredCleaned > 0) {
+    bumpHardeningMetric("outbound.idempotency_payload_expired_cleaned", expiredCleaned);
+  }
+
+  const existing = outboundIdempotencyPayloadFingerprints.get(scopeKey);
+  if (!existing) {
+    outboundIdempotencyPayloadFingerprints.set(scopeKey, {
+      fingerprint: payloadFingerprint,
+      expiresAt: now + (Math.max(30, ttlSeconds) * 1000)
+    });
+    trimOutboundIdempotencyPayloadFingerprints(resolveOutboundIdempotencyPayloadMemoryMaxEntries());
+    return { ok: true };
+  }
+
+  if (existing.fingerprint !== payloadFingerprint) {
+    return { ok: false, previousFingerprint: existing.fingerprint };
+  }
+
+  outboundIdempotencyPayloadFingerprints.set(scopeKey, {
+    fingerprint: payloadFingerprint,
+    expiresAt: now + (Math.max(30, ttlSeconds) * 1000)
+  });
+  trimOutboundIdempotencyPayloadFingerprints(resolveOutboundIdempotencyPayloadMemoryMaxEntries());
+  return { ok: true };
+};
+
 const buildOutboundDedupeKey = (
-  ticketId: number,
   toRaw: string,
   payload: OutboundPayload,
   clientIdempotencyKey?: string,
@@ -298,6 +481,14 @@ const ensureOutboundDedupeTable = async () => {
   outboundDedupeTableReady = true;
 };
 
+const ensureOutboundIdempotencyPayloadGuardTable = async () => {
+  if (outboundIdempotencyPayloadGuardTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_outbound_idempotency_payload_guard (id SERIAL PRIMARY KEY, scope_key VARCHAR(220) UNIQUE NOT NULL, payload_fingerprint VARCHAR(80) NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_outbound_idempotency_payload_guard_scope_key ON ai_outbound_idempotency_payload_guard(scope_key)`);
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_outbound_idempotency_payload_guard_created_at ON ai_outbound_idempotency_payload_guard(created_at)`);
+  outboundIdempotencyPayloadGuardTableReady = true;
+};
+
 const pruneOutboundDedupeIfDue = async (ttlSeconds: number) => {
   const now = Date.now();
   if (now - outboundDedupeLastPruneAt < OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS) return;
@@ -306,6 +497,67 @@ const pruneOutboundDedupeIfDue = async (ttlSeconds: number) => {
     replacements: { ttlSeconds },
     type: QueryTypes.DELETE
   });
+};
+
+const pruneOutboundIdempotencyPayloadGuardIfDue = async (ttlSeconds: number) => {
+  const now = Date.now();
+  if (now - outboundIdempotencyPayloadGuardLastPruneAt < OUTBOUND_IDEMPOTENCY_PAYLOAD_GUARD_PRUNE_INTERVAL_MS) return;
+  outboundIdempotencyPayloadGuardLastPruneAt = now;
+  await sequelize.query(`DELETE FROM ai_outbound_idempotency_payload_guard WHERE created_at < NOW() - (:ttlSeconds::text || ' seconds')::interval`, {
+    replacements: { ttlSeconds },
+    type: QueryTypes.DELETE
+  });
+};
+
+const assertIdempotencyPayloadConsistencyPersistent = async (
+  scopeKey: string,
+  payloadFingerprint: string,
+  ttlSeconds: number
+): Promise<{ ok: boolean; previousFingerprint?: string }> => {
+  await ensureOutboundIdempotencyPayloadGuardTable();
+  await pruneOutboundIdempotencyPayloadGuardIfDue(ttlSeconds);
+
+  const inserted: any[] = await sequelize.query(
+    `INSERT INTO ai_outbound_idempotency_payload_guard (scope_key, payload_fingerprint, created_at)
+     VALUES (:scopeKey, :payloadFingerprint, NOW())
+     ON CONFLICT (scope_key) DO NOTHING
+     RETURNING payload_fingerprint`,
+    {
+      replacements: { scopeKey, payloadFingerprint },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  if (inserted[0]?.payload_fingerprint) {
+    return { ok: true };
+  }
+
+  const rows: any[] = await sequelize.query(
+    `SELECT payload_fingerprint FROM ai_outbound_idempotency_payload_guard WHERE scope_key = :scopeKey LIMIT 1`,
+    {
+      replacements: { scopeKey },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  const existing = String(rows[0]?.payload_fingerprint || "");
+  if (!existing) {
+    return { ok: true };
+  }
+
+  if (existing !== payloadFingerprint) {
+    return { ok: false, previousFingerprint: existing };
+  }
+
+  await sequelize.query(
+    `UPDATE ai_outbound_idempotency_payload_guard SET created_at = NOW() WHERE scope_key = :scopeKey`,
+    {
+      replacements: { scopeKey },
+      type: QueryTypes.UPDATE
+    }
+  );
+
+  return { ok: true };
 };
 
 const reserveOutboundDedupe = async (dedupeKey: string, ttlSeconds = OUTBOUND_DEDUPE_TTL_SECONDS): Promise<boolean> => {
@@ -459,7 +711,8 @@ const isRetryableCloudFailure = (status?: number, code?: number): boolean => {
   if (status === 408 || status === 429) return true;
   if (status >= 500) return true;
   // WhatsApp Cloud transient codes observed in rate/throughput spikes
-  if (code === 131016 || code === 131048 || code === 131056) return true;
+  // 130429 = Meta Cloud API throughput/rate pressure (safe retry with idempotency key)
+  if (code === 130429 || code === 131016 || code === 131048 || code === 131056) return true;
   return false;
 };
 
@@ -484,6 +737,16 @@ const shouldReleaseDedupeAfterProviderFailure = (err: any): boolean => {
   if (status === 408 || status === 409 || status === 429) return false;
   if (status >= 500) return false;
   return status >= 400 && status < 500;
+};
+
+const isProviderConflictLikelyDuplicate = (status?: number, code?: number): boolean => {
+  const s = Number(status || 0);
+  if (!s) return false;
+  // 409 conflicts are frequently emitted in duplicate/race windows.
+  if (s === 409) return true;
+
+  // WhatsApp Cloud duplicate-ish/conflict-adjacent codes observed in retry races.
+  return code === 131026;
 };
 
 const sendViaWbot = async (
@@ -532,14 +795,24 @@ const sendViaWbot = async (
       }
 
       if (!retryable || attempt === effectiveMaxAttempts) {
+        const status = Number(err?.statusCode || err?.status) || undefined;
+        if (isProviderConflictLikelyDuplicate(status)) {
+          bumpHardeningMetric("outbound.provider_conflict_blocked");
+          bumpHardeningMetric("outbound.provider_conflict_blocked.wbot");
+          pushHardeningSignal("outbound_provider_conflict_blocked", 4, {
+            channel: "wbot",
+            status,
+            attempt
+          });
+        }
         if (retryable && !allowRetry) {
           bumpHardeningMetric("outbound.wbot_retry_blocked_missing_idempotency_key");
           pushHardeningSignal("outbound_wbot_retry_blocked_missing_idempotency_key", 3, {
-            status: Number(err?.statusCode || err?.status) || undefined
+            status
           });
         }
         if (attempt === effectiveMaxAttempts && effectiveMaxAttempts > 1) {
-          pushHardeningSignal("outbound_wbot_retry_exhausted", 3, { attempt, status: Number(err?.statusCode || err?.status) || undefined });
+          pushHardeningSignal("outbound_wbot_retry_exhausted", 3, { attempt, status });
         }
         break;
       }
@@ -678,6 +951,16 @@ const sendViaCloud = async (
 
       const cloudCode = Number(data?.error?.code);
       if (!isRetryableCloudFailure(resp.status, cloudCode) || attempt === effectiveMaxAttempts) {
+        if (isProviderConflictLikelyDuplicate(resp.status, cloudCode)) {
+          bumpHardeningMetric("outbound.provider_conflict_blocked");
+          bumpHardeningMetric("outbound.provider_conflict_blocked.cloud");
+          pushHardeningSignal("outbound_provider_conflict_blocked", 4, {
+            channel: "cloud",
+            status: resp.status,
+            cloudCode,
+            attempt
+          });
+        }
         if (attempt === effectiveMaxAttempts) {
           pushHardeningSignal("outbound_retry_exhausted", 3, { status: resp.status, cloudCode });
         }
@@ -833,6 +1116,14 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
     throw new AppError("Hardening: Idempotency-Key demasiado débil (usar caracteres no secuenciales y al menos 2 distintos)", 400);
   }
 
+  if (cleanIdempotencyKey && isPlaceholderClientIdempotencyKey(cleanIdempotencyKey)) {
+    bumpHardeningMetric("outbound.idempotency_key_placeholder_blocked");
+    pushHardeningSignal("outbound_idempotency_key_placeholder_blocked", 3, {
+      ticketId: ticket.id
+    });
+    throw new AppError("Hardening: Idempotency-Key genérico no permitido (usar UUID/ULID único por request)", 400);
+  }
+
   if (resolveOutboundRequireIdempotencyKey() && !cleanIdempotencyKey) {
     bumpHardeningMetric("outbound.missing_idempotency_key_blocked");
     pushHardeningSignal("outbound_missing_idempotency_key_blocked", 3, {
@@ -889,7 +1180,7 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
     const wbot = getWbot(ticket.whatsappId);
 
     const tenantScope = `company:${String((ticket as any)?.companyId || "na")}:wa:${String((ticket as any)?.whatsappId || "na")}`;
-    const dedupeKey = buildOutboundDedupeKey(ticket.id, ticket.contact.number, payload, cleanIdempotencyKey, tenantScope);
+    const dedupeKey = buildOutboundDedupeKey(ticket.contact.number, payload, cleanIdempotencyKey, tenantScope);
     if (cleanIdempotencyKey) {
       bumpHardeningMetric("outbound.idempotency_key_used");
     } else {
@@ -900,6 +1191,39 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
       });
     }
     const dedupeTtlSeconds = resolveOutboundDedupeTtlSeconds();
+
+    if (cleanIdempotencyKey) {
+      const payloadFingerprint = buildOutboundPayloadFingerprint(payload);
+      const idempotencyScopeKey = `${tenantScope}:${String(ticket.contact.number || "").replace(/\D/g, "")}:${cleanIdempotencyKey}`;
+
+      let consistency: { ok: boolean; previousFingerprint?: string };
+      try {
+        consistency = await assertIdempotencyPayloadConsistencyPersistent(idempotencyScopeKey, payloadFingerprint, dedupeTtlSeconds);
+      } catch (payloadGuardErr: any) {
+        bumpHardeningMetric("outbound.idempotency_payload_guard_infra_error");
+        pushHardeningSignal("outbound_idempotency_payload_guard_infra_error", 2, {
+          ticketId: ticket.id,
+          mode: payload.mode
+        });
+        consistency = assertIdempotencyPayloadConsistency(idempotencyScopeKey, payloadFingerprint, dedupeTtlSeconds);
+        bumpHardeningMetric("outbound.idempotency_payload_guard_memory_fallback_used");
+        console.error("[wa-hardening] idempotency payload guard persistent check failed; using memory fallback", {
+          ticketId: ticket.id,
+          mode: payload.mode,
+          error: payloadGuardErr?.message || String(payloadGuardErr)
+        });
+      }
+
+      if (!consistency.ok) {
+        bumpHardeningMetric("outbound.idempotency_key_payload_conflict_blocked");
+        pushHardeningSignal("outbound_idempotency_key_payload_conflict_blocked", 2, {
+          ticketId: ticket.id,
+          mode: payload.mode
+        });
+        throw new AppError("Hardening: Idempotency-Key reutilizado con payload distinto", 409);
+      }
+    }
+
     let shouldSend = true;
     let dedupeReservationMode: "persistent" | "emergency" = "persistent";
     try {

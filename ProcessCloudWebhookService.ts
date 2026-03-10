@@ -23,8 +23,8 @@ const defaultPolicies: Record<ConversationType, Policy> = {
   general: { maxReplyChars: 260, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
 };
 
-const MAX_WEBHOOK_MESSAGE_AGE_SECONDS = 60 * 60 * 24; // 24h
-const MAX_WEBHOOK_FUTURE_SKEW_SECONDS = 60 * 5; // 5m
+const DEFAULT_MAX_WEBHOOK_MESSAGE_AGE_SECONDS = 60 * 60 * 24; // 24h
+const DEFAULT_MAX_WEBHOOK_FUTURE_SKEW_SECONDS = 60 * 5; // 5m
 const MAX_INBOUND_TEXT_LENGTH = 4096;
 const MAX_INBOUND_MESSAGES_PER_PAYLOAD = 200;
 const DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD = 40;
@@ -39,7 +39,9 @@ const INBOUND_REPLAY_TTL_SECONDS = 60 * 60 * 24; // 24h
 const OUTBOUND_DEDUPE_PRUNE_INTERVAL_MS = 60 * 1000;
 const INBOUND_REPLAY_PRUNE_INTERVAL_MS = 60 * 1000;
 const DEFAULT_OUTBOUND_DEDUPE_MEMORY_MAX_ENTRIES = 5000;
+const DEFAULT_INBOUND_REPLAY_MEMORY_MAX_ENTRIES = 10000;
 const outboundDedupeMemory = new Map<string, number>();
+const inboundReplayMemory = new Map<string, number>();
 
 const resolveInboundReplayTtlSeconds = () => {
   const n = Number(getRuntimeSettings().waInboundReplayTtlSeconds || INBOUND_REPLAY_TTL_SECONDS);
@@ -51,6 +53,31 @@ const resolveInboundReplayMaxBlocksPerPayload = () => {
   const n = Number(getRuntimeSettings().waInboundReplayMaxBlocksPerPayload || DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD);
   if (!Number.isFinite(n)) return DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD;
   return Math.max(5, Math.min(500, Math.round(n)));
+};
+
+const resolveInboundReplayMemoryMaxEntries = () => {
+  const n = Number((getRuntimeSettings() as any).waInboundReplayMemoryMaxEntries || DEFAULT_INBOUND_REPLAY_MEMORY_MAX_ENTRIES);
+  if (!Number.isFinite(n)) return DEFAULT_INBOUND_REPLAY_MEMORY_MAX_ENTRIES;
+  return Math.max(500, Math.min(100000, Math.round(n)));
+};
+
+const resolveInboundReplayFailClosed = () => {
+  const raw = (getRuntimeSettings() as any).waInboundReplayFailClosed;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return true;
+  return ["1", "true", "yes", "on"].includes(String(raw).trim().toLowerCase());
+};
+
+const resolveWebhookMaxMessageAgeSeconds = () => {
+  const n = Number((getRuntimeSettings() as any).waWebhookMaxMessageAgeSeconds || DEFAULT_MAX_WEBHOOK_MESSAGE_AGE_SECONDS);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_WEBHOOK_MESSAGE_AGE_SECONDS;
+  // avoid disabling replay/timestamp protection by oversized windows
+  return Math.max(60, Math.min(60 * 60 * 24 * 7, Math.round(n)));
+};
+
+const resolveWebhookFutureSkewSeconds = () => {
+  const n = Number((getRuntimeSettings() as any).waWebhookFutureSkewSeconds || DEFAULT_MAX_WEBHOOK_FUTURE_SKEW_SECONDS);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_WEBHOOK_FUTURE_SKEW_SECONDS;
+  return Math.max(5, Math.min(60 * 15, Math.round(n)));
 };
 
 const resolveOutboundRetryWindowFloorSeconds = (): number => {
@@ -165,6 +192,10 @@ const reserveOutboundDedupeMemory = (dedupeKey: string, ttlSeconds: number): boo
   return true;
 };
 
+const releaseOutboundDedupeMemory = (dedupeKey: string): boolean => {
+  return outboundDedupeMemory.delete(dedupeKey);
+};
+
 const ensureInboundReplayTable = async () => {
   if (inboundReplayTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_inbound_replay_guard (id SERIAL PRIMARY KEY, replay_key VARCHAR(220) UNIQUE NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
@@ -174,8 +205,15 @@ const ensureInboundReplayTable = async () => {
   inboundReplayTableReady = true;
 };
 
-const buildInboundReplayKey = (messageId: string, from: string) => {
-  const base = `${String(messageId || "").trim()}:${String(from || "").replace(/\D/g, "")}`;
+const buildInboundReplayKey = (
+  messageId: string,
+  from: string,
+  companyIdRaw?: number,
+  whatsappIdRaw?: number
+) => {
+  const companyId = Math.max(0, Number(companyIdRaw) || 0);
+  const whatsappId = Math.max(0, Number(whatsappIdRaw) || 0);
+  const base = `${companyId}:${whatsappId}:${String(messageId || "").trim()}:${String(from || "").replace(/\D/g, "")}`;
   return `wa-in:${crypto.createHash("sha1").update(base).digest("hex")}`;
 };
 
@@ -212,6 +250,38 @@ const releaseInboundReplay = async (replayKey: string) => {
     type: QueryTypes.DELETE
   });
 };
+
+const trimInboundReplayMemory = (maxEntries: number) => {
+  if (inboundReplayMemory.size <= maxEntries) return;
+  const overflow = inboundReplayMemory.size - maxEntries;
+  let trimmed = 0;
+  for (const key of inboundReplayMemory.keys()) {
+    inboundReplayMemory.delete(key);
+    trimmed += 1;
+    if (trimmed >= overflow) break;
+  }
+  if (trimmed > 0) {
+    bumpHardeningMetric("inbound.replay_memory_trimmed", trimmed);
+  }
+};
+
+const reserveInboundReplayMemory = (replayKey: string, ttlSeconds: number): boolean => {
+  const now = Date.now();
+  for (const [key, expiresAt] of inboundReplayMemory.entries()) {
+    if (expiresAt <= now) inboundReplayMemory.delete(key);
+  }
+
+  trimInboundReplayMemory(resolveInboundReplayMemoryMaxEntries());
+
+  const existingExpiresAt = inboundReplayMemory.get(replayKey) || 0;
+  if (existingExpiresAt > now) return false;
+
+  inboundReplayMemory.set(replayKey, now + Math.max(1000, ttlSeconds * 1000));
+  trimInboundReplayMemory(resolveInboundReplayMemoryMaxEntries());
+  return true;
+};
+
+const releaseInboundReplayMemory = (replayKey: string): boolean => inboundReplayMemory.delete(replayKey);
 
 const logDecision = async (args: { companyId: number; ticketId: number; conversationType: ConversationType; decisionKey: string; reason?: string; guardrailAction?: string; responsePreview?: string }) => {
   try {
@@ -414,6 +484,11 @@ export const recordInboundPayloadReplayBlocked = (context?: Record<string, unkno
   pushHardeningSignal("inbound_payload_replay_blocked", 4, context);
 };
 
+export const recordInboundPayloadReplayKeyCollisionOrRepeat = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.payload_replay_key_collision_or_repeat");
+  pushHardeningSignal("inbound_payload_replay_key_collision_or_repeat", 3, context);
+};
+
 export const recordInboundPayloadReplayCacheTrimmed = (removed: number, context?: Record<string, unknown>) => {
   const trimmed = Math.max(0, Math.round(Number(removed) || 0));
   if (trimmed <= 0) return;
@@ -449,6 +524,11 @@ export const recordInboundInvalidEnvelopeBlocked = (context?: Record<string, unk
 export const recordInboundInvalidContentTypeBlocked = (context?: Record<string, unknown>) => {
   bumpHardeningMetric("inbound.invalid_content_type_blocked");
   pushHardeningSignal("inbound_invalid_content_type_blocked", 3, context);
+};
+
+export const recordInboundForwardedHeaderOversizeBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.forwarded_header_oversize_blocked");
+  pushHardeningSignal("inbound_forwarded_header_oversize_blocked", 2, context);
 };
 
 const parseRetryAfterMs = (retryAfterHeader?: string | null): number | null => {
@@ -519,8 +599,16 @@ const isRetryableCloudFailure = (status?: number, code?: number): boolean => {
   // 409 can happen in conflict windows; retrying can amplify duplicate outbound risk.
   if (status === 408 || status === 429) return true;
   if (status >= 500) return true;
-  if (code === 131016 || code === 131048 || code === 131056) return true;
+  // 130429 = Meta Cloud API throughput/rate pressure (safe retry with idempotency guard)
+  if (code === 130429 || code === 131016 || code === 131048 || code === 131056) return true;
   return false;
+};
+
+const isProviderConflictLikelyDuplicate = (status?: number, code?: number): boolean => {
+  const s = Number(status || 0);
+  if (!s) return false;
+  if (s === 409) return true;
+  return Number(code || 0) === 131026;
 };
 
 const shouldReleaseDedupeAfterProviderFailure = (status?: number): boolean => {
@@ -531,10 +619,20 @@ const shouldReleaseDedupeAfterProviderFailure = (status?: number): boolean => {
   return s >= 400 && s < 500;
 };
 
-const sendCloudText = async (to: string, text: string): Promise<{ sentId: string | null; providerFailureStatus?: number }> => {
+const sendCloudText = async (
+  to: string,
+  text: string,
+  providerIdempotencyKey?: string
+): Promise<{ sentId: string | null; providerFailureStatus?: number }> => {
   const settings = getRuntimeSettings();
   const cleanTo = String(to || "").replace(/\D/g, "");
   const cleanText = String(text || "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+  const cleanProviderIdempotencyKey = String(providerIdempotencyKey || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_\-.]/g, "")
+    .slice(0, 120);
+  const hasProviderIdempotencyKey = Boolean(cleanProviderIdempotencyKey);
 
   if (!cleanTo || !/^\d{8,20}$/.test(cleanTo)) {
     bumpHardeningMetric("outbound.invalid_recipient_blocked");
@@ -564,8 +662,12 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
 
   const maxAttempts = Math.max(1, Math.min(6, Number(settings.waOutboundRetryMaxAttempts || 3)));
   const retryRequiresIdempotency = resolveManagedReplyRetryRequireIdempotencyKey();
-  const allowRetry = !retryRequiresIdempotency;
+  const allowRetry = hasProviderIdempotencyKey || !retryRequiresIdempotency;
   const effectiveMaxAttempts = allowRetry ? maxAttempts : 1;
+  if (hasProviderIdempotencyKey) {
+    bumpHardeningMetric("outbound.managed_reply_provider_idempotency_key_used");
+  }
+
   if (maxAttempts > 1 && !allowRetry) {
     bumpHardeningMetric("outbound.cloud_retry_blocked_without_idempotency_policy");
     pushHardeningSignal("outbound_cloud_retry_blocked_without_idempotency_policy", 3, {
@@ -583,7 +685,16 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
 
       const res = await fetch(`https://graph.facebook.com/v21.0/${settings.waCloudPhoneNumberId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.waCloudAccessToken}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${settings.waCloudAccessToken}`,
+          ...(hasProviderIdempotencyKey
+            ? {
+                "Idempotency-Key": cleanProviderIdempotencyKey,
+                "X-Idempotency-Key": cleanProviderIdempotencyKey
+              }
+            : {})
+        },
         body: JSON.stringify({ messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: cleanText } }),
         signal: controller.signal
       }).finally(() => clearTimeout(timeoutHandle));
@@ -599,6 +710,16 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
       lastError = data?.error?.message || `status ${res.status}`;
 
       if (!retryable || attempt === effectiveMaxAttempts) {
+        if (isProviderConflictLikelyDuplicate(res.status, cloudCode)) {
+          bumpHardeningMetric("outbound.provider_conflict_blocked");
+          bumpHardeningMetric("outbound.provider_conflict_blocked.cloud");
+          pushHardeningSignal("outbound_provider_conflict_blocked", 4, {
+            channel: "cloud",
+            status: res.status,
+            cloudCode,
+            attempt
+          });
+        }
         if (retryable && !allowRetry) {
           bumpHardeningMetric("outbound.cloud_retry_blocked_missing_idempotency_key");
           pushHardeningSignal("outbound_cloud_retry_blocked_missing_idempotency_key", 3, { status: res.status, cloudCode, attempt });
@@ -632,6 +753,15 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
       }
 
       if (!retryable || attempt === effectiveMaxAttempts) {
+        if (isProviderConflictLikelyDuplicate(status)) {
+          bumpHardeningMetric("outbound.provider_conflict_blocked");
+          bumpHardeningMetric("outbound.provider_conflict_blocked.cloud");
+          pushHardeningSignal("outbound_provider_conflict_blocked", 4, {
+            channel: "cloud",
+            status: status || undefined,
+            attempt
+          });
+        }
         if (retryable && !allowRetry) {
           bumpHardeningMetric("outbound.cloud_retry_blocked_missing_idempotency_key");
           pushHardeningSignal("outbound_cloud_retry_blocked_missing_idempotency_key", 3, {
@@ -640,6 +770,16 @@ const sendCloudText = async (to: string, text: string): Promise<{ sentId: string
             reason: isAbortTimeout ? "timeout" : undefined
           });
         }
+
+        const unknownTransportFailure = !Number.isFinite(status) || status <= 0;
+        if (unknownTransportFailure && !hasProviderIdempotencyKey) {
+          bumpHardeningMetric("outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key");
+          pushHardeningSignal("outbound_cloud_retry_blocked_unknown_transport_without_idempotency_key", 3, {
+            attempt,
+            reason: isAbortTimeout ? "timeout" : "transport_unknown"
+          });
+        }
+
         bumpHardeningMetric("outbound.cloud_send_failed");
         pushHardeningSignal("outbound_retry_exhausted", 3, { status: status || undefined, reason: isAbortTimeout ? "timeout" : undefined });
         console.error("[wa-cloud][send] exception:", lastError, { status, attempt, maxAttempts: effectiveMaxAttempts, isAbortTimeout, timeoutRetryEnabled, allowRetry });
@@ -770,7 +910,7 @@ const sendManagedReply = async ({ ticket, contact, text }: { ticket: any; contac
     return null;
   }
   bumpHardeningMetric("outbound.dedupe_reserved");
-  const sendResult = await sendCloudText(String(contact.number), cleanText);
+  const sendResult = await sendCloudText(String(contact.number), cleanText, dedupeKey);
   if (!sendResult.sentId) {
     bumpHardeningMetric("outbound.provider_send_failed");
     pushHardeningSignal("outbound_provider_send_failed", 4, {
@@ -795,7 +935,12 @@ const sendManagedReply = async ({ ticket, contact, text }: { ticket: any; contac
           });
         }
       } else {
-        bumpHardeningMetric("outbound.dedupe_release_skipped_memory_mode");
+        const released = releaseOutboundDedupeMemory(dedupeKey);
+        if (released) {
+          bumpHardeningMetric("outbound.dedupe_released_after_non_retryable_provider_error_memory_mode");
+        } else {
+          bumpHardeningMetric("outbound.dedupe_release_not_found_after_non_retryable_provider_error_memory_mode");
+        }
       }
     } else {
       bumpHardeningMetric("outbound.dedupe_retained_after_provider_failure");
@@ -838,14 +983,16 @@ const parseBudget = (text: string): number | null => {
   return Number(String(m[1]).replace(/\./g, "").replace(/,/g, "")) || null;
 };
 
-const isWebhookTimestampAcceptable = (timestamp?: string): boolean => {
+const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
   const ts = Number(timestamp || 0);
-  if (!ts) return false;
+  if (!ts) return { ok: false, reason: "missing", ageSec: null };
   const nowSec = Math.floor(Date.now() / 1000);
   const age = nowSec - ts;
-  if (age > MAX_WEBHOOK_MESSAGE_AGE_SECONDS) return false;
-  if (age < -MAX_WEBHOOK_FUTURE_SKEW_SECONDS) return false;
-  return true;
+  const maxAgeSeconds = resolveWebhookMaxMessageAgeSeconds();
+  const maxFutureSkewSeconds = resolveWebhookFutureSkewSeconds();
+  if (age > maxAgeSeconds) return { ok: false, reason: "too_old", ageSec: age };
+  if (age < -maxFutureSkewSeconds) return { ok: false, reason: "future_skew", ageSec: age };
+  return { ok: true, reason: "ok", ageSec: age };
 };
 
 const isValidInboundSender = (from: string): boolean => /^\d{8,20}$/.test(String(from || ""));
@@ -1124,8 +1271,10 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
         const validMessageId = isValidInboundMessageId(externalMsgId);
         const validType = isValidInboundType(type);
         const validTextLength = isInboundTextLengthAcceptable(body);
+        const timestampValidation = getWebhookTimestampValidation(incoming.timestamp);
+        const validTimestamp = timestampValidation.ok;
 
-        if (!from || !externalMsgId || !validSender || !validMessageId || !validType || !isWebhookTimestampAcceptable(incoming.timestamp) || !hasTextBody || !validTextLength) {
+        if (!from || !externalMsgId || !validSender || !validMessageId || !validType || !validTimestamp || !hasTextBody || !validTextLength) {
           if (!from || !externalMsgId) {
             bumpHardeningMetric("inbound.invalid_envelope_blocked");
             console.warn("[wa-cloud][inbound] invalid envelope blocked", { hasFrom: Boolean(from), hasId: Boolean(externalMsgId) });
@@ -1138,9 +1287,30 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           } else if (!validType) {
             bumpHardeningMetric("inbound.invalid_type_blocked");
             console.warn("[wa-cloud][inbound] unsupported type blocked", { externalMsgId, type });
-          } else if (!isWebhookTimestampAcceptable(incoming.timestamp)) {
+          } else if (!validTimestamp) {
             bumpHardeningMetric("inbound.stale_or_future_blocked");
-            console.warn("[wa-cloud][inbound] stale/future webhook blocked", { externalMsgId, timestamp: incoming.timestamp });
+            bumpHardeningMetric("inbound.timestamp_outside_allowed_skew_blocked");
+            if (timestampValidation.reason === "too_old") {
+              bumpHardeningMetric("inbound.timestamp_too_old_blocked");
+            } else if (timestampValidation.reason === "future_skew") {
+              bumpHardeningMetric("inbound.timestamp_future_skew_blocked");
+            }
+            const maxAgeSec = resolveWebhookMaxMessageAgeSeconds();
+            const maxFutureSkewSec = resolveWebhookFutureSkewSeconds();
+            pushHardeningSignal("inbound_timestamp_outside_allowed_skew", 4, {
+              reason: timestampValidation.reason,
+              ageSec: timestampValidation.ageSec,
+              maxAgeSec,
+              maxFutureSkewSec
+            });
+            console.warn("[wa-cloud][inbound] webhook timestamp outside allowed skew blocked", {
+              externalMsgId,
+              timestamp: incoming.timestamp,
+              reason: timestampValidation.reason,
+              ageSec: timestampValidation.ageSec,
+              maxAgeSec,
+              maxFutureSkewSec
+            });
           } else if (!hasTextBody) {
             bumpHardeningMetric("inbound.empty_text_body_blocked");
             console.warn("[wa-cloud][inbound] text message without body blocked", { externalMsgId });
@@ -1152,14 +1322,50 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           continue;
         }
 
-        const replayKey = buildInboundReplayKey(externalMsgId, from);
-        const accepted = await reserveInboundReplay(replayKey, resolveInboundReplayTtlSeconds());
+        const replayKey = buildInboundReplayKey(externalMsgId, from, whatsapp.companyId, whatsapp.id);
+        const replayTtlSeconds = resolveInboundReplayTtlSeconds();
+        let accepted = false;
+        let replayReservationMode: "persistent" | "memory" = "persistent";
+        try {
+          accepted = await reserveInboundReplay(replayKey, replayTtlSeconds);
+        } catch (replayErr: any) {
+          recordInboundPayloadReplayGuardInfraError({
+            source: "message_replay_guard",
+            error: replayErr?.message || String(replayErr),
+            failClosed: resolveInboundReplayFailClosed()
+          });
+
+          if (resolveInboundReplayFailClosed()) {
+            bumpHardeningMetric("inbound.replay_guard_fail_closed_blocked");
+            recordInboundPayloadReplayGuardFailClosedBlocked({
+              source: "message_replay_guard",
+              error: replayErr?.message || String(replayErr)
+            });
+            console.error("[wa-cloud][inbound] replay guard unavailable; fail-closed blocked inbound", {
+              externalMsgId,
+              from,
+              error: replayErr?.message || String(replayErr)
+            });
+            ignored += 1;
+            continue;
+          }
+
+          replayReservationMode = "memory";
+          recordInboundPayloadReplayGuardMemoryFallbackUsed({
+            source: "message_replay_guard"
+          });
+          accepted = reserveInboundReplayMemory(replayKey, replayTtlSeconds);
+          if (!accepted) {
+            bumpHardeningMetric("inbound.replay_memory_blocked");
+          }
+        }
+
         if (!accepted) {
           replayBlockedInPayload += 1;
           bumpHardeningMetric("inbound.replay_blocked");
           recordInboundDuplicate();
-          console.warn("[wa-cloud][inbound] replay blocked", { externalMsgId, from });
-          pushHardeningSignal("inbound_replay_blocked", 10, { from });
+          console.warn("[wa-cloud][inbound] replay blocked", { externalMsgId, from, replayReservationMode });
+          pushHardeningSignal("inbound_replay_blocked", 10, { from, replayReservationMode });
           ignored += 1;
 
           if (replayBlockedInPayload >= maxReplayBlockedPerPayload) {
@@ -1207,7 +1413,19 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           processed += 1;
         } catch (error) {
           bumpHardeningMetric("inbound.processing_error");
-          await releaseInboundReplay(replayKey);
+          try {
+            if (replayReservationMode === "memory") {
+              releaseInboundReplayMemory(replayKey);
+            } else {
+              await releaseInboundReplay(replayKey);
+            }
+          } catch (releaseErr: any) {
+            bumpHardeningMetric("inbound.replay_release_failed_after_processing_error");
+            console.error("[wa-cloud][inbound] failed to release replay reservation after processing error", {
+              replayReservationMode,
+              error: releaseErr?.message || String(releaseErr)
+            });
+          }
           recordInboundError(error);
           pushHardeningSignal("inbound_processing_error", 4, {});
           console.error("[wa-cloud] error processing inbound:", error);

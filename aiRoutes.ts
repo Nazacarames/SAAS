@@ -10,6 +10,8 @@ import Message from "../models/Message";
 import Whatsapp from "../models/Whatsapp";
 import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
 import { getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
+import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
 const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
@@ -297,13 +299,51 @@ const scoreFromText = (text: string, current = 0) => {
   return Math.min(100, score);
 };
 
-aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (_req: any, res) => {
+aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (req: any, res) => {
   try {
-    return res.json({
-      ok: true,
+    const inbound = {
+      metrics: getWaHardeningMetrics(),
+      alerts: getWaHardeningAlertSnapshot()
+    };
+    const outbound = {
+      metrics: getSendHardeningMetrics(),
+      alerts: getSendHardeningAlertSnapshot()
+    };
+    const integrationApi = {
+      metrics: getIntegrationHardeningMetrics(),
+      alerts: getIntegrationHardeningAlertSnapshot()
+    };
+
+    const pendingAlerts = [
+      ...(Array.isArray(inbound.alerts?.pendingAlerts) ? inbound.alerts.pendingAlerts : []),
+      ...(Array.isArray(outbound.alerts?.pendingAlerts) ? outbound.alerts.pendingAlerts : []),
+      ...(Array.isArray(integrationApi.alerts?.pendingAlerts) ? integrationApi.alerts.pendingAlerts : [])
+    ];
+    const pendingAlertCount = pendingAlerts.length;
+
+    const criticalSignals = new Set([
+      "outbound_retry_exhausted",
+      "inbound_signature_invalid_blocked",
+      "inbound_payload_replay_blocked"
+    ]);
+
+    const hasCriticalSeverity = pendingAlerts.some((alert: any) => String(alert?.severity || "").toLowerCase() === "critical");
+    const hasCriticalSignal = pendingAlerts.some((alert: any) => criticalSignals.has(String(alert?.signal || "")));
+    const status = hasCriticalSeverity || hasCriticalSignal ? "critical" : pendingAlertCount > 0 ? "warn" : "ok";
+    const failOnAlert = ["1", "true", "yes", "on"].includes(String(req.query?.failOnAlert || "").toLowerCase());
+    const statusCode = failOnAlert && pendingAlertCount > 0 ? 503 : 200;
+
+    return res.status(statusCode).json({
+      ok: pendingAlertCount === 0,
+      generatedAt: new Date().toISOString(),
       hardening: {
-        metrics: getWaHardeningMetrics(),
-        alerts: getWaHardeningAlertSnapshot()
+        status,
+        pendingAlertCount,
+        failOnAlert,
+        pendingCriticalCount: pendingAlerts.filter((alert: any) => String(alert?.severity || "").toLowerCase() === "critical").length,
+        inbound,
+        outbound,
+        integrationApi
       }
     });
   } catch (error: any) {

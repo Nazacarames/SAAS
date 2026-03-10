@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardMemoryFallbackUsed, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayKeyCollisionOrRepeat, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardMemoryFallbackUsed, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, recordInboundForwardedHeaderOversizeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
 import { getRuntimeSettings } from "./RuntimeSettingsService";
@@ -23,10 +23,15 @@ const resolveRawBodyForSignature = (req: any): string => {
 };
 
 const buildWebhookPayloadReplayKey = (req: any): string => {
-  const signatureHeader = String(req.get("x-hub-signature-256") || "").trim();
   const bodyRaw = resolveRawBodyForSignature(req);
   const digest = crypto.createHash("sha256").update(bodyRaw, "utf8").digest("hex");
-  return `${signatureHeader || "no-sig"}:${digest}`;
+  const objectType = String(req?.body?.object || "unknown").slice(0, 80);
+  const entryCount = Array.isArray(req?.body?.entry) ? req.body.entry.length : 0;
+
+  // hardening: replay identity must be payload-stable, never header-stable.
+  // If signatures are missing/rotated (proxy quirks, insecure unsigned mode),
+  // including x-hub-signature-256 in the key can let the same payload bypass replay guard.
+  return `wa-webhook:${objectType}:${entryCount}:${digest}`;
 };
 
 const resolveWebhookPayloadReplayTtlMs = (): number => {
@@ -61,6 +66,12 @@ const resolveWebhookSignatureHeaderMaxLength = (): number => {
   const n = Number((getRuntimeSettings() as any).waWebhookSignatureHeaderMaxLength || 200);
   if (!Number.isFinite(n)) return 200;
   return Math.max(80, Math.min(512, Math.round(n)));
+};
+
+const resolveWebhookForwardedForHeaderMaxLength = (): number => {
+  const n = Number((getRuntimeSettings() as any).waWebhookForwardedForHeaderMaxLength || 2048);
+  if (!Number.isFinite(n)) return 2048;
+  return Math.max(256, Math.min(8192, Math.round(n)));
 };
 
 const isWebhookJsonContentTypeValid = (req: any): boolean => {
@@ -325,7 +336,8 @@ const resolveOutboundRetryHardeningState = () => {
     dedupeFailClosed,
     insecureDedupeFailOpen: !dedupeFailClosed,
     timeoutRetryEnabled,
-    timeoutRetryRequiresIdempotencyKey: timeoutRetryEnabled && retryRequiresIdempotencyKey
+    timeoutRetryRequiresIdempotencyKey: timeoutRetryEnabled && retryRequiresIdempotencyKey && !allowRetryWithoutIdempotency,
+    timeoutRetryAllowsWithoutIdempotency: timeoutRetryEnabled && (!retryRequiresIdempotencyKey || allowRetryWithoutIdempotency)
   };
 };
 
@@ -426,10 +438,34 @@ const readCounter = (counters: Record<string, any> | undefined, key: string): nu
   return Number.isFinite(value) ? value : 0;
 };
 
-const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any, health: any) => {
+const readAlertInWindow = (alertsSnapshot: any, signal: string): number => {
+  const pending = Array.isArray(alertsSnapshot?.pendingAlerts) ? alertsSnapshot.pendingAlerts : [];
+  const hit = pending.find((item: any) => String(item?.signal || "") === signal);
+  const value = Number(hit?.inWindow || 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any, health: any, inboundAlertsSnapshot?: any) => {
   const inboundCounters = inbound?.counters || {};
   const outboundCounters = outbound?.counters || {};
   const integrationApiCounters = integrationApi?.counters || {};
+
+  const inboundSignatureInvalidInWindow10m = readAlertInWindow(inboundAlertsSnapshot, "inbound_signature_invalid_blocked");
+  const inboundPayloadReplayInWindow10m = readAlertInWindow(inboundAlertsSnapshot, "inbound_payload_replay_blocked")
+    + readAlertInWindow(inboundAlertsSnapshot, "inbound_replay_blocked");
+  const inboundSpoofingPressureCombinedInWindow10m = inboundSignatureInvalidInWindow10m + inboundPayloadReplayInWindow10m;
+  const inboundSpoofingPressureThreshold = 10;
+  const inboundSpoofingPressureMinSignature = 4;
+  const inboundSpoofingPressureMinReplay = 3;
+  const inboundSpoofingPressureActive = inboundSpoofingPressureCombinedInWindow10m >= inboundSpoofingPressureThreshold
+    && inboundSignatureInvalidInWindow10m >= inboundSpoofingPressureMinSignature
+    && inboundPayloadReplayInWindow10m >= inboundSpoofingPressureMinReplay;
+
+  const inboundReplayGuardInfraErrorsInWindow10m = readAlertInWindow(inboundAlertsSnapshot, "inbound_payload_replay_guard_infra_error");
+  const inboundReplayGuardMemoryFallbackInWindow10m = readAlertInWindow(inboundAlertsSnapshot, "inbound_payload_replay_guard_memory_fallback_used");
+  const inboundReplayGuardInfraPressureCombinedInWindow10m = inboundReplayGuardInfraErrorsInWindow10m + inboundReplayGuardMemoryFallbackInWindow10m;
+  const inboundReplayGuardInfraPressureThreshold = 3;
+  const inboundReplayGuardInfraPressureActive = inboundReplayGuardInfraPressureCombinedInWindow10m >= inboundReplayGuardInfraPressureThreshold;
 
   const idempotencyKeyUsed = readCounter(outboundCounters, "outbound.idempotency_key_used");
   const missingIdempotencyKey = readCounter(outboundCounters, "outbound.idempotency_key_missing");
@@ -437,6 +473,20 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   const idempotencyCoveragePct = idempotencyObservedTotal > 0
     ? Math.round((idempotencyKeyUsed / idempotencyObservedTotal) * 100)
     : null;
+
+  const retryBlockedNoIdempotencyManagedReplies = readCounter(inboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
+    + readCounter(inboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key");
+
+  const retryBlockedUnknownTransportNoIdempotencyManagedReplies = readCounter(inboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key");
+
+  const integrationReplayGuardReservationConflict = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict");
+  const integrationReplayGuardReservationConflictOutcomeReplayed = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict_outcome.replayed");
+  const integrationReplayGuardReservationConflictOutcomeProcessing = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict_outcome.processing");
+  const integrationReplayGuardReservationObserved = integrationReplayGuardReservationConflict
+    + readCounter(integrationApiCounters, "outbound.send_attempt_accepted");
+  const integrationReplayGuardReservationConflictRate = integrationReplayGuardReservationObserved > 0
+    ? Number((integrationReplayGuardReservationConflict / integrationReplayGuardReservationObserved).toFixed(4))
+    : 0;
 
   const summary = {
     status: String(health?.status || "ok"),
@@ -447,19 +497,36 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       idempotencyObservedTotal,
       idempotencyCoveragePct,
       missingIdempotencyKeyBlocked: readCounter(outboundCounters, "outbound.missing_idempotency_key_blocked"),
+      idempotencyKeyInvalidCharsBlocked: readCounter(outboundCounters, "outbound.idempotency_key_invalid_chars_blocked"),
+      idempotencyKeyTooLongBlocked: readCounter(outboundCounters, "outbound.idempotency_key_too_long_blocked"),
+      idempotencyKeyTooShortBlocked: readCounter(outboundCounters, "outbound.idempotency_key_too_short_blocked"),
       idempotencyKeyTooWeakBlocked: readCounter(outboundCounters, "outbound.idempotency_key_too_weak_blocked"),
       idempotencyKeyTimestampOnlyBlocked: readCounter(outboundCounters, "outbound.idempotency_key_timestamp_only_blocked"),
+      idempotencyKeyPayloadConflictBlocked: readCounter(outboundCounters, "outbound.idempotency_key_payload_conflict_blocked"),
       retryBlockedNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
-        + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key"),
-      retryBlockedUnknownTransportNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key"),
+        + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key")
+        + retryBlockedNoIdempotencyManagedReplies,
+      retryBlockedNoIdempotencyKeyManagedReplies: retryBlockedNoIdempotencyManagedReplies,
+      retryBlockedUnknownTransportNoIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key")
+        + retryBlockedUnknownTransportNoIdempotencyManagedReplies,
+      retryBlockedUnknownTransportNoIdempotencyKeyManagedReplies: retryBlockedUnknownTransportNoIdempotencyManagedReplies,
       retryExhaustedAlerts: readCounter(outboundCounters, "alert.outbound_retry_exhausted")
         + readCounter(outboundCounters, "alert.outbound_wbot_retry_exhausted"),
+      providerConflictBlocked: readCounter(outboundCounters, "outbound.provider_conflict_blocked"),
+      providerConflictBlockedCloud: readCounter(outboundCounters, "outbound.provider_conflict_blocked.cloud"),
+      providerConflictBlockedWbot: readCounter(outboundCounters, "outbound.provider_conflict_blocked.wbot"),
       dedupeInfraErrors: readCounter(outboundCounters, "outbound.dedupe_infra_error"),
       dedupeFailClosedBlocked: readCounter(outboundCounters, "outbound.dedupe_fail_closed_blocked"),
       dedupeEmergencyReserved: readCounter(outboundCounters, "outbound.dedupe_emergency_reserved"),
       dedupeEmergencyDuplicateBlocked: readCounter(outboundCounters, "outbound.dedupe_emergency_duplicate_blocked"),
       dedupeEmergencyTrimmed: readCounter(outboundCounters, "outbound.dedupe_emergency_trimmed"),
+      managedReplyDedupeMemoryReserved: readCounter(inboundCounters, "outbound.dedupe_memory_reserved"),
+      managedReplyDedupeMemoryDuplicateBlocked: readCounter(inboundCounters, "outbound.dedupe_memory_blocked"),
       dedupeReleaseFailedAfterNonRetryableProviderError: readCounter(outboundCounters, "outbound.dedupe_release_failed_after_non_retryable_provider_error"),
+      dedupeReleasedAfterNonRetryableProviderErrorMemoryMode: readCounter(outboundCounters, "outbound.dedupe_released_after_non_retryable_provider_error_memory_mode")
+        + readCounter(outboundCounters, "outbound.dedupe_released_after_non_retryable_provider_error_emergency_mode"),
+      dedupeReleaseNotFoundAfterNonRetryableProviderErrorMemoryMode: readCounter(outboundCounters, "outbound.dedupe_release_not_found_after_non_retryable_provider_error_memory_mode")
+        + readCounter(outboundCounters, "outbound.dedupe_release_not_found_after_non_retryable_provider_error_emergency_mode"),
       duplicateBlockedByMode: {
         text: readCounter(outboundCounters, "outbound.duplicate_blocked_mode.text"),
         template: readCounter(outboundCounters, "outbound.duplicate_blocked_mode.template"),
@@ -478,13 +545,34 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       signatureInvalidRateLimited: readCounter(inboundCounters, "inbound.signature_invalid_rate_limited"),
       invalidEnvelopeBlocked: readCounter(inboundCounters, "inbound.invalid_envelope_blocked"),
       invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
+      forwardedHeaderOversizeBlocked: readCounter(inboundCounters, "inbound.forwarded_header_oversize_blocked"),
       payloadReplayBlocked: readCounter(inboundCounters, "inbound.payload_replay_blocked"),
+      payloadReplayKeyCollisionOrRepeat: readCounter(inboundCounters, "inbound.payload_replay_key_collision_or_repeat"),
       payloadReplayGuardInfraErrors: readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error"),
       payloadReplayGuardMemoryFallbackUsed: readCounter(inboundCounters, "inbound.payload_replay_guard_memory_fallback_used"),
       payloadReplayGuardFailClosedBlocked: readCounter(inboundCounters, "inbound.payload_replay_guard_fail_closed_blocked"),
       payloadSizeBlocked: readCounter(inboundCounters, "inbound.payload_size_blocked"),
       payloadVolumeBlocked: readCounter(inboundCounters, "inbound.payload_volume_blocked"),
-      replayMessageBlocked: readCounter(inboundCounters, "inbound.replay_blocked")
+      replayMessageBlocked: readCounter(inboundCounters, "inbound.replay_blocked"),
+      timestampOutsideAllowedSkewBlocked: readCounter(inboundCounters, "inbound.timestamp_outside_allowed_skew_blocked"),
+      timestampTooOldBlocked: readCounter(inboundCounters, "inbound.timestamp_too_old_blocked"),
+      timestampFutureSkewBlocked: readCounter(inboundCounters, "inbound.timestamp_future_skew_blocked"),
+      spoofingPressure10m: {
+        active: inboundSpoofingPressureActive,
+        signatureInvalidInWindow: inboundSignatureInvalidInWindow10m,
+        replayInWindow: inboundPayloadReplayInWindow10m,
+        combinedInWindow: inboundSpoofingPressureCombinedInWindow10m,
+        threshold: inboundSpoofingPressureThreshold,
+        minSignature: inboundSpoofingPressureMinSignature,
+        minReplay: inboundSpoofingPressureMinReplay
+      },
+      replayGuardInfraPressure10m: {
+        active: inboundReplayGuardInfraPressureActive,
+        infraErrorInWindow: inboundReplayGuardInfraErrorsInWindow10m,
+        memoryFallbackInWindow: inboundReplayGuardMemoryFallbackInWindow10m,
+        combinedInWindow: inboundReplayGuardInfraPressureCombinedInWindow10m,
+        threshold: inboundReplayGuardInfraPressureThreshold
+      }
     },
     integrationApi: {
       sendAttemptAccepted: readCounter(integrationApiCounters, "outbound.send_attempt_accepted"),
@@ -494,9 +582,15 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       idempotencyKeyMissingBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_required_blocked"),
       retryBlockedMissingIdempotencyKey: readCounter(integrationApiCounters, "outbound.retry_idempotency_key_required_blocked"),
       idempotencyKeyTooWeakBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked"),
+      idempotencyKeyPlaceholderBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_placeholder_blocked"),
       idempotencyKeyTimestampOnlyBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_timestamp_only_blocked"),
       idempotencyKeyPayloadConflictBlocked: readCounter(integrationApiCounters, "outbound.idempotency_key_payload_conflict_blocked"),
-      replayGuardMemoryFallbackUsed: readCounter(integrationApiCounters, "outbound.replay_guard_memory_fallback_used")
+      replayGuardMemoryFallbackUsed: readCounter(integrationApiCounters, "outbound.replay_guard_memory_fallback_used"),
+      replayGuardReservationConflict: integrationReplayGuardReservationConflict,
+      replayGuardReservationConflictOutcomeReplayed: integrationReplayGuardReservationConflictOutcomeReplayed,
+      replayGuardReservationConflictOutcomeProcessing: integrationReplayGuardReservationConflictOutcomeProcessing,
+      replayGuardReservationObserved: integrationReplayGuardReservationObserved,
+      replayGuardReservationConflictRate: integrationReplayGuardReservationConflictRate
     }
   };
 
@@ -506,6 +600,17 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.outbound.retryBlockedUnknownTransportNoIdempotencyKey > 0) {
     recommendations.push("Se bloquearon reintentos por errores de transporte ambiguos sin Idempotency-Key: instrumentar claves idempotentes en clientes para cubrir cortes de red/timeouts intermedios.");
+  }
+  if (summary.outbound.providerConflictBlocked > 0) {
+    if (summary.outbound.providerConflictBlockedCloud > 0) {
+      recommendations.push("Cloud API devolvió conflictos outbound (409/códigos de colisión): verificar reuse de Idempotency-Key por envío lógico y evitar retries paralelos del mismo mensaje.");
+    }
+    if (summary.outbound.providerConflictBlockedWbot > 0) {
+      recommendations.push("wbot reportó conflictos outbound con riesgo de duplicado: serializar envíos por destinatario/ticket y aplicar backoff con jitter para evitar carreras de reintento.");
+    }
+    if (!summary.outbound.providerConflictBlockedCloud && !summary.outbound.providerConflictBlockedWbot) {
+      recommendations.push("El proveedor devolvió conflictos outbound (409/códigos de colisión): revisar reuso de Idempotency-Key y dedupe de cliente para evitar duplicados lógicos.");
+    }
   }
   if (summary.outbound.missingIdempotencyKey > 0) {
     recommendations.push("Hay envíos outbound sin Idempotency-Key: instrumentar clientes para reducir riesgo de duplicados en retries/timeouts.");
@@ -518,11 +623,23 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.outbound.missingIdempotencyKeyBlocked > 0) {
     recommendations.push("Se bloquearon envíos por falta de Idempotency-Key (modo estricto): actualizar clientes para enviar clave idempotente por request.");
   }
+  if (summary.outbound.idempotencyKeyInvalidCharsBlocked > 0) {
+    recommendations.push("Se bloquearon envíos por Idempotency-Key con caracteres inválidos: aplicar allowlist [a-zA-Z0-9:_-.] en cliente antes de enviar.");
+  }
+  if (summary.outbound.idempotencyKeyTooLongBlocked > 0) {
+    recommendations.push("Se bloquearon envíos por Idempotency-Key demasiado largo: limitar la clave a 120 caracteres y evitar concatenaciones no acotadas.");
+  }
+  if (summary.outbound.idempotencyKeyTooShortBlocked > 0) {
+    recommendations.push("Se bloquearon envíos por Idempotency-Key demasiado corto: usar UUID/ULID o longitud mínima configurada para evitar colisiones.");
+  }
   if (summary.outbound.idempotencyKeyTooWeakBlocked > 0) {
     recommendations.push("Se bloquearon envíos por Idempotency-Key débil: usar claves con entropía real (UUID/ULID) y al menos 2 caracteres distintos.");
   }
   if (summary.outbound.idempotencyKeyTimestampOnlyBlocked > 0) {
     recommendations.push("Se bloquearon envíos por Idempotency-Key timestamp-only: evitar timestamps crudos y usar UUID/ULID para reducir colisiones y reintentos duplicados.");
+  }
+  if (summary.outbound.idempotencyKeyPayloadConflictBlocked > 0) {
+    recommendations.push("Se detectó reuso de Idempotency-Key con payload distinto en outbound directo: generar una clave única por envío lógico y no reciclarla entre contenidos diferentes.");
   }
   if (summary.integrationApi.idempotencyKeyInvalidFormatBlocked > 0 || summary.integrationApi.idempotencyKeyInvalidCharsBlocked > 0) {
     recommendations.push("La Integration API rechazó Idempotency-Key por formato inválido: validar allowlist [a-zA-Z0-9:_-.], longitud y normalización en el cliente antes de enviar.");
@@ -548,6 +665,12 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.integrationApi.replayGuardMemoryFallbackUsed > 0) {
     recommendations.push("Integration API está usando fallback en memoria del replay guard outbound: revisar disponibilidad DB/migraciones de ai_integration_outbound_replay_guard para recuperar persistencia cross-restart.");
   }
+  if (summary.integrationApi.replayGuardReservationConflict > 0) {
+    recommendations.push("Se detectaron conflictos de reserva en replay guard outbound (carreras por misma Idempotency-Key): aplicar single-flight por clave idempotente y agregar jitter corto en retries para evitar stampede de workers.");
+    if (summary.integrationApi.replayGuardReservationConflictOutcomeProcessing > summary.integrationApi.replayGuardReservationConflictOutcomeReplayed) {
+      recommendations.push("En conflictos de reserva predomina outcome=processing (in-flight): serializar más fuerte por Idempotency-Key y ensanchar jitter/backoff para reducir contención concurrente.");
+    }
+  }
   if (summary.outbound.duplicateBlockedByMode.template > 0) {
     recommendations.push("Hay duplicados outbound bloqueados en templates: revisar reintentos del flujo de primer contacto/campañas y propagar Idempotency-Key por envío.");
   }
@@ -559,6 +682,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.inbound.signatureInvalidBlocked > 0) {
     recommendations.push("Revisar origen/IP de firmas inválidas y aplicar allowlist en reverse proxy/WAF.");
+  }
+  if (summary.inbound.spoofingPressure10m?.active) {
+    recommendations.push("Presión de spoofing/replay activa en 10m: endurecer allowlist IP + rate-limit por IP/firma inválida y revisar correlación con intentos de replay.");
   }
   if (summary.inbound.signatureInvalidRateLimited > 0) {
     recommendations.push("Se activó rate-limit por firmas inválidas: bloquear IPs ofensivas en edge (WAF/proxy) y revisar intentos de spoofing.");
@@ -572,11 +698,29 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.inbound.invalidContentTypeBlocked > 0) {
     recommendations.push("Se bloquearon webhooks con Content-Type no JSON: corregir cliente/proxy para enviar application/json y evitar rechazos 415.");
   }
+  if (summary.inbound.forwardedHeaderOversizeBlocked > 0) {
+    recommendations.push("Se bloquearon webhooks con x-forwarded-for sobredimensionado: limitar tamaño del header en edge/proxy para reducir superficie de spoofing y presión de parsing.");
+  }
+  if (summary.inbound.timestampOutsideAllowedSkewBlocked > 0) {
+    recommendations.push(`Se bloquearon webhooks por timestamp fuera de ventana (${summary.inbound.timestampOutsideAllowedSkewBlocked}): revisar sincronización NTP/reloj en productores y verificar reintentos tardíos.`);
+  }
+  if (summary.inbound.timestampTooOldBlocked > 0) {
+    recommendations.push("Se detectaron webhooks demasiado viejos: revisar colas/reintentos con alta latencia y acotar expiración de entregas aguas arriba.");
+  }
+  if (summary.inbound.timestampFutureSkewBlocked > 0) {
+    recommendations.push("Se detectaron webhooks con timestamp en el futuro: validar drift de reloj/NTP en origen o manipulación de payload.");
+  }
   if (summary.inbound.payloadReplayBlocked > 0 || summary.inbound.replayMessageBlocked > 0) {
     recommendations.push("Investigar origen de replay (reintentos de proveedor o duplicados de integración).");
   }
+  if (summary.inbound.payloadReplayKeyCollisionOrRepeat > 0) {
+    recommendations.push("Se detectaron replays bloqueados por clave estable de payload (`payload_replay_key_collision_or_repeat`): revisar productores que reenvían el mismo body y confirmar estrategia de idempotencia/retry upstream.");
+  }
   if (summary.inbound.payloadReplayGuardInfraErrors > 0) {
-    recommendations.push("Se activó fallback en memoria del guard de replay de payload: revisar disponibilidad DB/migraciones para recuperar persistencia.");
+    recommendations.push("Se detectaron errores de infraestructura en el guard de replay de payload: revisar disponibilidad DB/migraciones para recuperar persistencia.");
+  }
+  if (summary.inbound.replayGuardInfraPressure10m?.active) {
+    recommendations.push("Presión de errores/fallback del replay guard en 10m: priorizar salud de DB (latencia, locks, conectividad, migraciones) para separar degradación operativa de intentos de replay legítimos/ataque.");
   }
   if (summary.inbound.payloadReplayGuardMemoryFallbackUsed > 0) {
     recommendations.push("El guard de replay inbound está operando en fallback de memoria: restaurar persistencia (DB) para evitar huecos de replay entre reinicios/réplicas.");
@@ -599,8 +743,17 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.outbound.dedupeEmergencyTrimmed > 0) {
     recommendations.push("El dedupe de emergencia recortó entries por límite de memoria: subir waOutboundDedupeMemoryMaxEntries o recuperar guard persistente para no perder cobertura.");
   }
+  if (summary.outbound.managedReplyDedupeMemoryReserved > 0) {
+    recommendations.push("Respuestas gestionadas están usando dedupe en memoria (fallback): recuperar guard persistente ai_outbound_dedupe para mantener cobertura anti-duplicados entre reinicios/réplicas.");
+  }
+  if (summary.outbound.managedReplyDedupeMemoryDuplicateBlocked > 0) {
+    recommendations.push("Se bloquearon duplicados de respuestas gestionadas en dedupe de memoria: priorizar restaurar persistencia de ai_outbound_dedupe para evitar ventanas anti-duplicados fuera del proceso.");
+  }
   if (summary.outbound.dedupeReleaseFailedAfterNonRetryableProviderError > 0) {
     recommendations.push("Falló la liberación de dedupe tras errores no reintentables del proveedor: revisar permisos/disponibilidad DB para evitar bloqueos falsos en próximos envíos.");
+  }
+  if (summary.outbound.dedupeReleaseNotFoundAfterNonRetryableProviderErrorMemoryMode > 0) {
+    recommendations.push("En modo dedupe de emergencia (memoria), hubo liberaciones no encontradas tras error no reintentable: revisar TTL/trim para minimizar falsos bloqueos y recuperar guard persistente cuanto antes.");
   }
   if (summary.outbound.dedupeFailClosedBlocked > 0) {
     recommendations.push("Hay envíos bloqueados por fail-closed de dedupe: revisar conectividad DB antes de reintentar outbound.");
@@ -612,10 +765,13 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   };
 };
 
-const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi?: any) => {
+const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi?: any, inboundAlertSnapshot?: any) => {
   const inboundCounters = inbound?.counters || {};
   const outboundCounters = outbound?.counters || {};
   const integrationApiCounters = integrationApi?.counters || {};
+  const inboundPendingAlerts = Array.isArray(inboundAlertSnapshot?.pendingAlerts)
+    ? inboundAlertSnapshot.pendingAlerts
+    : [];
 
   const idempotencyKeyUsed = readCounter(outboundCounters, "outbound.idempotency_key_used");
   const missingIdempotencyKey = readCounter(outboundCounters, "outbound.idempotency_key_missing");
@@ -658,6 +814,22 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const inboundPayloadReplayKeyCollisionOrRepeat = readCounter(inboundCounters, "inbound.payload_replay_key_collision_or_repeat");
+  if (inboundPayloadReplayKeyCollisionOrRepeat >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_payload_replay_key_collision_or_repeat_spike",
+      threshold: 2,
+      inWindow: inboundPayloadReplayKeyCollisionOrRepeat,
+      remaining: 0,
+      severity: inboundPayloadReplayKeyCollisionOrRepeat >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "inbound.payload_replay_key_collision_or_repeat",
+        replayBlocked
+      }
+    });
+  }
+
   const inboundSignatureInvalidBlocked = readCounter(inboundCounters, "inbound.signature_invalid_blocked");
   if (inboundSignatureInvalidBlocked >= 5) {
     runtimeInboundAlerts.push({
@@ -670,18 +842,31 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
-  const spoofingPressureObserved = inboundSignatureInvalidBlocked + replayBlocked;
-  if (inboundSignatureInvalidBlocked >= 5 && replayBlocked >= 3 && spoofingPressureObserved >= 10) {
+  const signatureInvalidWindowHits = inboundPendingAlerts
+    .filter((alert: any) => String(alert?.signal || "") === "inbound_signature_invalid_blocked")
+    .reduce((acc: number, alert: any) => acc + Math.max(0, Number(alert?.inWindow) || 0), 0);
+  const replayBlockedWindowHits = inboundPendingAlerts
+    .filter((alert: any) => {
+      const signal = String(alert?.signal || "");
+      return signal === "inbound_payload_replay_blocked" || signal === "inbound_replay_blocked";
+    })
+    .reduce((acc: number, alert: any) => acc + Math.max(0, Number(alert?.inWindow) || 0), 0);
+
+  const spoofingPressureObserved = signatureInvalidWindowHits + replayBlockedWindowHits;
+  if (signatureInvalidWindowHits >= 4 && replayBlockedWindowHits >= 3 && spoofingPressureObserved >= 10) {
     runtimeInboundAlerts.push({
       signal: "inbound_signature_replay_correlation_pressure_high",
       threshold: 10,
       inWindow: spoofingPressureObserved,
       remaining: 0,
-      severity: spoofingPressureObserved >= 25 ? "critical" : "warn",
+      severity: spoofingPressureObserved >= 20 ? "critical" : "warn",
       source: "derived_metrics",
       details: {
-        signatureInvalidBlocked: inboundSignatureInvalidBlocked,
-        replayBlocked
+        windowMs: 10 * 60 * 1000,
+        signatureInvalidBlockedInWindow: signatureInvalidWindowHits,
+        replayBlockedInWindow: replayBlockedWindowHits,
+        signatureInvalidBlockedTotal: inboundSignatureInvalidBlocked,
+        replayBlockedTotal: replayBlocked
       }
     });
   }
@@ -758,6 +943,32 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const inboundReplayGuardInfraErrorsInWindow = inboundPendingAlerts
+    .filter((alert: any) => String(alert?.signal || "") === "inbound_payload_replay_guard_infra_error")
+    .reduce((acc: number, alert: any) => acc + Math.max(0, Number(alert?.inWindow) || 0), 0);
+  const inboundReplayGuardMemoryFallbackInWindow = inboundPendingAlerts
+    .filter((alert: any) => String(alert?.signal || "") === "inbound_payload_replay_guard_memory_fallback_used")
+    .reduce((acc: number, alert: any) => acc + Math.max(0, Number(alert?.inWindow) || 0), 0);
+  const inboundReplayGuardInfraPressureInWindow = inboundReplayGuardInfraErrorsInWindow + inboundReplayGuardMemoryFallbackInWindow;
+
+  if (inboundReplayGuardInfraPressureInWindow >= 3) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_payload_replay_guard_infra_error_pressure_high",
+      threshold: 3,
+      inWindow: inboundReplayGuardInfraPressureInWindow,
+      remaining: 0,
+      severity: inboundReplayGuardInfraPressureInWindow >= 8 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        windowMs: 10 * 60 * 1000,
+        infraErrorInWindow: inboundReplayGuardInfraErrorsInWindow,
+        memoryFallbackInWindow: inboundReplayGuardMemoryFallbackInWindow,
+        infraErrorTotal: inboundReplayGuardInfraErrors,
+        memoryFallbackTotal: readCounter(inboundCounters, "inbound.payload_replay_guard_memory_fallback_used")
+      }
+    });
+  }
+
   const inboundReplayGuardMemoryFallbackUsed = readCounter(inboundCounters, "inbound.payload_replay_guard_memory_fallback_used");
   if (inboundReplayGuardMemoryFallbackUsed >= 1) {
     runtimeInboundAlerts.push({
@@ -794,6 +1005,39 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const inboundForwardedHeaderOversizeBlocked = readCounter(inboundCounters, "inbound.forwarded_header_oversize_blocked");
+  if (inboundForwardedHeaderOversizeBlocked >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_forwarded_header_oversize_blocked_spike",
+      threshold: 2,
+      inWindow: inboundForwardedHeaderOversizeBlocked,
+      remaining: 0,
+      severity: inboundForwardedHeaderOversizeBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const inboundTimestampOutsideAllowedSkewBlocked = readCounter(inboundCounters, "inbound.timestamp_outside_allowed_skew_blocked");
+  if (inboundTimestampOutsideAllowedSkewBlocked >= 3) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_timestamp_outside_allowed_skew_spike",
+      threshold: 3,
+      inWindow: inboundTimestampOutsideAllowedSkewBlocked,
+      remaining: 0,
+      severity: inboundTimestampOutsideAllowedSkewBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        tooOld: readCounter(inboundCounters, "inbound.timestamp_too_old_blocked"),
+        futureSkew: readCounter(inboundCounters, "inbound.timestamp_future_skew_blocked")
+      }
+    });
+  }
+
+  const outboundRetryBlockedMissingIdempotencyManagedReplies = readCounter(inboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
+    + readCounter(inboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key");
+
+  const outboundRetryBlockedUnknownTransportNoIdempotencyManagedReplies = readCounter(inboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key");
+
   const outboundTimeoutNotRetried = readCounter(outboundCounters, "outbound.cloud_timeout_not_retried");
   if (outboundTimeoutNotRetried >= 3) {
     runtimeOutboundAlerts.push({
@@ -807,12 +1051,15 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
         cloudRequestTimeout: readCounter(outboundCounters, "outbound.cloud_request_timeout"),
         retryBlockedMissingIdempotencyKey: readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
           + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key")
+          + outboundRetryBlockedMissingIdempotencyManagedReplies,
+        retryBlockedMissingIdempotencyKeyManagedReplies: outboundRetryBlockedMissingIdempotencyManagedReplies
       }
     });
   }
 
   const outboundRetryBlockedMissingIdempotency = readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
-    + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key");
+    + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key")
+    + outboundRetryBlockedMissingIdempotencyManagedReplies;
   if (outboundRetryBlockedMissingIdempotency >= 3) {
     runtimeOutboundAlerts.push({
       signal: "outbound_retry_blocked_missing_idempotency_spike",
@@ -820,11 +1067,17 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: outboundRetryBlockedMissingIdempotency,
       remaining: 0,
       severity: outboundRetryBlockedMissingIdempotency >= 10 ? "critical" : "warn",
-      source: "derived_metrics"
+      source: "derived_metrics",
+      details: {
+        direct: readCounter(outboundCounters, "outbound.cloud_retry_blocked_missing_idempotency_key")
+          + readCounter(outboundCounters, "outbound.wbot_retry_blocked_missing_idempotency_key"),
+        managedReplies: outboundRetryBlockedMissingIdempotencyManagedReplies
+      }
     });
   }
 
-  const outboundRetryBlockedUnknownTransportNoIdempotency = readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key");
+  const outboundRetryBlockedUnknownTransportNoIdempotency = readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key")
+    + outboundRetryBlockedUnknownTransportNoIdempotencyManagedReplies;
   if (outboundRetryBlockedUnknownTransportNoIdempotency >= 2) {
     runtimeOutboundAlerts.push({
       signal: "outbound_retry_blocked_unknown_transport_without_idempotency_spike",
@@ -832,6 +1085,51 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: outboundRetryBlockedUnknownTransportNoIdempotency,
       remaining: 0,
       severity: outboundRetryBlockedUnknownTransportNoIdempotency >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        direct: readCounter(outboundCounters, "outbound.cloud_retry_blocked_unknown_transport_without_idempotency_key"),
+        managedReplies: outboundRetryBlockedUnknownTransportNoIdempotencyManagedReplies
+      }
+    });
+  }
+
+  const outboundProviderConflictBlocked = readCounter(outboundCounters, "outbound.provider_conflict_blocked");
+  if (outboundProviderConflictBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_provider_conflict_blocked_spike",
+      threshold: 2,
+      inWindow: outboundProviderConflictBlocked,
+      remaining: 0,
+      severity: outboundProviderConflictBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.provider_conflict_blocked",
+        cloud: readCounter(outboundCounters, "outbound.provider_conflict_blocked.cloud"),
+        wbot: readCounter(outboundCounters, "outbound.provider_conflict_blocked.wbot")
+      }
+    });
+  }
+
+  const outboundIdempotencyKeyInvalidCharsBlocked = readCounter(outboundCounters, "outbound.idempotency_key_invalid_chars_blocked");
+  if (outboundIdempotencyKeyInvalidCharsBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_idempotency_key_invalid_chars_spike",
+      threshold: 2,
+      inWindow: outboundIdempotencyKeyInvalidCharsBlocked,
+      remaining: 0,
+      severity: outboundIdempotencyKeyInvalidCharsBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  const outboundIdempotencyKeyTooLongBlocked = readCounter(outboundCounters, "outbound.idempotency_key_too_long_blocked");
+  if (outboundIdempotencyKeyTooLongBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_idempotency_key_too_long_spike",
+      threshold: 2,
+      inWindow: outboundIdempotencyKeyTooLongBlocked,
+      remaining: 0,
+      severity: outboundIdempotencyKeyTooLongBlocked >= 6 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
@@ -860,7 +1158,38 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
-  const integrationWeakIdempotencyBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked");
+  const outboundIdempotencyPayloadConflictBlocked = readCounter(outboundCounters, "outbound.idempotency_key_payload_conflict_blocked");
+  if (outboundIdempotencyPayloadConflictBlocked >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_idempotency_key_payload_conflict_blocked",
+      threshold: 1,
+      inWindow: outboundIdempotencyPayloadConflictBlocked,
+      remaining: 0,
+      severity: outboundIdempotencyPayloadConflictBlocked >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_payload_conflict_blocked"
+      }
+    });
+  }
+
+  const integrationIdempotencyPlaceholderBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_placeholder_blocked");
+  if (integrationIdempotencyPlaceholderBlocked >= 1) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_placeholder_blocked_spike",
+      threshold: 1,
+      inWindow: integrationIdempotencyPlaceholderBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyPlaceholderBlocked >= 3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_placeholder_blocked"
+      }
+    });
+  }
+
+  const integrationWeakIdempotencyBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked")
+    + integrationIdempotencyPlaceholderBlocked;
   if (integrationWeakIdempotencyBlocked >= 3) {
     runtimeOutboundAlerts.push({
       signal: "integration_api_idempotency_key_too_weak_spike",
@@ -870,7 +1199,12 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       severity: integrationWeakIdempotencyBlocked >= 10 ? "critical" : "warn",
       source: "derived_metrics",
       details: {
-        metric: "outbound.idempotency_key_too_weak_blocked"
+        metrics: [
+          "outbound.idempotency_key_too_weak_blocked",
+          "outbound.idempotency_key_placeholder_blocked"
+        ],
+        tooWeak: readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked"),
+        placeholder: integrationIdempotencyPlaceholderBlocked
       }
     });
   }
@@ -907,6 +1241,51 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
           "outbound.idempotency_key_invalid_chars_blocked",
           "outbound.idempotency_key_too_long_blocked"
         ]
+      }
+    });
+  }
+
+  const integrationIdempotencyInvalidCharsBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_invalid_chars_blocked");
+  if (integrationIdempotencyInvalidCharsBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_invalid_chars_spike",
+      threshold: 2,
+      inWindow: integrationIdempotencyInvalidCharsBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyInvalidCharsBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_invalid_chars_blocked"
+      }
+    });
+  }
+
+  const integrationIdempotencyTooLongBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_long_blocked");
+  if (integrationIdempotencyTooLongBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_too_long_spike",
+      threshold: 2,
+      inWindow: integrationIdempotencyTooLongBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyTooLongBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_too_long_blocked"
+      }
+    });
+  }
+
+  const integrationIdempotencyTooShortBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_short_blocked");
+  if (integrationIdempotencyTooShortBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_idempotency_key_too_short_spike",
+      threshold: 2,
+      inWindow: integrationIdempotencyTooShortBlocked,
+      remaining: 0,
+      severity: integrationIdempotencyTooShortBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.idempotency_key_too_short_blocked"
       }
     });
   }
@@ -967,6 +1346,61 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       source: "derived_metrics",
       details: {
         metric: "outbound.send_attempt_failed"
+      }
+    });
+  }
+
+  const integrationSendAttemptAccepted = readCounter(integrationApiCounters, "outbound.send_attempt_accepted");
+  const integrationSendAttemptObserved = integrationSendAttemptAccepted + integrationSendAttemptFailed;
+  const integrationSendAttemptFailureRate = integrationSendAttemptObserved > 0
+    ? Number((integrationSendAttemptFailed / integrationSendAttemptObserved).toFixed(4))
+    : 0;
+
+  const integrationReplayGuardReservationConflict = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict");
+  const integrationReplayGuardReservationConflictOutcomeReplayed = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict_outcome.replayed");
+  const integrationReplayGuardReservationConflictOutcomeProcessing = readCounter(integrationApiCounters, "outbound.replay_guard_reservation_conflict_outcome.processing");
+  const integrationReplayGuardReservationObserved = integrationReplayGuardReservationConflict + integrationSendAttemptAccepted;
+  const integrationReplayGuardReservationConflictRate = integrationReplayGuardReservationObserved > 0
+    ? Number((integrationReplayGuardReservationConflict / integrationReplayGuardReservationObserved).toFixed(4))
+    : 0;
+
+  if (integrationReplayGuardReservationObserved >= 20 && integrationReplayGuardReservationConflictRate >= 0.15) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_replay_guard_reservation_conflict_rate_high",
+      threshold: 0.15,
+      inWindow: integrationReplayGuardReservationConflictRate,
+      remaining: 0,
+      severity: integrationReplayGuardReservationConflictRate >= 0.3 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        observed: integrationReplayGuardReservationObserved,
+        conflicts: integrationReplayGuardReservationConflict,
+        accepted: integrationSendAttemptAccepted,
+        conflictRate: integrationReplayGuardReservationConflictRate,
+        outcomeReplayed: integrationReplayGuardReservationConflictOutcomeReplayed,
+        outcomeProcessing: integrationReplayGuardReservationConflictOutcomeProcessing,
+        metric: "outbound.replay_guard_reservation_conflict",
+        outcomeMetrics: [
+          "outbound.replay_guard_reservation_conflict_outcome.replayed",
+          "outbound.replay_guard_reservation_conflict_outcome.processing"
+        ]
+      }
+    });
+  }
+
+  if (integrationSendAttemptObserved >= 20 && integrationSendAttemptFailureRate >= 0.1) {
+    runtimeOutboundAlerts.push({
+      signal: "integration_api_send_failure_rate_high",
+      threshold: 0.1,
+      inWindow: integrationSendAttemptFailureRate,
+      remaining: 0,
+      severity: integrationSendAttemptFailureRate >= 0.2 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        observed: integrationSendAttemptObserved,
+        failed: integrationSendAttemptFailed,
+        accepted: integrationSendAttemptAccepted,
+        failureRate: integrationSendAttemptFailureRate
       }
     });
   }
@@ -1077,6 +1511,36 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const outboundManagedReplyDedupeMemoryReserved = readCounter(inboundCounters, "outbound.dedupe_memory_reserved");
+  if (outboundManagedReplyDedupeMemoryReserved >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_managed_reply_dedupe_memory_reserved_spike",
+      threshold: 3,
+      inWindow: outboundManagedReplyDedupeMemoryReserved,
+      remaining: 0,
+      severity: outboundManagedReplyDedupeMemoryReserved >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.dedupe_memory_reserved"
+      }
+    });
+  }
+
+  const outboundManagedReplyDedupeMemoryBlocked = readCounter(inboundCounters, "outbound.dedupe_memory_blocked");
+  if (outboundManagedReplyDedupeMemoryBlocked >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_managed_reply_dedupe_memory_blocked_spike",
+      threshold: 2,
+      inWindow: outboundManagedReplyDedupeMemoryBlocked,
+      remaining: 0,
+      severity: outboundManagedReplyDedupeMemoryBlocked >= 6 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.dedupe_memory_blocked"
+      }
+    });
+  }
+
   const outboundDedupeEmergencyDuplicateBlocked = readCounter(outboundCounters, "outbound.dedupe_emergency_duplicate_blocked");
   if (outboundDedupeEmergencyDuplicateBlocked >= 2) {
     runtimeOutboundAlerts.push({
@@ -1113,6 +1577,22 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const outboundDedupeReleaseNotFoundMemoryMode = readCounter(outboundCounters, "outbound.dedupe_release_not_found_after_non_retryable_provider_error_memory_mode")
+    + readCounter(outboundCounters, "outbound.dedupe_release_not_found_after_non_retryable_provider_error_emergency_mode");
+  if (outboundDedupeReleaseNotFoundMemoryMode >= 2) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_dedupe_release_not_found_memory_mode_spike",
+      threshold: 2,
+      inWindow: outboundDedupeReleaseNotFoundMemoryMode,
+      remaining: 0,
+      severity: outboundDedupeReleaseNotFoundMemoryMode >= 5 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.dedupe_release_not_found_after_non_retryable_provider_error_memory_mode"
+      }
+    });
+  }
+
   return { runtimeInboundAlerts, runtimeOutboundAlerts };
 };
 
@@ -1145,7 +1625,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
   const signatureHardening = resolveWebhookSignatureHardeningState();
   const outboundRetryHardening = resolveOutboundRetryHardeningState();
   const replayFailClosed = resolveWebhookPayloadReplayFailClosed();
-  const derivedAlerts = buildDerivedHardeningAlerts(inbound, outbound, integrationApi);
+  const derivedAlerts = buildDerivedHardeningAlerts(inbound, outbound, integrationApi, inboundAlerts);
   const runtimeInboundAlerts = [
     ...(signatureHardening.insecureUnsignedWebhookAllowed
       ? [{
@@ -1220,7 +1700,8 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
         severity: outboundRetryHardening.timeoutRetryRequiresIdempotencyKey ? "info" : "warn",
         source: "runtime_settings",
         context: {
-          timeoutRetryRequiresIdempotencyKey: outboundRetryHardening.timeoutRetryRequiresIdempotencyKey
+          timeoutRetryRequiresIdempotencyKey: outboundRetryHardening.timeoutRetryRequiresIdempotencyKey,
+          timeoutRetryAllowsWithoutIdempotency: outboundRetryHardening.timeoutRetryAllowsWithoutIdempotency
         }
       }]
       : []),
@@ -1244,7 +1725,7 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
   };
 
   const health = buildHardeningHealth(inboundAlertsWithRuntime, outboundAlertsWithRuntime, integrationApiAlerts);
-  const summary = buildHardeningSummary(inbound, outbound, integrationApi, health);
+  const summary = buildHardeningSummary(inbound, outbound, integrationApi, health, inboundAlerts);
   const failOnAlert = ["1", "true", "yes", "on"].includes(String(req.query?.failOnAlert || "").toLowerCase());
 
   return res.status(health.status !== "ok" && failOnAlert ? 503 : 200).json({
@@ -1292,6 +1773,16 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
       entryCount: envelopeValidation.entryCount ?? null
     });
     return res.status(400).json({ error: "Invalid webhook envelope", reason: envelopeValidation.reason });
+  }
+
+  const forwardedForHeaderRaw = String(req.get("x-forwarded-for") || "");
+  const forwardedForHeaderMaxLength = resolveWebhookForwardedForHeaderMaxLength();
+  if (forwardedForHeaderRaw.length > forwardedForHeaderMaxLength) {
+    recordInboundForwardedHeaderOversizeBlocked({
+      observedLength: forwardedForHeaderRaw.length,
+      maxLength: forwardedForHeaderMaxLength
+    });
+    return res.status(400).json({ error: "Forwarded header too long" });
   }
 
   const signatureHeaderRaw = String(req.get("x-hub-signature-256") || "");
@@ -1414,9 +1905,12 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
 
   try {
     if (!(await reserveWebhookPayloadReplay(req))) {
-      recordInboundPayloadReplayBlocked({
-        hasSignatureHeader: Boolean(String(req.get("x-hub-signature-256") || "").trim())
-      });
+      const replayContext = {
+        hasSignatureHeader: Boolean(String(req.get("x-hub-signature-256") || "").trim()),
+        replayKeyStrategy: "object_entrycount_sha256_body"
+      };
+      recordInboundPayloadReplayBlocked(replayContext);
+      recordInboundPayloadReplayKeyCollisionOrRepeat(replayContext);
       return res.status(202).json({ ok: true, ignored: true, reason: "payload_replay_blocked" });
     }
   } catch (replayGuardError: any) {
