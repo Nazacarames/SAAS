@@ -9,14 +9,15 @@ const isPublicPath = (path: string) =>
   path.startsWith("/api/integrations") ||
   path.startsWith("/api/ai/meta-leads/webhook") ||
   path.startsWith("/api/meta") ||
-  path.startsWith("/api/webhooks");
+  path.startsWith("/api/webhooks") ||
+  path.startsWith("/health");
 
 export const requestContext = (req: Request, res: Response, next: NextFunction) => {
   const requestId = String(req.header("x-request-id") || crypto.randomUUID());
   (req as any).requestId = requestId;
   res.setHeader("x-request-id", requestId);
 
-  if (!isPublicPath(req.path)) return next();
+  if (isPublicPath(req.path)) return next();
 
   const now = Date.now();
   const key = `${req.ip}:${req.path}`;

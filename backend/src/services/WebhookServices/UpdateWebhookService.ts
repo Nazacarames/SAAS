@@ -3,6 +3,7 @@ import AppError from "../../errors/AppError";
 
 interface UpdateWebhookRequest {
     webhookId: number;
+    companyId: number;
     name?: string;
     url?: string;
     event?: string;
@@ -11,7 +12,9 @@ interface UpdateWebhookRequest {
 }
 
 const UpdateWebhookService = async (data: UpdateWebhookRequest) => {
-    const webhook = await Webhook.findByPk(data.webhookId);
+    const webhook = await Webhook.findOne({
+        where: { id: data.webhookId, companyId: data.companyId }
+    });
 
     if (!webhook) {
         throw new AppError("Webhook no encontrado", 404);

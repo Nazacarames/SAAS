@@ -3,10 +3,13 @@ import AppError from "../../errors/AppError";
 
 interface DeleteWebhookRequest {
     webhookId: number;
+    companyId: number;
 }
 
-const DeleteWebhookService = async ({ webhookId }: DeleteWebhookRequest) => {
-    const webhook = await Webhook.findByPk(webhookId);
+const DeleteWebhookService = async ({ webhookId, companyId }: DeleteWebhookRequest) => {
+    const webhook = await Webhook.findOne({
+        where: { id: webhookId, companyId }
+    });
 
     if (!webhook) {
         throw new AppError("Webhook no encontrado", 404);

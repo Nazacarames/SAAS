@@ -35,8 +35,7 @@ class Contact extends Model {
   name: string;
 
   @AllowNull(false)
-  @Unique
-  @Column
+  @Column // Note: add composite unique index (number, companyId) via migration
   number: string;
 
   @Default("")

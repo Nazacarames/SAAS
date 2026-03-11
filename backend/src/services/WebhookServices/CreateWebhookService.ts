@@ -6,6 +6,7 @@ interface CreateWebhookRequest {
     event: string;
     active?: boolean;
     description?: string;
+    companyId: number;
 }
 
 const CreateWebhookService = async (data: CreateWebhookRequest) => {
@@ -14,7 +15,8 @@ const CreateWebhookService = async (data: CreateWebhookRequest) => {
         url: data.url,
         event: data.event,
         active: data.active !== undefined ? data.active : true,
-        description: data.description || ""
+        description: data.description || "",
+        companyId: data.companyId
     } as any);
     return webhook;
 };

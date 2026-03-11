@@ -1,15 +1,16 @@
 import crypto from "crypto";
 import { Router } from "express";
 import { QueryTypes } from "sequelize";
-import sequelize from "../../database";
-import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayKeyCollisionOrRepeat, recordInboundPayloadReplayKeyReuseByIpDetected, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardMemoryFallbackUsed, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, recordInboundForwardedHeaderOversizeBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "./ProcessCloudWebhookService";
-import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "./SendMessageService_patched";
-import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrationRoutes";
-import { getRuntimeSettings } from "./RuntimeSettingsService";
+import sequelize from "../database";
+import { processCloudWebhookPayload, recordInboundSignatureInvalidBlocked, recordInboundSignatureMissingBlocked, recordInboundSignatureMalformedBlocked, recordInboundSignatureInvalidRateLimited, recordInboundPayloadReplayBlocked, recordInboundPayloadReplayKeyCollisionOrRepeat, recordInboundPayloadReplayKeyReuseByIpDetected, recordInboundPayloadReplayCacheTrimmed, recordInboundPayloadReplayGuardInfraError, recordInboundPayloadReplayGuardMemoryFallbackUsed, recordInboundPayloadReplayGuardFailClosedBlocked, recordInboundPayloadOversizeBlocked, recordInboundInvalidEnvelopeBlocked, recordInboundInvalidContentTypeBlocked, recordInboundForwardedHeaderOversizeBlocked, recordInboundTimestampOutsideAllowedSkewBlocked, recordInboundEventNonceReplayBlocked, getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "../services/WhatsAppCloudServices/ProcessCloudWebhookService";
+import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "../services/MessageServices/SendMessageService";
+import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrations/integrationRoutes";
+import { getRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
 
 const whatsappCloudRoutes = Router();
 
 const webhookPayloadReplayCache = new Map<string, number>();
+const webhookEventNonceCache = new Map<string, number>();
 const webhookInvalidSignatureIpBuckets = new Map<string, number[]>();
 const webhookPayloadReplayKeyReuseByIpBuckets = new Map<string, number[]>();
 
@@ -36,13 +37,13 @@ const buildWebhookPayloadReplayKey = (req: any): string => {
 };
 
 const resolveWebhookPayloadReplayTtlMs = (): number => {
-  const n = Number(getRuntimeSettings().waWebhookPayloadReplayTtlSeconds || 120);
+  const n = Number((getRuntimeSettings() as any).waWebhookPayloadReplayTtlSeconds || 120);
   if (!Number.isFinite(n)) return 120000;
   return Math.max(10000, Math.min(900000, Math.round(n * 1000)));
 };
 
 const resolveWebhookPayloadReplayCacheMaxEntries = (): number => {
-  const n = Number(getRuntimeSettings().waWebhookPayloadReplayCacheMaxEntries || 5000);
+  const n = Number((getRuntimeSettings() as any).waWebhookPayloadReplayCacheMaxEntries || 5000);
   if (!Number.isFinite(n)) return 5000;
   return Math.max(100, Math.min(50000, Math.round(n)));
 };
@@ -73,6 +74,24 @@ const resolveWebhookForwardedForHeaderMaxLength = (): number => {
   const n = Number((getRuntimeSettings() as any).waWebhookForwardedForHeaderMaxLength || 2048);
   if (!Number.isFinite(n)) return 2048;
   return Math.max(256, Math.min(8192, Math.round(n)));
+};
+
+const resolveWebhookReplayWindowMs = (): number => {
+  const n = Number((getRuntimeSettings() as any).waWebhookReplayWindowSeconds || 120);
+  if (!Number.isFinite(n)) return 120000;
+  return Math.max(30000, Math.min(15 * 60 * 1000, Math.round(n * 1000)));
+};
+
+const resolveWebhookFutureTimestampSkewMs = (): number => {
+  const n = Number((getRuntimeSettings() as any).waWebhookFutureSkewSeconds || 120);
+  if (!Number.isFinite(n)) return 120000;
+  return Math.max(5000, Math.min(10 * 60 * 1000, Math.round(n * 1000)));
+};
+
+const resolveWebhookEventNonceCacheMaxEntries = (): number => {
+  const n = Number((getRuntimeSettings() as any).waWebhookEventNonceCacheMaxEntries || 20000);
+  if (!Number.isFinite(n)) return 20000;
+  return Math.max(500, Math.min(200000, Math.round(n)));
 };
 
 const isWebhookJsonContentTypeValid = (req: any): boolean => {
@@ -353,6 +372,112 @@ const classifySignatureHeader = (signatureHeaderRaw: string): { valid: boolean; 
   return { valid: true, reason: "ok", digest };
 };
 
+const parseWebhookTimestampMs = (req: any): { ok: boolean; timestampMs?: number; reason?: string } => {
+  const candidates = [
+    req.get("x-webhook-timestamp"),
+    req.get("x-meta-timestamp"),
+    req.get("x-request-timestamp"),
+    req.get("x-timestamp"),
+    req.body?.timestamp,
+    req.body?.entry?.[0]?.time
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || String(candidate).trim() === "") continue;
+    const raw = String(candidate).trim();
+
+    if (/^\d{10}$/.test(raw)) {
+      const sec = Number(raw);
+      if (Number.isFinite(sec) && sec > 0) return { ok: true, timestampMs: sec * 1000 };
+      return { ok: false, reason: "timestamp_invalid" };
+    }
+
+    if (/^\d{13}$/.test(raw)) {
+      const ms = Number(raw);
+      if (Number.isFinite(ms) && ms > 0) return { ok: true, timestampMs: ms };
+      return { ok: false, reason: "timestamp_invalid" };
+    }
+
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return { ok: true, timestampMs: parsed };
+
+    return { ok: false, reason: "timestamp_invalid" };
+  }
+
+  return { ok: false, reason: "timestamp_missing" };
+};
+
+const validateWebhookTimestampWindow = (req: any): { ok: boolean; reason?: string; ageMs?: number; replayWindowMs: number; futureSkewMs: number } => {
+  const parsed = parseWebhookTimestampMs(req);
+  const replayWindowMs = resolveWebhookReplayWindowMs();
+  const futureSkewMs = resolveWebhookFutureTimestampSkewMs();
+
+  if (!parsed.ok || !parsed.timestampMs) {
+    return { ok: false, reason: parsed.reason || "timestamp_missing", replayWindowMs, futureSkewMs };
+  }
+
+  const now = Date.now();
+  const ageMs = now - parsed.timestampMs;
+
+  if (ageMs > replayWindowMs) {
+    return { ok: false, reason: "timestamp_too_old", ageMs, replayWindowMs, futureSkewMs };
+  }
+
+  if (ageMs < -futureSkewMs) {
+    return { ok: false, reason: "timestamp_future_skew", ageMs, replayWindowMs, futureSkewMs };
+  }
+
+  return { ok: true, ageMs, replayWindowMs, futureSkewMs };
+};
+
+const extractWebhookEventNonce = (req: any): string => {
+  const candidates = [
+    req.get("x-meta-event-id"),
+    req.get("x-webhook-id"),
+    req.get("x-event-id"),
+    req.get("x-request-id"),
+    req.body?.entry?.[0]?.id,
+    req.body?.id
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null) continue;
+    const clean = String(candidate).trim().toLowerCase().replace(/[^a-z0-9:_\-.]/g, "").slice(0, 160);
+    if (clean) return clean;
+  }
+
+  return "";
+};
+
+const reserveWebhookEventNonce = (req: any): { accepted: boolean; reason?: string; nonce?: string } => {
+  const nonce = extractWebhookEventNonce(req);
+  if (!nonce) return { accepted: true };
+
+  const now = Date.now();
+  const replayWindowMs = resolveWebhookReplayWindowMs();
+  const maxEntries = resolveWebhookEventNonceCacheMaxEntries();
+
+  for (const [key, expiresAt] of webhookEventNonceCache.entries()) {
+    if (expiresAt <= now) webhookEventNonceCache.delete(key);
+  }
+
+  if (webhookEventNonceCache.size > maxEntries) {
+    let overflow = webhookEventNonceCache.size - maxEntries;
+    for (const key of webhookEventNonceCache.keys()) {
+      webhookEventNonceCache.delete(key);
+      overflow -= 1;
+      if (overflow <= 0) break;
+    }
+  }
+
+  const key = `wa-event:${nonce}`;
+  const expiresAt = webhookEventNonceCache.get(key) || 0;
+  if (expiresAt > now) return { accepted: false, reason: "event_nonce_replay", nonce };
+
+  webhookEventNonceCache.set(key, now + replayWindowMs);
+  return { accepted: true, nonce };
+};
+
 const resolveAllowUnsignedWebhook = (): boolean => {
   const raw = String((getRuntimeSettings() as any).waWebhookAllowUnsigned || "").trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(raw);
@@ -449,6 +574,17 @@ const validateEnvelope = (req: any): { ok: boolean; reason?: string; entryCount?
   return { ok: true, entryCount: payload.entry.length };
 };
 
+const timingSafeTokenEquals = (expectedRaw: unknown, candidateRaw: unknown): boolean => {
+  const expected = String(expectedRaw || "").trim();
+  const candidate = String(candidateRaw || "").trim();
+  if (!expected || !candidate) return false;
+
+  const expectedBuf = Buffer.from(expected, "utf8");
+  const candidateBuf = Buffer.from(candidate, "utf8");
+  if (candidateBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(candidateBuf, expectedBuf);
+};
+
 const hasValidHardeningToken = (req: any): boolean => {
   const expected = String(getRuntimeSettings().waCloudVerifyToken || "").trim();
   if (!expected) return false;
@@ -460,11 +596,7 @@ const hasValidHardeningToken = (req: any): boolean => {
       || ""
   ).trim();
 
-  if (!candidate) return false;
-  const expectedBuf = Buffer.from(expected, "utf8");
-  const candidateBuf = Buffer.from(candidate, "utf8");
-  if (candidateBuf.length !== expectedBuf.length) return false;
-  return crypto.timingSafeEqual(candidateBuf, expectedBuf);
+  return timingSafeTokenEquals(expected, candidate);
 };
 
 const CRITICAL_HARDENING_SIGNALS = new Set([
@@ -627,6 +759,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       invalidContentTypeBlocked: readCounter(inboundCounters, "inbound.invalid_content_type_blocked"),
       forwardedHeaderOversizeBlocked: readCounter(inboundCounters, "inbound.forwarded_header_oversize_blocked"),
       payloadReplayBlocked: readCounter(inboundCounters, "inbound.payload_replay_blocked"),
+      eventNonceReplayBlocked: readCounter(inboundCounters, "inbound.event_nonce_replay_blocked"),
       payloadReplayKeyCollisionOrRepeat: readCounter(inboundCounters, "inbound.payload_replay_key_collision_or_repeat"),
       payloadReplayKeyReuseByIpDetected: readCounter(inboundCounters, "inbound.payload_replay_key_reuse_by_ip_detected"),
       payloadReplayGuardInfraErrors: readCounter(inboundCounters, "inbound.payload_replay_guard_infra_error"),
@@ -803,6 +936,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   if (summary.inbound.payloadReplayBlocked > 0 || summary.inbound.replayMessageBlocked > 0) {
     recommendations.push("Investigar origen de replay (reintentos de proveedor o duplicados de integración).");
   }
+  if (summary.inbound.eventNonceReplayBlocked > 0) {
+    recommendations.push("Se bloquearon replays por reutilización de event-id/nonce en webhook: revisar productor/proxy para evitar reenvío del mismo evento y validar reintentos con nuevos ids.");
+  }
   if (summary.inbound.payloadReplayKeyCollisionOrRepeat > 0) {
     recommendations.push("Se detectaron replays bloqueados por clave estable de payload (`payload_replay_key_collision_or_repeat`): revisar productores que reenvían el mismo body y confirmar estrategia de idempotencia/retry upstream.");
   }
@@ -896,6 +1032,7 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
 
   const replayBlocked = readCounter(inboundCounters, "inbound.payload_replay_blocked")
     + readCounter(inboundCounters, "inbound.replay_blocked");
+  const eventNonceReplayBlocked = readCounter(inboundCounters, "inbound.event_nonce_replay_blocked");
   if (replayBlocked >= 5) {
     runtimeInboundAlerts.push({
       signal: "inbound_replay_spike",
@@ -903,6 +1040,17 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
       inWindow: replayBlocked,
       remaining: 0,
       severity: replayBlocked >= 15 ? "critical" : "warn",
+      source: "derived_metrics"
+    });
+  }
+
+  if (eventNonceReplayBlocked >= 2) {
+    runtimeInboundAlerts.push({
+      signal: "inbound_event_nonce_replay_blocked_spike",
+      threshold: 2,
+      inWindow: eventNonceReplayBlocked,
+      remaining: 0,
+      severity: eventNonceReplayBlocked >= 6 ? "critical" : "warn",
       source: "derived_metrics"
     });
   }
@@ -1752,9 +1900,9 @@ whatsappCloudRoutes.get("/webhook", (req: any, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  const expected = getRuntimeSettings().waCloudVerifyToken || "";
+  const expected = String(getRuntimeSettings().waCloudVerifyToken || "").trim();
 
-  if (mode === "subscribe" && expected && token === expected) {
+  if (mode === "subscribe" && timingSafeTokenEquals(expected, token)) {
     return res.status(200).send(String(challenge || ""));
   }
 
@@ -1895,7 +2043,11 @@ whatsappCloudRoutes.get("/webhook/hardening", (req: any, res) => {
     signatureHardening,
     webhookPayloadReplayHardening: {
       failClosed: replayFailClosed,
-      insecureReplayGuardFailOpen: !replayFailClosed
+      insecureReplayGuardFailOpen: !replayFailClosed,
+      replayWindowMs: resolveWebhookReplayWindowMs(),
+      futureSkewMs: resolveWebhookFutureTimestampSkewMs(),
+      eventNonceCacheMaxEntries: resolveWebhookEventNonceCacheMaxEntries(),
+      eventNonceCacheEntries: webhookEventNonceCache.size
     },
     outboundRetryHardening
   });
@@ -1924,6 +2076,37 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
       entryCount: envelopeValidation.entryCount ?? null
     });
     return res.status(400).json({ error: "Invalid webhook envelope", reason: envelopeValidation.reason });
+  }
+
+  const timestampValidation = validateWebhookTimestampWindow(req);
+  if (!timestampValidation.ok) {
+    recordInboundTimestampOutsideAllowedSkewBlocked({
+      reason: timestampValidation.reason,
+      ageMs: timestampValidation.ageMs ?? null,
+      replayWindowMs: timestampValidation.replayWindowMs,
+      futureSkewMs: timestampValidation.futureSkewMs
+    });
+    return res.status(400).json({
+      error: "Invalid webhook timestamp",
+      reason: timestampValidation.reason,
+      replayWindowMs: timestampValidation.replayWindowMs,
+      futureSkewMs: timestampValidation.futureSkewMs
+    });
+  }
+
+  const nonceReservation = reserveWebhookEventNonce(req);
+  if (!nonceReservation.accepted) {
+    recordInboundEventNonceReplayBlocked({
+      reason: nonceReservation.reason,
+      nonce: nonceReservation.nonce || null,
+      replayKeyStrategy: "event_nonce"
+    });
+    recordInboundPayloadReplayBlocked({
+      reason: nonceReservation.reason,
+      nonce: nonceReservation.nonce || null,
+      replayKeyStrategy: "event_nonce"
+    });
+    return res.status(202).json({ ok: true, ignored: true, reason: "event_nonce_replay_blocked" });
   }
 
   const forwardedForHeaderRaw = String(req.get("x-forwarded-for") || "");

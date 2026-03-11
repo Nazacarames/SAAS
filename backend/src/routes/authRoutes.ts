@@ -9,6 +9,11 @@ import AppError from "../errors/AppError";
 
 const authRoutes = Router();
 
+// Rate limiter for registration
+const registerBuckets = new Map<string, { count: number; resetAt: number }>();
+const REGISTER_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const REGISTER_MAX_PER_WINDOW = 5;
+
 authRoutes.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
@@ -26,6 +31,18 @@ authRoutes.post("/refresh", async (req, res) => {
 });
 
 authRoutes.post("/register", async (req, res) => {
+    // Rate limit check
+    const ip = String(req.ip || "unknown");
+    const now = Date.now();
+    const bucket = registerBuckets.get(ip);
+    if (bucket && bucket.resetAt > now && bucket.count >= REGISTER_MAX_PER_WINDOW) {
+        return res.status(429).json({ error: "Demasiados intentos de registro. Intente más tarde." });
+    }
+    if (!bucket || bucket.resetAt <= now) {
+        registerBuckets.set(ip, { count: 1, resetAt: now + REGISTER_WINDOW_MS });
+    } else {
+        bucket.count += 1;
+    }
     const { companyName, name, email, password } = req.body || {};
 
     const safeCompanyName = String(companyName || "").trim();

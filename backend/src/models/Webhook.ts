@@ -7,8 +7,11 @@ import {
     PrimaryKey,
     AutoIncrement,
     AllowNull,
-    Default
+    Default,
+    ForeignKey,
+    BelongsTo
 } from "sequelize-typescript";
+import Company from "./Company";
 
 @Table({ tableName: "webhooks" })
 class Webhook extends Model {
@@ -36,6 +39,14 @@ class Webhook extends Model {
 
     @Column
     description: string;
+
+    @ForeignKey(() => Company)
+    @AllowNull(false)
+    @Column
+    companyId: number;
+
+    @BelongsTo(() => Company)
+    company: Company;
 
     @CreatedAt
     createdAt: Date;

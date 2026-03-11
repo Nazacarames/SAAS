@@ -4,6 +4,7 @@ import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
 
 export interface RuntimeSettings {
+  [key: string]: any;
   waCloudVerifyToken: string;
   waCloudPhoneNumberId: string;
   waCloudAccessToken: string;
@@ -51,6 +52,12 @@ export interface RuntimeSettings {
   waOutboundRequestTimeoutMs: number;
   waInboundReplayTtlSeconds: number;
   waInboundReplayMaxBlocksPerPayload: number;
+  waOutboundDedupeFailClosed: boolean;
+  waWebhookReplayWindowSeconds: number;
+  waWebhookFutureSkewSeconds: number;
+  waWebhookEventNonceCacheMaxEntries: number;
+  waOutboundRetryOnTimeout: boolean;
+  waOutboundRetryRequireIdempotencyKey: boolean;
 }
 
 const FILE_PATH = path.resolve(process.cwd(), "runtime-settings.json");
@@ -125,7 +132,13 @@ export const getRuntimeSettings = (): RuntimeSettings => {
     waOutboundRetryMaxDelayMs: clampInt(fromFile.waOutboundRetryMaxDelayMs || process.env.WA_OUTBOUND_RETRY_MAX_DELAY_MS || 2000, 2000, 100, 10000),
     waOutboundRequestTimeoutMs: clampInt(fromFile.waOutboundRequestTimeoutMs || process.env.WA_OUTBOUND_REQUEST_TIMEOUT_MS || 12000, 12000, 1000, 60000),
     waInboundReplayTtlSeconds: clampInt(fromFile.waInboundReplayTtlSeconds || process.env.WA_INBOUND_REPLAY_TTL_SECONDS || 900, 900, 60, 86400),
-    waInboundReplayMaxBlocksPerPayload: clampInt(fromFile.waInboundReplayMaxBlocksPerPayload || process.env.WA_INBOUND_REPLAY_MAX_BLOCKS_PER_PAYLOAD || 3, 3, 1, 20)
+    waInboundReplayMaxBlocksPerPayload: clampInt(fromFile.waInboundReplayMaxBlocksPerPayload || process.env.WA_INBOUND_REPLAY_MAX_BLOCKS_PER_PAYLOAD || 3, 3, 1, 20),
+    waOutboundDedupeFailClosed: parseBool(fromFile.waOutboundDedupeFailClosed, true),
+    waWebhookReplayWindowSeconds: clampInt(fromFile.waWebhookReplayWindowSeconds || process.env.WA_WEBHOOK_REPLAY_WINDOW_SECONDS || 120, 120, 30, 900),
+    waWebhookFutureSkewSeconds: clampInt(fromFile.waWebhookFutureSkewSeconds || process.env.WA_WEBHOOK_FUTURE_SKEW_SECONDS || 120, 120, 5, 600),
+    waWebhookEventNonceCacheMaxEntries: clampInt(fromFile.waWebhookEventNonceCacheMaxEntries || process.env.WA_WEBHOOK_EVENT_NONCE_CACHE_MAX_ENTRIES || 20000, 20000, 500, 200000),
+    waOutboundRetryOnTimeout: parseBool(fromFile.waOutboundRetryOnTimeout, false),
+    waOutboundRetryRequireIdempotencyKey: parseBool(fromFile.waOutboundRetryRequireIdempotencyKey, true)
   };
 };
 
@@ -176,7 +189,13 @@ export const saveRuntimeSettings = (patch: Partial<RuntimeSettings>) => {
     waOutboundRetryMaxDelayMs: clampInt((patch as any).waOutboundRetryMaxDelayMs ?? current.waOutboundRetryMaxDelayMs ?? 2000, 2000, 100, 10000),
     waOutboundRequestTimeoutMs: clampInt((patch as any).waOutboundRequestTimeoutMs ?? current.waOutboundRequestTimeoutMs ?? 12000, 12000, 1000, 60000),
     waInboundReplayTtlSeconds: clampInt((patch as any).waInboundReplayTtlSeconds ?? current.waInboundReplayTtlSeconds ?? 900, 900, 60, 86400),
-    waInboundReplayMaxBlocksPerPayload: clampInt((patch as any).waInboundReplayMaxBlocksPerPayload ?? current.waInboundReplayMaxBlocksPerPayload ?? 3, 3, 1, 20)
+    waInboundReplayMaxBlocksPerPayload: clampInt((patch as any).waInboundReplayMaxBlocksPerPayload ?? current.waInboundReplayMaxBlocksPerPayload ?? 3, 3, 1, 20),
+    waOutboundDedupeFailClosed: typeof (patch as any).waOutboundDedupeFailClosed === "boolean" ? Boolean((patch as any).waOutboundDedupeFailClosed) : Boolean((current as any).waOutboundDedupeFailClosed),
+    waWebhookReplayWindowSeconds: clampInt((patch as any).waWebhookReplayWindowSeconds ?? (current as any).waWebhookReplayWindowSeconds ?? 120, 120, 30, 900),
+    waWebhookFutureSkewSeconds: clampInt((patch as any).waWebhookFutureSkewSeconds ?? (current as any).waWebhookFutureSkewSeconds ?? 120, 120, 5, 600),
+    waWebhookEventNonceCacheMaxEntries: clampInt((patch as any).waWebhookEventNonceCacheMaxEntries ?? (current as any).waWebhookEventNonceCacheMaxEntries ?? 20000, 20000, 500, 200000),
+    waOutboundRetryOnTimeout: typeof (patch as any).waOutboundRetryOnTimeout === "boolean" ? Boolean((patch as any).waOutboundRetryOnTimeout) : Boolean((current as any).waOutboundRetryOnTimeout),
+    waOutboundRetryRequireIdempotencyKey: typeof (patch as any).waOutboundRetryRequireIdempotencyKey === "boolean" ? Boolean((patch as any).waOutboundRetryRequireIdempotencyKey) : Boolean((current as any).waOutboundRetryRequireIdempotencyKey)
   };
   writeFileSettings(next);
   return next;

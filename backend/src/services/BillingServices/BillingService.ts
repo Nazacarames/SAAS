@@ -3,7 +3,11 @@ import sequelize from "../../database";
 
 export type FeatureCode = "integrations_api" | "ai_rag" | "meta_leads" | "advanced_reports";
 
+let billingTablesReady = false;
+
 export const ensureBillingTables = async () => {
+  if (billingTablesReady) return;
+
   await sequelize.query(`CREATE TABLE IF NOT EXISTS billing_plans (
     code VARCHAR(30) PRIMARY KEY,
     name VARCHAR(60) NOT NULL,
@@ -40,6 +44,8 @@ export const ensureBillingTables = async () => {
       ('pro', 'Pro', 229, '{"conversations":6000,"users":5}', '["integrations_api","meta_leads","ai_rag","advanced_reports"]'),
       ('scale', 'Scale', 399, '{"conversations":15000,"users":10}', '["integrations_api","meta_leads","ai_rag","advanced_reports"]')
     ON CONFLICT (code) DO NOTHING`);
+
+  billingTablesReady = true;
 };
 
 export const getCompanyPlan = async (companyId: number) => {

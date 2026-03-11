@@ -71,7 +71,7 @@ class User extends Model {
     @BeforeUpdate
     @BeforeCreate
     static hashPassword = async (instance: User): Promise<void> => {
-        if (instance.passwordHash) {
+        if (instance.changed("passwordHash") && instance.passwordHash) {
             instance.passwordHash = await bcrypt.hash(instance.passwordHash, 10);
         }
     };

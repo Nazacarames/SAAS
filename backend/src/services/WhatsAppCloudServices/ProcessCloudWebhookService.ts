@@ -536,6 +536,22 @@ export const recordInboundForwardedHeaderOversizeBlocked = (context?: Record<str
   pushHardeningSignal("inbound_forwarded_header_oversize_blocked", 2, context);
 };
 
+export const recordInboundTimestampOutsideAllowedSkewBlocked = (context?: Record<string, unknown> & { reason?: unknown }) => {
+  const reason = String(context?.reason || "").trim().toLowerCase();
+  bumpHardeningMetric("inbound.timestamp_outside_allowed_skew_blocked");
+  if (reason === "timestamp_too_old") {
+    bumpHardeningMetric("inbound.timestamp_too_old_blocked");
+  } else if (reason === "timestamp_future_skew") {
+    bumpHardeningMetric("inbound.timestamp_future_skew_blocked");
+  }
+  pushHardeningSignal("inbound_timestamp_outside_allowed_skew_blocked", 4, context);
+};
+
+export const recordInboundEventNonceReplayBlocked = (context?: Record<string, unknown>) => {
+  bumpHardeningMetric("inbound.event_nonce_replay_blocked");
+  pushHardeningSignal("inbound_event_nonce_replay_blocked", 3, context);
+};
+
 const parseRetryAfterMs = (retryAfterHeader?: string | null): number | null => {
   if (!retryAfterHeader) return null;
   const seconds = Number(retryAfterHeader);

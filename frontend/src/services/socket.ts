@@ -10,9 +10,12 @@ class SocketConnection {
             return this.socket;
         }
 
+        // Use token from parameter or localStorage
+        const authToken = token || localStorage.getItem('token') || '';
+
         this.socket = io(SOCKET_URL, {
             transports: ['websocket', 'polling'],
-            auth: token ? { token } : undefined
+            auth: { token: authToken }
         });
 
         this.socket.on('connect', () => {
@@ -24,7 +27,11 @@ class SocketConnection {
         });
 
         this.socket.on('connect_error', (error) => {
-            console.error('Error de conexión Socket.io:', error);
+            console.error('Error de conexión Socket.io:', error.message);
+            // If auth error, don't retry — wait for new token
+            if (error.message === 'Authentication required' || error.message === 'Invalid token') {
+                this.socket?.disconnect();
+            }
         });
 
         return this.socket;
@@ -37,29 +44,31 @@ class SocketConnection {
         }
     }
 
-    getSocket(): Socket {
-        if (!this.socket) {
-            return this.connect();
-        }
+    getSocket(): Socket | null {
         return this.socket;
     }
 
     on(event: string, callback: (...args: any[]) => void) {
-        this.getSocket().on(event, callback);
+        const socket = this.getSocket();
+        if (socket) socket.on(event, callback);
     }
 
     off(event?: string) {
+        const socket = this.getSocket();
+        if (!socket) return;
         if (event) {
-            this.getSocket().off(event);
+            socket.off(event);
         } else {
-            this.getSocket().removeAllListeners();
+            socket.removeAllListeners();
         }
     }
 
     emit(event: string, ...args: any[]) {
-        this.getSocket().emit(event, ...args);
+        const socket = this.getSocket();
+        if (socket) socket.emit(event, ...args);
     }
 }
 
-export const socketConnection = new SocketConnection().getSocket();
+const socketConnection = new SocketConnection();
+export { socketConnection };
 export default SocketConnection;

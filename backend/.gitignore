@@ -32,6 +32,11 @@ public/uploads/*
 # WhatsApp sessions
 baileys_store/
 *.json
+!package.json
+!tsconfig.json
+
+# Database
+database.sqlite
 
 # Testing
 coverage/

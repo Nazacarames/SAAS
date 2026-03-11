@@ -2,6 +2,7 @@ import { Router } from "express";
 import isAuth from "../middleware/isAuth";
 import SendMessageService from "../services/MessageServices/SendMessageService";
 import ListMessagesService from "../services/MessageServices/ListMessagesService";
+import { getRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
 
 const messageRoutes = Router();
 
@@ -20,7 +21,7 @@ messageRoutes.post("/", isAuth, async (req: any, res) => {
   const effectiveIdempotencyKey = String(idempotencyFromHeader || idempotencyKey || "").trim();
   const { id: userId } = req.user;
 
-  const settings = (require("../services/SettingsServices/RuntimeSettingsService") as any).getRuntimeSettings();
+  const settings = getRuntimeSettings();
   const retryRequiresIdempotency = Boolean(settings?.waOutboundRetryRequireIdempotencyKey);
   if (retryRequiresIdempotency && !effectiveIdempotencyKey) {
     return res.status(400).json({ error: "x-idempotency-key (or body.idempotencyKey) is required" });

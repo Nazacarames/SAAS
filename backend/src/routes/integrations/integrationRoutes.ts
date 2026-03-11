@@ -49,6 +49,7 @@ type OutboundReplayGuardEntry = {
 
 const OUTBOUND_REPLAY_GUARD_INFLIGHT_STALE_MS = 90 * 1000;
 const OUTBOUND_NO_KEY_FINGERPRINT_GUARD_TTL_MS = 90 * 1000;
+const OUTBOUND_DUPLICATE_INFLIGHT_RETRY_AFTER_MS = 2000;
 
 type OutboundNoKeyFingerprintGuardEntry = {
   createdAt: number;
@@ -589,6 +590,12 @@ const parseRetryAttempt = (raw: unknown): number | null => {
   return rounded;
 };
 
+const resolveOutboundRetryAttemptMaxAccepted = (): number => {
+  const raw = Number((getRuntimeSettings() as any)?.waOutboundRetryAttemptMaxAccepted);
+  if (!Number.isFinite(raw)) return 10;
+  return Math.max(2, Math.min(100, Math.round(raw)));
+};
+
 const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRaw: string | null } => {
   const candidates = [
     req.headers?.["x-retry-attempt"],
@@ -609,6 +616,19 @@ const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRa
   }
 
   return { retryAttempt: null, invalidRaw: null };
+};
+
+const respondDuplicateInflight = (res: any, idempotencyKeyUsed: boolean) => {
+  const retryAfterSeconds = Math.max(1, Math.ceil(OUTBOUND_DUPLICATE_INFLIGHT_RETRY_AFTER_MS / 1000));
+  res.setHeader("Retry-After", String(retryAfterSeconds));
+  return res.status(202).json({
+    ok: true,
+    processing: true,
+    duplicate: true,
+    idempotencyKeyUsed,
+    dedupReason: "inflight",
+    retryAfterMs: OUTBOUND_DUPLICATE_INFLIGHT_RETRY_AFTER_MS
+  });
 };
 
 integrationRoutes.use(integrationAuth);
@@ -738,6 +758,17 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
     });
   }
 
+  const retryAttemptMaxAccepted = resolveOutboundRetryAttemptMaxAccepted();
+  if (retryAttempt !== null && retryAttempt > retryAttemptMaxAccepted) {
+    bumpIntegrationHardeningMetric("outbound.retry_attempt_above_max_blocked");
+    pushIntegrationHardeningSignal("outbound_integration_retry_attempt_above_max_blocked", 2);
+    return res.status(400).json({
+      error: `retryAttempt too high (max ${retryAttemptMaxAccepted})`,
+      retryAttempt,
+      retryAttemptMaxAccepted
+    });
+  }
+
   if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     bumpIntegrationHardeningMetric("outbound.idempotency_key_required_blocked");
     pushIntegrationHardeningSignal("outbound_integration_idempotency_key_required_blocked", 2);
@@ -842,12 +873,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
           bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
           bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.persistent");
           pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
-          return res.status(202).json({
-            ok: true,
-            processing: true,
-            duplicate: true,
-            idempotencyKeyUsed: true
-          });
+          return respondDuplicateInflight(res, true);
         }
 
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
@@ -891,12 +917,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.persistent");
         pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
-        return res.status(202).json({
-          ok: true,
-          processing: true,
-          duplicate: true,
-          idempotencyKeyUsed: true
-        });
+        return respondDuplicateInflight(res, true);
       }
     } catch {
       replayGuardInfraFailed = true;
@@ -945,12 +966,7 @@ integrationRoutes.post("/messages", featureGate("integrations_api"), async (req:
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked");
         bumpIntegrationHardeningMetric("outbound.duplicate_inflight_blocked_source.memory");
         pushIntegrationHardeningSignal("outbound_integration_duplicate_inflight_blocked", 10);
-        return res.status(202).json({
-          ok: true,
-          processing: true,
-          duplicate: true,
-          idempotencyKeyUsed: true
-        });
+        return respondDuplicateInflight(res, true);
       }
 
       bumpIntegrationHardeningMetric("outbound.duplicate_inflight_stale_recovered");
@@ -1086,6 +1102,10 @@ integrationRoutes.get("/messages/hardening-status", featureGate("integrations_ap
 
   if (Number(counters["outbound.retry_attempt_invalid_blocked"] || 0) > 0) {
     recommendations.push("Invalid retryAttempt values were blocked: send a strict integer between 1 and 1000 in retry headers/body to avoid bypassing retry hardening rules.");
+  }
+
+  if (Number(counters["outbound.retry_attempt_above_max_blocked"] || 0) > 0) {
+    recommendations.push("Some retry attempts exceeded the accepted ceiling: cap producer retries and use jittered backoff; tune waOutboundRetryAttemptMaxAccepted only if your transport genuinely needs more attempts.");
   }
 
   if (Number(counters["outbound.idempotency_key_payload_conflict_blocked"] || 0) > 0) {

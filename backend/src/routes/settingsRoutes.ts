@@ -77,7 +77,7 @@ const getWaHardeningAlertSnapshot = () => {
   } as any;
 };
 import { getSendHardeningAlertSnapshot, getSendHardeningMetrics } from "../services/MessageServices/SendMessageService";
-import { getIntegrationHardeningAlertSnapshot, getIntegrationHardeningMetrics } from "./integrationRoutes";
+import { getIntegrationHardeningAlertSnapshot, getIntegrationHardeningMetrics } from "./integrations/integrationRoutes";
 
 const settingsRoutes = Router();
 const maskKey = (key: string) => (!key ? "" : key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}${"*".repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`);
@@ -247,15 +247,15 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
               ? "outbound_integration_retry_without_idempotency_key_rate_high"
               : hasOutboundReplayGuardFallbackPressure
                 ? "outbound_integration_replay_guard_memory_fallback_used"
-            : hasInboundInvalidContentTypePressure
-            ? "inbound_invalid_content_type_blocked_spike"
-            : hasInboundPayloadReplayPressure
-              ? "inbound_replay_spike"
-              : hasInboundTimestampSkewPressure
-                ? "inbound_timestamp_outside_allowed_skew"
-                : hasInboundReplayGuardFailClosedPressure
-                  ? "inbound_payload_replay_guard_fail_closed_blocked"
-                  : null;
+                : hasInboundInvalidContentTypePressure
+                  ? "inbound_invalid_content_type_blocked_spike"
+                  : hasInboundPayloadReplayPressure
+                    ? "inbound_replay_spike"
+                    : hasInboundTimestampSkewPressure
+                      ? "inbound_timestamp_outside_allowed_skew"
+                      : hasInboundReplayGuardFailClosedPressure
+                        ? "inbound_payload_replay_guard_fail_closed_blocked"
+                        : null;
 
   return res.json({
     effectiveConfig: {
@@ -373,7 +373,15 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waWebhookPayloadReplayKeyReuseThreshold: parseNumberWithClamp(body.waWebhookPayloadReplayKeyReuseThreshold, 3, 1, 20),
     waOutboundDedupeMemoryMaxEntries: Number(body.waOutboundDedupeMemoryMaxEntries || 5000)
   });
-  return res.json({ ok: true, settings: next });
+  const {
+    waCloudVerifyToken: _vt,
+    waCloudAccessToken: _at,
+    waCloudAppSecret: _as,
+    tokkoApiKey: _tk,
+    metaLeadAdsAppSecret: _ms,
+    ...safeNext
+  } = next as any;
+  return res.json({ ok: true, settings: safeNext });
 });
 
 export default settingsRoutes;

@@ -1,5 +1,6 @@
 import { Server as SocketIO } from "socket.io";
 import { Server } from "http";
+import { verifyToken } from "../helpers/jwt";
 
 let io: SocketIO;
 
@@ -12,17 +13,39 @@ export const initIO = (httpServer: Server): SocketIO => {
         }
     });
 
+    // Authentication middleware
+    io.use((socket, next) => {
+        const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(" ")[1];
+        if (!token) {
+            return next(new Error("Authentication required"));
+        }
+        try {
+            const decoded = verifyToken(token);
+            (socket as any).user = decoded;
+            next();
+        } catch {
+            next(new Error("Invalid token"));
+        }
+    });
+
     io.on("connection", (socket) => {
-        console.log("Cliente conectado:", socket.id);
+        const user = (socket as any).user;
+        console.log(`Cliente conectado: ${socket.id} (user ${user?.id}, company ${user?.companyId})`);
+
+        // Join company-scoped room automatically
+        if (user?.companyId) {
+            socket.join(`company-${user.companyId}`);
+        }
 
         socket.on("joinChatBox", (ticketId: string) => {
-            socket.join(ticketId);
-            console.log(`Socket ${socket.id} se unió a ticket ${ticketId}`);
+            // Ticket room is company-scoped to prevent cross-tenant access
+            const room = `company-${user?.companyId}:ticket-${ticketId}`;
+            socket.join(room);
         });
 
         socket.on("joinNotification", () => {
-            socket.join("notification");
-            console.log(`Socket ${socket.id} se unió a notificaciones`);
+            const room = `company-${user?.companyId}:notification`;
+            socket.join(room);
         });
 
         socket.on("disconnect", () => {
