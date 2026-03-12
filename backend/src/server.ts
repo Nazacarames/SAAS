@@ -6,6 +6,7 @@ import path from "path";
 import { initIO } from "./libs/socket";
 import { initWbots } from "./libs/wbot";
 import CheckInactiveContactsService from "./services/ContactServices/CheckInactiveContactsService";
+import { syncTokkoLocationsToKnowledge } from "./services/TokkoServices/TokkoService";
 
 dotenv.config();
 
@@ -17,6 +18,26 @@ if (missing.length) {
 }
 
 const PORT = process.env.PORT || 4000;
+const TOKKO_KB_SYNC_INTERVAL_MS = Math.max(60_000, Number(process.env.TOKKO_KB_SYNC_INTERVAL_MS || 24 * 60 * 60 * 1000));
+const TOKKO_KB_SYNC_COMPANY_ID = Number(process.env.TOKKO_KB_SYNC_COMPANY_ID || 1);
+
+let tokkoKbSyncRunning = false;
+const runTokkoKnowledgeSync = async () => {
+  if (tokkoKbSyncRunning) return;
+  tokkoKbSyncRunning = true;
+  try {
+    const result: any = await syncTokkoLocationsToKnowledge(TOKKO_KB_SYNC_COMPANY_ID);
+    if (result?.ok) {
+      console.log(`[tokko-kb-sync] ok company=${TOKKO_KB_SYNC_COMPANY_ID} locations=${result?.locations || 0} doc=${result?.documentId || "n/a"}`);
+    } else {
+      console.warn(`[tokko-kb-sync] skipped/error`, result);
+    }
+  } catch (err: any) {
+    console.error(`[tokko-kb-sync] failed:`, err?.message || err);
+  } finally {
+    tokkoKbSyncRunning = false;
+  }
+};
 
 const server = http.createServer(app);
 
@@ -56,6 +77,10 @@ const startServer = async () => {
       setInterval(() => {
         CheckInactiveContactsService().catch((e: any) => console.error("inactivity scan error:", e?.message || e));
       }, 60_000);
+
+      // Keep Tokko locations knowledge document refreshed automatically (default: every 24h)
+      setTimeout(() => { runTokkoKnowledgeSync(); }, 15_000);
+      setInterval(() => { runTokkoKnowledgeSync(); }, TOKKO_KB_SYNC_INTERVAL_MS);
     });
   } catch (error: any) {
     console.error("✗ Unable to start server:", error?.message || error);

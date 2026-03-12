@@ -428,6 +428,22 @@ export const getWaHardeningAlertSnapshot = () => {
     } as any);
   }
 
+  const outboundProviderConflicts = Number(counters["outbound.provider_conflict_blocked"] || 0);
+  const outboundProviderFailures = Number(counters["outbound.provider_send_failed"] || 0);
+  const outboundProviderConflictRate = outboundProviderFailures > 0
+    ? Number((outboundProviderConflicts / outboundProviderFailures).toFixed(4))
+    : 0;
+  if (outboundProviderFailures >= 10 && outboundProviderConflictRate >= 0.3) {
+    pendingAlerts.push({
+      signal: "outbound_provider_conflict_rate_high",
+      threshold: 0.3,
+      inWindow: outboundProviderConflictRate,
+      remaining: 0,
+      sampleSize: outboundProviderFailures,
+      conflictCount: outboundProviderConflicts
+    } as any);
+  }
+
   return {
     windowMs: HARDENING_ALERT_WINDOW_MS,
     pendingAlerts: pendingAlerts.sort((a: any, b: any) => {
@@ -601,16 +617,25 @@ const resolveManagedReplyRetryRequireIdempotencyKey = (): boolean => {
   return ["1", "true", "yes", "on"].includes(String(specific).toLowerCase());
 };
 
-const applyRetryJitter = (ms: number, maxDelayMs: number): number => {
+const applyRetryJitter = (ms: number, maxDelayMs: number, opts?: { floorMs?: number; allowBelowBase?: boolean }): number => {
   if (ms <= 0) return 0;
+  const base = Math.min(ms, maxDelayMs);
+  const floorMs = Math.max(200, Math.min(Number(opts?.floorMs || 200), maxDelayMs));
   const multiplier = 0.9 + (Math.random() * 0.2); // ±10%
-  const jittered = Math.round(ms * multiplier);
-  return Math.max(200, Math.min(jittered, maxDelayMs));
+  let jittered = Math.round(base * multiplier);
+  if (opts?.allowBelowBase === false) {
+    // Provider Retry-After is a minimum wait hint; never retry sooner than requested.
+    jittered = Math.max(base, jittered);
+  }
+  return Math.max(floorMs, Math.min(jittered, maxDelayMs));
 };
 
 const computeBackoffMs = (attempt: number, retryAfterMs?: number | null): number => {
   const maxDelayMs = resolveOutboundRetryMaxDelayMs();
-  if (retryAfterMs && retryAfterMs > 0) return applyRetryJitter(Math.min(retryAfterMs, maxDelayMs), maxDelayMs);
+  if (retryAfterMs && retryAfterMs > 0) {
+    const capped = Math.min(retryAfterMs, maxDelayMs);
+    return applyRetryJitter(capped, maxDelayMs, { floorMs: capped, allowBelowBase: false });
+  }
   const base = 400 * Math.pow(2, attempt - 1);
   return applyRetryJitter(base, maxDelayMs);
 };
@@ -1022,7 +1047,8 @@ const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reaso
 
 const isValidInboundSender = (from: string): boolean => /^\d{8,20}$/.test(String(from || ""));
 
-const isValidInboundMessageId = (messageId: string): boolean => /^[A-Za-z0-9:_\-.]{6,200}$/.test(String(messageId || ""));
+// WhatsApp provider ids can include base64 padding '=' in some environments.
+const isValidInboundMessageId = (messageId: string): boolean => /^[A-Za-z0-9:_\-.=]{6,220}$/.test(String(messageId || ""));
 
 const isValidInboundType = (type: string): boolean => ALLOWED_INBOUND_TYPES.has(String(type || "").toLowerCase());
 
@@ -1211,8 +1237,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     const transferText = "Perfecto. Te paso con un asesor humano para continuar 🙌";
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "manual_handoff", reason: "Cliente pidió humano", guardrailAction: "handoff", responsePreview: transferText });
     const out = await sendManagedReply({ ticket, contact, text: transferText });
-    await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
     if (!out) return;
+    await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
     return;
   }
 
@@ -1220,9 +1246,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "auto_close", reason: "Cierre positivo detectado", guardrailAction: "close", responsePreview: closeText });
     const out = await sendManagedReply({ ticket, contact, text: closeText });
+    if (!out) return;
     await ticket.update({ status: "closed", unreadMessages: 0, lastMessage: closeText, updatedAt: new Date() } as any);
     await ensureArchivedTag(contact.id); await (contact as any).update({ leadStatus: "read", lastInteractionAt: new Date() } as any);
-    if (!out) return;
     return;
   }
 
@@ -1251,16 +1277,16 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "guardrail_handoff", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: txt });
     const out = await sendManagedReply({ ticket, contact, text: txt });
-    await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
     if (!out) return;
+    await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
     return;
   }
 
   const reply = guardrail.finalReply || baseReply;
   await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "reply", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: reply.slice(0, 240) });
   const out = await sendManagedReply({ ticket, contact, text: reply });
-  await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
   if (!out) return;
+  await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
   await autoSummaryAndScore(ticket.id, contact);
 };
 

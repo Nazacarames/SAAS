@@ -107,6 +107,9 @@ export const getSendHardeningAlertSnapshot = () => {
   const wbotOk = toNum("outbound.wbot_send_ok");
   const idempotencyKeyUsed = toNum("outbound.idempotency_key_used");
   const idempotencyPayloadConflictBlocked = toNum("outbound.idempotency_key_payload_conflict_blocked");
+  const dedupeInfraError = toNum("outbound.dedupe_infra_error");
+  const dedupeEmergencyReserved = toNum("outbound.dedupe_emergency_reserved");
+  const dedupeFailClosedBlocked = toNum("outbound.dedupe_fail_closed_blocked");
 
   const duplicateObserved = duplicateBlocked + dedupeReserved;
   const providerObserved = providerFailed + cloudOk + wbotOk;
@@ -145,6 +148,42 @@ export const getSendHardeningAlertSnapshot = () => {
         idempotencyPayloadConflictBlocked,
         idempotencyKeyUsed
       }
+    });
+  }
+
+  const dedupeInfraObserved = dedupeInfraError + dedupeReserved;
+  const dedupeInfraErrorRate = safeRate(dedupeInfraError, dedupeInfraObserved);
+  if (dedupeInfraObserved >= 10 && dedupeInfraErrorRate >= 0.05) {
+    pendingAlerts.push({
+      signal: "outbound_dedupe_infra_error_rate_high",
+      threshold: 0.05,
+      inWindow: dedupeInfraErrorRate,
+      remaining: 0,
+      sampleSize: dedupeInfraObserved,
+      breakdown: {
+        dedupeInfraError,
+        dedupeReserved
+      }
+    });
+  }
+
+  if (dedupeEmergencyReserved >= 1) {
+    pendingAlerts.push({
+      signal: "outbound_dedupe_emergency_mode_active",
+      threshold: 1,
+      inWindow: dedupeEmergencyReserved,
+      remaining: 0,
+      severity: dedupeEmergencyReserved >= 5 ? "critical" : "warn"
+    });
+  }
+
+  if (dedupeFailClosedBlocked >= 1) {
+    pendingAlerts.push({
+      signal: "outbound_dedupe_fail_closed_blocked",
+      threshold: 1,
+      inWindow: dedupeFailClosedBlocked,
+      remaining: 0,
+      severity: dedupeFailClosedBlocked >= 3 ? "critical" : "warn"
     });
   }
 
@@ -241,6 +280,17 @@ const normalizeTemplateVariableForDedupe = (rawValue: unknown): string => {
 
 type OutboundMode = "text" | "template" | "media";
 type OutboundMediaType = "image" | "video" | "audio" | "document";
+
+const OUTBOUND_MEDIA_TYPES = new Set<OutboundMediaType>(["image", "video", "audio", "document"]);
+
+const normalizeOutboundMediaType = (raw: unknown): OutboundMediaType | null => {
+  const candidate = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+  if (!candidate) return "image";
+  return OUTBOUND_MEDIA_TYPES.has(candidate as OutboundMediaType) ? (candidate as OutboundMediaType) : null;
+};
 
 type OutboundPayload = {
   mode: OutboundMode;
@@ -688,21 +738,55 @@ const resolveOutboundIdempotencyKeyMinLength = (): number => {
   return Math.max(4, Math.min(64, Math.round(raw)));
 };
 
-const applyRetryJitter = (ms: number, maxDelayMs: number): number => {
+const applyRetryJitter = (ms: number, maxDelayMs: number, opts?: { floorMs?: number; allowBelowBase?: boolean }): number => {
   if (ms <= 0) return 0;
+  const base = Math.min(ms, maxDelayMs);
+  const floorMs = Math.max(200, Math.min(Number(opts?.floorMs || 200), maxDelayMs));
   const multiplier = 0.9 + (Math.random() * 0.2); // ±10%
-  const jittered = Math.round(ms * multiplier);
-  return Math.max(200, Math.min(jittered, maxDelayMs));
+  let jittered = Math.round(base * multiplier);
+  if (opts?.allowBelowBase === false) {
+    // Provider Retry-After is a minimum wait hint; never retry sooner than requested.
+    jittered = Math.max(base, jittered);
+  }
+  return Math.max(floorMs, Math.min(jittered, maxDelayMs));
 };
 
 const computeBackoffMs = (attempt: number, retryAfterMs?: number | null): number => {
   const maxDelayMs = resolveOutboundRetryMaxDelayMs();
   if (retryAfterMs && retryAfterMs > 0) {
     // cap provider hints with runtime ceiling to avoid worker starvation on extreme Retry-After values
-    return applyRetryJitter(Math.min(retryAfterMs, maxDelayMs), maxDelayMs);
+    const capped = Math.min(retryAfterMs, maxDelayMs);
+    return applyRetryJitter(capped, maxDelayMs, { floorMs: capped, allowBelowBase: false });
   }
   const base = 400 * Math.pow(2, attempt - 1); // 400, 800, 1600...
   return applyRetryJitter(base, maxDelayMs); // de-sync concurrent retries
+};
+
+const resolveBackoffBucketMs = (backoffMs: number): number => {
+  if (backoffMs <= 500) return 500;
+  if (backoffMs <= 1000) return 1000;
+  if (backoffMs <= 2000) return 2000;
+  if (backoffMs <= 5000) return 5000;
+  if (backoffMs <= 10000) return 10000;
+  if (backoffMs <= 15000) return 15000;
+  return resolveOutboundRetryMaxDelayMs();
+};
+
+const recordRetryBackoffApplied = (channel: "cloud" | "wbot", attempt: number, backoffMs: number, usedRetryAfterHeader = false) => {
+  const safeBackoffMs = Math.max(0, Math.round(Number(backoffMs) || 0));
+  const bucketMs = resolveBackoffBucketMs(safeBackoffMs);
+  bumpHardeningMetric(`outbound.${channel}_retry_backoff_applied`);
+  bumpHardeningMetric(`outbound.${channel}_retry_backoff_bucket_ms.${bucketMs}`);
+  if (usedRetryAfterHeader) {
+    bumpHardeningMetric(`outbound.${channel}_retry_backoff_provider_hint_used`);
+  }
+  pushHardeningSignal("outbound_retry_backoff_applied", 12, {
+    channel,
+    attempt,
+    backoffMs: safeBackoffMs,
+    bucketMs,
+    usedRetryAfterHeader
+  });
 };
 
 const isRetryableCloudFailure = (status?: number, code?: number): boolean => {
@@ -817,8 +901,10 @@ const sendViaWbot = async (
         break;
       }
       bumpHardeningMetric("outbound.wbot_retry_attempt");
-      pushHardeningSignal("outbound_wbot_retry", 6, { attempt });
-      await sleep(computeBackoffMs(attempt));
+      const backoffMs = computeBackoffMs(attempt);
+      recordRetryBackoffApplied("wbot", attempt, backoffMs, false);
+      pushHardeningSignal("outbound_wbot_retry", 6, { attempt, backoffMs });
+      await sleep(backoffMs);
     }
   }
 
@@ -974,10 +1060,12 @@ const sendViaCloud = async (
       }
 
       const retryAfterMs = parseRetryAfterMs(resp.headers.get("retry-after"));
+      const backoffMs = computeBackoffMs(attempt, retryAfterMs);
       bumpHardeningMetric("outbound.cloud_retry_attempt");
       if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.cloud_retry_after_header_used");
-      pushHardeningSignal("outbound_retry", 8, { status: resp.status, cloudCode, attempt });
-      await sleep(computeBackoffMs(attempt, retryAfterMs));
+      recordRetryBackoffApplied("cloud", attempt, backoffMs, Boolean(retryAfterMs && retryAfterMs > 0));
+      pushHardeningSignal("outbound_retry", 8, { status: resp.status, cloudCode, attempt, backoffMs });
+      await sleep(backoffMs);
       continue;
     } catch (err: any) {
       lastErr = err;
@@ -1023,10 +1111,12 @@ const sendViaCloud = async (
       }
 
       const retryAfterMs = parseRetryAfterMs(err?.response?.headers?.["retry-after"] || err?.headers?.["retry-after"]);
+      const backoffMs = computeBackoffMs(attempt, retryAfterMs);
       bumpHardeningMetric("outbound.cloud_retry_attempt");
       if (retryAfterMs && retryAfterMs > 0) bumpHardeningMetric("outbound.cloud_retry_after_header_used");
-      pushHardeningSignal("outbound_retry", 8, { status, attempt, reason: isAbortTimeout ? "timeout" : undefined });
-      await sleep(computeBackoffMs(attempt, retryAfterMs));
+      recordRetryBackoffApplied("cloud", attempt, backoffMs, Boolean(retryAfterMs && retryAfterMs > 0));
+      pushHardeningSignal("outbound_retry", 8, { status, attempt, reason: isAbortTimeout ? "timeout" : undefined, backoffMs });
+      await sleep(backoffMs);
     }
   }
 
@@ -1132,6 +1222,16 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
     throw new AppError("Hardening: Idempotency-Key requerido para outbound", 400);
   }
 
+  const normalizedMediaType = normalizeOutboundMediaType(mediaType);
+  if (cleanMediaUrl && !normalizedMediaType) {
+    bumpHardeningMetric("outbound.invalid_media_type_blocked");
+    pushHardeningSignal("outbound_invalid_media_type_blocked", 3, {
+      ticketId: ticket.id,
+      mediaType: String(mediaType || "")
+    });
+    throw new AppError("Hardening: mediaType inválido (permitidos: image|video|audio|document)", 400);
+  }
+
   const payload: OutboundPayload = cleanTemplateName
     ? {
         mode: "template",
@@ -1140,7 +1240,7 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
         templateVariables: Array.isArray(templateVariables) ? templateVariables : undefined
       }
     : cleanMediaUrl
-      ? { mode: "media", mediaUrl: cleanMediaUrl, mediaType: (mediaType || "image") as OutboundMediaType, caption: cleanCaption }
+      ? { mode: "media", mediaUrl: cleanMediaUrl, mediaType: normalizedMediaType || "image", caption: cleanCaption }
       : { mode: "text", text: sanitizedBody };
 
   if (payload.mode === "text" && !sanitizedBody) {

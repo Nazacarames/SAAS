@@ -13,6 +13,7 @@ import { getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "../services/
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "../services/MessageServices/SendMessageService";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrations/integrationRoutes";
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
+import { getMetaWebhookMetrics, getMetaWebhookAlerts } from "./metaWebhookRoutes";
 const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
 
@@ -115,6 +116,33 @@ const computeBackoffMs = (attempt: number, retryAfterMs?: number | null) => {
   const base = 400 * Math.pow(2, Math.max(0, attempt - 1)); // 400, 800, 1600, ...
   const jitter = Math.floor(Math.random() * 150);
   return base + jitter;
+};
+
+const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRaw: string | null } => {
+  const candidates = [
+    req?.headers?.["x-retry-attempt"],
+    req?.headers?.["retry-attempt"],
+    req?.body?.retryAttempt
+  ];
+
+  let raw: unknown;
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || String(candidate).trim() === "") continue;
+    raw = Array.isArray(candidate) ? candidate[0] : candidate;
+    break;
+  }
+
+  if (raw === undefined || raw === null || String(raw).trim() === "") return { retryAttempt: null, invalidRaw: null };
+
+  const normalized = String(raw).trim();
+  if (!/^\d+$/.test(normalized)) return { retryAttempt: null, invalidRaw: normalized };
+
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) {
+    return { retryAttempt: null, invalidRaw: normalized };
+  }
+
+  return { retryAttempt: parsed, invalidRaw: null };
 };
 
 const isRetryableCloudFailure = (status?: number, code?: number) => {
@@ -244,7 +272,8 @@ const sendCloudTemplateWithCredentials = async (
   to: string,
   templateName: string,
   languageCode = 'en',
-  idempotencyKey?: string
+  idempotencyKey?: string,
+  templateVariables?: string[]
 ) => {
   const resp = await fetch(`https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`, {
     method: 'POST',
@@ -257,7 +286,24 @@ const sendCloudTemplateWithCredentials = async (
       messaging_product: 'whatsapp',
       to,
       type: 'template',
-      template: { name: templateName, language: { code: languageCode } }
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(Array.isArray(templateVariables) && templateVariables.length > 0
+          ? {
+              components: [
+                {
+                  type: 'header',
+                  parameters: [{ type: 'text', text: String(templateVariables[0] || '') }]
+                },
+                {
+                  type: 'body',
+                  parameters: templateVariables.map((v) => ({ type: 'text', text: String(v || '') }))
+                }
+              ]
+            }
+          : {})
+      }
     })
   });
   const data: any = await resp.json().catch(() => ({}));
@@ -299,6 +345,56 @@ const scoreFromText = (text: string, current = 0) => {
   return Math.min(100, score);
 };
 
+const buildHolaTemplatePreview = (_rawName?: string): string => {
+  return 'Template hola enviado';
+};
+
+const inferLeadStatusByBotSignals = ({ text, leadScore, currentStatus }: { text: string; leadScore: number; currentStatus?: string }): string => {
+  const t = String(text || "").toLowerCase();
+  const curr = String(currentStatus || "").toLowerCase().trim();
+
+  if (/reserva|seña|senia|cerrar|firma|boleto|avanzamos|quiero avanzar|quiero cerrar/i.test(t)) return "cierre";
+  if (/enviar propuesta|te envío propuesta|propuesta|cotización|cotizacion|financiación|financiacion|plan de pago/i.test(t)) return "propuesta";
+  if (/visita|tour|recorrido|agendar|agenda|llamar|llamada|reunión|reunion|cuando puedo ir/i.test(t)) return "calificacion";
+  if (/hola|buenas|info|información|informacion|consulta|me interesa|quiero saber/i.test(t)) return "primer_contacto";
+  if (/dejalo|después|despues|más tarde|mas tarde|no ahora/i.test(t)) return "esperando_respuesta";
+
+  if (leadScore >= 85) return "cierre";
+  if (leadScore >= 65) return "propuesta";
+  if (leadScore >= 40) return "calificacion";
+  if (leadScore >= 20) return "primer_contacto";
+
+  return curr || "nuevo_ingreso";
+};
+
+const CRITICAL_HARDENING_ALERT_SIGNALS = new Set([
+  "outbound_retry_exhausted",
+  "inbound_signature_invalid_blocked",
+  "inbound_payload_replay_blocked",
+  "outbound_provider_failure_rate_high",
+  "outbound_provider_conflict_rate_high",
+  "outbound_dedupe_fail_closed_blocked", 
+  "outbound_dedupe_emergency_mode_active",
+  "outbound_integration_retry_without_idempotency_key_rate_high",
+  "outbound_integration_retry_idempotency_key_required_blocked"
+]);
+
+const normalizeHardeningAlertSeverity = (alert: any): "critical" | "warn" => {
+  const explicit = String(alert?.severity || "").toLowerCase();
+  if (explicit === "critical" || explicit === "warn") return explicit as "critical" | "warn";
+
+  const signal = String(alert?.signal || "");
+  if (CRITICAL_HARDENING_ALERT_SIGNALS.has(signal)) return "critical";
+
+  const inWindow = Number(alert?.inWindow || 0);
+  const threshold = Number(alert?.threshold || 0);
+  if (Number.isFinite(inWindow) && Number.isFinite(threshold) && threshold > 0 && inWindow >= threshold * 2) {
+    return "critical";
+  }
+
+  return "warn";
+};
+
 aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (req: any, res) => {
   try {
     const inbound = {
@@ -313,23 +409,29 @@ aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (req: any, res) => {
       metrics: getIntegrationHardeningMetrics(),
       alerts: getIntegrationHardeningAlertSnapshot()
     };
+    const metaWebhook = {
+      metrics: getMetaWebhookMetrics(),
+      alerts: getMetaWebhookAlerts()
+    };
 
     const pendingAlerts = [
       ...(Array.isArray(inbound.alerts?.pendingAlerts) ? inbound.alerts.pendingAlerts : []),
       ...(Array.isArray(outbound.alerts?.pendingAlerts) ? outbound.alerts.pendingAlerts : []),
-      ...(Array.isArray(integrationApi.alerts?.pendingAlerts) ? integrationApi.alerts.pendingAlerts : [])
-    ];
+      ...(Array.isArray(integrationApi.alerts?.pendingAlerts) ? integrationApi.alerts.pendingAlerts : []),
+      ...(Array.isArray(metaWebhook.alerts)
+        ? metaWebhook.alerts.map((alert: any) => ({
+            ...alert,
+            signal: String(alert?.signal || alert?.key || "meta_webhook_alert")
+          }))
+        : [])
+    ].map((alert: any) => ({
+      ...alert,
+      severity: normalizeHardeningAlertSeverity(alert)
+    }));
+
     const pendingAlertCount = pendingAlerts.length;
-
-    const criticalSignals = new Set([
-      "outbound_retry_exhausted",
-      "inbound_signature_invalid_blocked",
-      "inbound_payload_replay_blocked"
-    ]);
-
-    const hasCriticalSeverity = pendingAlerts.some((alert: any) => String(alert?.severity || "").toLowerCase() === "critical");
-    const hasCriticalSignal = pendingAlerts.some((alert: any) => criticalSignals.has(String(alert?.signal || "")));
-    const status = hasCriticalSeverity || hasCriticalSignal ? "critical" : pendingAlertCount > 0 ? "warn" : "ok";
+    const pendingCriticalCount = pendingAlerts.filter((alert: any) => String(alert?.severity || "").toLowerCase() === "critical").length;
+    const status = pendingCriticalCount > 0 ? "critical" : pendingAlertCount > 0 ? "warn" : "ok";
     const failOnAlert = ["1", "true", "yes", "on"].includes(String(req.query?.failOnAlert || "").toLowerCase());
     const statusCode = failOnAlert && pendingAlertCount > 0 ? 503 : 200;
 
@@ -340,10 +442,11 @@ aiRoutes.get("/hardening/wa-cloud", isAuth, isAdmin, async (req: any, res) => {
         status,
         pendingAlertCount,
         failOnAlert,
-        pendingCriticalCount: pendingAlerts.filter((alert: any) => String(alert?.severity || "").toLowerCase() === "critical").length,
+        pendingCriticalCount,
         inbound,
         outbound,
-        integrationApi
+        integrationApi,
+        metaWebhook
       }
     });
   } catch (error: any) {
@@ -769,6 +872,18 @@ aiRoutes.get(['/reports/attribution', '/reports/leads'], isAuth, async (req: any
   const where: string[] = ['company_id = :companyId'];
   const replacements: any = { companyId };
 
+  // Exclude structurally invalid historical rows (no recoverable contact data),
+  // so funnel/reporting reflects real leads instead of malformed/test payloads.
+  where.push(`(
+    COALESCE(leadgen_id,'') <> ''
+    AND (
+      NULLIF(REGEXP_REPLACE(COALESCE(contact_phone,''), '\\D', '', 'g'), '') IS NOT NULL
+      OR COALESCE(contact_email,'') <> ''
+      OR COALESCE(contact_name,'') <> ''
+      OR COALESCE(form_fields_json,'') NOT IN ('','{}','[]')
+    )
+  )`);
+
   if (String(from || '').trim()) {
     where.push('created_at >= :from');
     replacements.from = String(from).trim();
@@ -793,6 +908,7 @@ aiRoutes.get(['/reports/attribution', '/reports/leads'], isAuth, async (req: any
   const baseWhere = where.join(' AND ');
 
   // Backfill liviano: resolver nombre de formulario para eventos históricos que solo tienen form_id
+  // + intentar completar datos de contacto cuando llegó leadgen_id pero faltaron field_data por fallo transitorio en Graph.
   try {
     const missingForms: any[] = await sequelize.query(
       `SELECT DISTINCT form_id
@@ -823,8 +939,61 @@ aiRoutes.get(['/reports/attribution', '/reports/leads'], isAuth, async (req: any
         }
       );
     }
+
+    const missingLeadDetails: any[] = await sequelize.query(
+      `SELECT id, leadgen_id
+       FROM meta_lead_events
+       WHERE company_id = :companyId
+         AND COALESCE(leadgen_id,'') <> ''
+         AND COALESCE(contact_name,'') = ''
+         AND COALESCE(contact_email,'') = ''
+         AND NULLIF(REGEXP_REPLACE(COALESCE(contact_phone,''), '\\D', '', 'g'), '') IS NULL
+       ORDER BY id DESC
+       LIMIT 25`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+
+    for (const row of missingLeadDetails || []) {
+      const eventId = Number(row?.id || 0);
+      const leadgenId = String(row?.leadgen_id || '').trim();
+      if (!eventId || !leadgenId) continue;
+
+      const leadDetails = await fetchLeadgenDetails(companyId, leadgenId);
+      if (!leadDetails?.id) continue;
+
+      const fd = Array.isArray(leadDetails?.field_data) ? leadDetails.field_data : [];
+      const findField = (name: string) => {
+        const hit = fd.find((x: any) => String(x?.name || '').toLowerCase() === name.toLowerCase());
+        return String(hit?.values?.[0] || '').trim();
+      };
+
+      const phone = findField('phone_number') || findField('telefono');
+      const email = findField('email');
+      const name = findField('full_name') || findField('nombre');
+
+      await sequelize.query(
+        `UPDATE meta_lead_events
+         SET form_fields_json = CASE WHEN COALESCE(form_fields_json,'') = '' OR form_fields_json = '{}' THEN :formFieldsJson ELSE form_fields_json END,
+             contact_phone = CASE WHEN COALESCE(contact_phone,'') = '' THEN :phone ELSE contact_phone END,
+             contact_email = CASE WHEN COALESCE(contact_email,'') = '' THEN :email ELSE contact_email END,
+             contact_name = CASE WHEN COALESCE(contact_name,'') = '' THEN :name ELSE contact_name END,
+             updated_at = NOW()
+         WHERE id = :eventId AND company_id = :companyId`,
+        {
+          replacements: {
+            eventId,
+            companyId,
+            formFieldsJson: JSON.stringify(fd || {}),
+            phone,
+            email,
+            name
+          },
+          type: QueryTypes.UPDATE
+        }
+      );
+    }
   } catch {
-    // no-op: no interrumpir reportes por backfill de nombres
+    // no-op: no interrumpir reportes por backfill
   }
 
   const [summary]: any = await sequelize.query(
@@ -1097,7 +1266,7 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
       const [existing]: any = await sequelize.query(`SELECT lead_score, "leadStatus" FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`, { replacements: { contactId, companyId }, type: QueryTypes.SELECT });
       const explicitScore = Number.isFinite(Number(args.leadScore)) ? Number(args.leadScore) : null;
       const leadScore = explicitScore !== null ? Math.max(0, Math.min(100, explicitScore)) : scoreFromText(inboundText, Number(existing?.lead_score || 0));
-      const leadStatus = leadScore >= 75 ? "hot" : leadScore >= 50 ? "warm" : leadScore >= 25 ? "engaged" : (existing?.leadStatus || "new");
+      const leadStatus = inferLeadStatusByBotSignals({ text: inboundText, leadScore, currentStatus: String(existing?.leadStatus || "") });
 
       await sequelize.query(
         `UPDATE contacts SET lead_score = :leadScore, "leadStatus" = :leadStatus, "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`,
@@ -1491,6 +1660,9 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
   const text = String(req.body?.text || 'Test exitoso desde Charlott OAuth + WhatsApp Cloud API');
   const templateName = String(req.body?.templateName || '').trim();
   const languageCode = String(req.body?.languageCode || 'en').trim();
+  const templateVariables = Array.isArray(req.body?.templateVariables)
+    ? req.body.templateVariables.map((v: any) => String(v ?? '')).filter((v: string) => v.length > 0).slice(0, 8)
+    : undefined;
   const idempotencyHeaderXRaw = String(req.headers?.["x-idempotency-key"] || "").trim();
   const idempotencyHeaderStdRaw = String(req.headers?.["idempotency-key"] || "").trim();
   const idempotencyBodyRaw = String(req.body?.idempotencyKey || "").trim();
@@ -1535,13 +1707,24 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
   }
 
   const effectiveIdempotencyKey = idempotencyHeader || idempotencyBody;
+  const retryAttemptResolution = resolveRetryAttempt(req);
+  const retryAttempt = retryAttemptResolution.retryAttempt;
+  const isExplicitRetry = retryAttempt !== null && retryAttempt > 1;
+
+  if (retryAttemptResolution.invalidRaw) {
+    return res.status(400).json({
+      ok: false,
+      error: "retryAttempt invalid (allowed integer range: 1..1000)",
+      retryAttempt: retryAttemptResolution.invalidRaw
+    });
+  }
 
   if (resolveOutboundRequireIdempotencyKey() && !effectiveIdempotencyKey) {
     return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required by hardening" });
   }
 
-  if (resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
-    return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries" });
+  if (isExplicitRetry && resolveOutboundRetryRequireIdempotencyKey() && !effectiveIdempotencyKey) {
+    return res.status(400).json({ ok: false, error: "x-idempotency-key (or body.idempotencyKey) is required for safe retries (retryAttempt > 1)" });
   }
 
   if (effectiveIdempotencyKey && effectiveIdempotencyKey.length < resolveOutboundIdempotencyKeyMinLength()) {
@@ -1582,7 +1765,8 @@ aiRoutes.post('/meta/oauth/test-send', isAuth, async (req: any, res) => {
       to,
       templateName,
       languageCode || 'en',
-      effectiveIdempotencyKey || undefined
+      effectiveIdempotencyKey || undefined,
+      templateVariables
     );
     return res.json({ ok: true, mode: 'template', messageId, to, phoneNumberId: conn.phone_number_id, templateName, languageCode, idempotencyKeyUsed: Boolean(effectiveIdempotencyKey) });
   }
@@ -1697,6 +1881,47 @@ const ensureContactTag = async (contactId: number, tagName: string, color = '#64
   );
 };
 
+const resolveMetaWebhookSignatureSecret = (): string => {
+  const runtime = getRuntimeSettings() as any;
+  const runtimeSecret = String(runtime?.metaLeadAdsAppSecret || "").trim();
+  if (runtimeSecret) return runtimeSecret;
+
+  return String(process.env.META_APP_SECRET || process.env.META_CLIENT_SECRET || "").trim();
+};
+
+const resolveMetaWebhookSignatureRequired = (): boolean => {
+  const runtime = getRuntimeSettings() as any;
+  const raw = runtime?.metaLeadAdsWebhookRequireSignature;
+
+  if (raw === undefined || raw === null || String(raw).trim() === "") return true;
+  return ["1", "true", "yes", "on"].includes(String(raw).trim().toLowerCase());
+};
+
+const verifyMetaWebhookSignature = (req: any, body: any): { ok: boolean; reason?: string } => {
+  const signatureHeader = String(req.headers?.["x-hub-signature-256"] || "").trim();
+  const signatureSecret = resolveMetaWebhookSignatureSecret();
+
+  if (!signatureHeader) return { ok: false, reason: "missing_signature_header" };
+  if (!signatureSecret) return { ok: false, reason: "missing_signature_secret" };
+  if (!signatureHeader.startsWith("sha256=")) return { ok: false, reason: "invalid_signature_format" };
+
+  const provided = signatureHeader.slice("sha256=".length).trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(provided)) return { ok: false, reason: "invalid_signature_hex" };
+
+  const rawPayload = JSON.stringify(body || {});
+  const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload).digest("hex");
+
+  try {
+    const providedBuf = Buffer.from(provided, "hex");
+    const expectedBuf = Buffer.from(expected, "hex");
+    if (providedBuf.length !== expectedBuf.length) return { ok: false, reason: "signature_length_mismatch" };
+    if (!crypto.timingSafeEqual(providedBuf, expectedBuf)) return { ok: false, reason: "signature_mismatch" };
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "signature_compare_failed" };
+  }
+};
+
 aiRoutes.get('/meta-leads/webhook', async (req: any, res) => {
   const mode = String(req.query['hub.mode'] || '');
   const token = String(req.query['hub.verify_token'] || '');
@@ -1765,7 +1990,37 @@ const extractMetaLeadEvents = async (body: any, companyId: number): Promise<any[
 };
 
 const processMetaLeadEvent = async (body: any) => {
-  const fieldData = body?.form_fields || body?.field_data || body?.lead?.field_data || {};
+  const incomingLeadgenId = String(body?.leadgen_id || body?.lead?.id || '').trim();
+  let fieldData: any = body?.form_fields || body?.field_data || body?.lead?.field_data || {};
+  let hasAnyFieldData = Array.isArray(fieldData)
+    ? fieldData.length > 0
+    : (fieldData && typeof fieldData === 'object' ? Object.keys(fieldData).length > 0 : Boolean(fieldData));
+
+  // If payload comes flattened (e.g. via relay/n8n) with leadgen_id but without field_data,
+  // backfill lead details from Graph before extracting contact fields.
+  if (!hasAnyFieldData && incomingLeadgenId) {
+    try {
+      const details = await fetchLeadgenDetails(Number(body.companyId || 1), incomingLeadgenId);
+      if (details?.id) {
+        fieldData = Array.isArray(details.field_data) ? details.field_data : fieldData;
+        hasAnyFieldData = Array.isArray(fieldData)
+          ? fieldData.length > 0
+          : (fieldData && typeof fieldData === 'object' ? Object.keys(fieldData).length > 0 : Boolean(fieldData));
+        body.form_id = String(body.form_id || details.form_id || '').trim();
+        body.ad_id = String(body.ad_id || details.ad_id || '').trim();
+        body.campaign_id = String(body.campaign_id || details.campaign_id || '').trim();
+        body.adset_id = String(body.adset_id || details.adgroup_id || '').trim();
+      }
+    } catch {
+      // keep original payload; downstream guard handles no-op events
+    }
+  }
+
+  // Ignore malformed/no-op payloads to avoid polluting reports with empty lead rows.
+  if (!incomingLeadgenId && !hasAnyFieldData) {
+    return { ok: true, ingested: false, outreach: false, reason: 'missing_lead_payload' };
+  }
+
   const getField = (k: string) => {
     if (!fieldData) return '';
     if (Array.isArray(fieldData)) {
@@ -1787,6 +2042,7 @@ const processMetaLeadEvent = async (body: any) => {
   const formId = String(body.form_id || body?.form?.id || '').trim();
   const formNameFromPayload = String(body.form_name || body?.form?.name || body?.lead?.form_name || '').trim();
   const formName = formNameFromPayload || await resolveMetaFormName(companyId, formId);
+  const sourceLabel = String(formName || (formId ? `Formulario ${formId}` : 'Meta Lead Ads')).trim();
 
   await sequelize.query(`INSERT INTO meta_lead_events (company_id, event_id, page_id, form_id, form_name, leadgen_id, ad_id, campaign_id, adset_id, form_fields_json, payload_json, contact_phone, contact_email, contact_name, created_at, updated_at)
     VALUES (:companyId, :eventId, :pageId, :formId, :formName, :leadgenId, :adId, :campaignId, :adsetId, :formFieldsJson, :payloadJson, :phone, :email, :name, NOW(), NOW())`, {
@@ -1796,7 +2052,7 @@ const processMetaLeadEvent = async (body: any) => {
       pageId: String(body.page_id || ''),
       formId,
       formName,
-      leadgenId: String(body.leadgen_id || ''),
+      leadgenId: incomingLeadgenId,
       adId: String(body.ad_id || ''),
       campaignId: String(body.campaign_id || ''),
       adsetId: String(body.adset_id || ''),
@@ -1809,13 +2065,29 @@ const processMetaLeadEvent = async (body: any) => {
     type: QueryTypes.INSERT
   });
 
-  const normalizedPhone = phone;
-  const hasRealPhone = Boolean(phone);
+  const normalizeWaPhone = (raw: string) => {
+    const d = String(raw || '').replace(/\D/g, '');
+    if (!d) return '';
+    if (d.startsWith('54') && d.length >= 12 && d[2] !== '9') return `549${d.slice(2)}`;
+    return d;
+  };
+
+  const normalizedPhone = normalizeWaPhone(phone);
   if (!normalizedPhone) return { ok: true, ingested: true, outreach: false, reason: 'no_phone' };
 
   let contact: any = await Contact.findOne({ where: { number: normalizedPhone, companyId } } as any);
-  if (!contact) contact = await Contact.create({ name: name || normalizedPhone, number: normalizedPhone, email, companyId, isGroup: false, lead_score: scoreFromText(JSON.stringify(fieldData || {}), 0), leadStatus: 'engaged', needs: JSON.stringify(fieldData || {}).slice(0, 900) } as any);
-  else await contact.update({ name: name || contact.name, email: email || contact.email, lead_score: scoreFromText(JSON.stringify(fieldData || {}), Number(contact.lead_score || 0)), leadStatus: 'engaged', needs: JSON.stringify(fieldData || {}).slice(0, 900), updatedAt: new Date() } as any);
+  if (!contact) {
+    const [fallbackBySuffix]: any = await sequelize.query(
+      `SELECT id FROM contacts WHERE "companyId" = :companyId AND RIGHT(REGEXP_REPLACE(COALESCE(number,''), '\\D', '', 'g'), 10) = :last10 ORDER BY id DESC LIMIT 1`,
+      { replacements: { companyId, last10: normalizedPhone.slice(-10) }, type: QueryTypes.SELECT }
+    );
+    if (fallbackBySuffix?.id) {
+      contact = await Contact.findByPk(Number(fallbackBySuffix.id));
+    }
+  }
+
+  if (!contact) contact = await Contact.create({ name: name || normalizedPhone, number: normalizedPhone, email, source: sourceLabel, companyId, isGroup: false, lead_score: scoreFromText(JSON.stringify(fieldData || {}), 0), leadStatus: 'nuevo_ingreso', needs: JSON.stringify(fieldData || {}).slice(0, 900) } as any);
+  else await contact.update({ name: name || contact.name, number: normalizeWaPhone(String(contact.number || normalizedPhone)), email: email || contact.email, source: (!String(contact.source || '').trim() || /^meta_form_/i.test(String(contact.source || '').trim())) ? sourceLabel : contact.source, lead_score: scoreFromText(JSON.stringify(fieldData || {}), Number(contact.lead_score || 0)), leadStatus: String(contact.leadStatus || '').trim() || 'nuevo_ingreso', needs: JSON.stringify(fieldData || {}).slice(0, 900), updatedAt: new Date() } as any);
 
 
   await ensureMetaFormsTag(Number(contact.id));
@@ -1827,11 +2099,78 @@ const processMetaLeadEvent = async (body: any) => {
     message: `Lead Meta Ads ${String(formName || '').trim() ? `(form ${String(formName).trim()})` : (String(formId || '').trim() ? `(form ${String(formId).trim()})` : '')}`,
     source: 'meta-lead-webhook'
   });
+  if (tokkoLeadSync?.ok) {
+    await ensureContactTag(Number(contact.id), 'enviado_tokko', '#0EA5E9');
+  }
 
   const whatsapp: any = await resolveWhatsapp(companyId);
   let ticket: any = await Ticket.findOne({ where: { contactId: contact.id, whatsappId: whatsapp.id }, order: [['updatedAt', 'DESC']] } as any);
   if (ticket && !['open', 'pending'].includes(String(ticket.status || ''))) ticket = null;
+  const createdNewTicket = !ticket;
   if (!ticket) ticket = await Ticket.create({ contactId: contact.id, whatsappId: whatsapp.id, companyId, status: 'pending', unreadMessages: 0, lastMessage: 'Nuevo lead Meta Ads' } as any);
+
+  let helloTemplateSent = false;
+  let helloTemplateError: string | null = null;
+
+  if (createdNewTicket && normalizedPhone) {
+    const runtime = getRuntimeSettings() as any;
+    const helloTemplateName = String(runtime.waFirstContactHolaTemplateName || process.env.WA_FIRST_CONTACT_HOLA_TEMPLATE_NAME || 'hola').trim();
+    const helloTemplateLang = String(runtime.waFirstContactHolaTemplateLang || process.env.WA_FIRST_CONTACT_HOLA_TEMPLATE_LANG || 'es_AR').trim();
+
+    try {
+      const [conn]: any = await sequelize.query(
+        `SELECT * FROM meta_connections WHERE company_id = :companyId ORDER BY id DESC LIMIT 1`,
+        { replacements: { companyId }, type: QueryTypes.SELECT }
+      );
+
+      if (conn?.access_token && conn?.phone_number_id && helloTemplateName) {
+        const firstName = String(name || contact?.name || '').trim().split(/\s+/)[0] || 'Hola';
+        const helloMessageId = await sendCloudTemplateWithCredentials(
+          String(conn.phone_number_id),
+          String(conn.access_token),
+          normalizedPhone,
+          helloTemplateName,
+          helloTemplateLang,
+          `meta-hola:${companyId}:${incomingLeadgenId || ticket.id}`,
+          [firstName]
+        );
+
+        helloTemplateSent = true;
+        const helloPreview = buildHolaTemplatePreview(firstName);
+
+        await ticket.update({
+          status: 'open',
+          lastMessage: helloPreview,
+          updatedAt: new Date()
+        } as any);
+
+        await Message.create({
+          id: String(helloMessageId || `meta-hola-${ticket.id}-${Date.now()}`),
+          body: helloPreview,
+          fromMe: true,
+          ack: 1,
+          read: true,
+          mediaType: 'chat',
+          ticketId: Number(ticket.id),
+          contactId: Number(contact.id),
+          providerMessageId: String(helloMessageId || '')
+        } as any);
+      } else {
+        helloTemplateError = 'missing_meta_connection_or_phone';
+      }
+    } catch (e: any) {
+      helloTemplateError = String(e?.message || e || 'hello_template_failed');
+      try {
+        await ticket.update({
+          status: 'pending',
+          lastMessage: 'Lead creado (falló template Hola inicial)',
+          updatedAt: new Date()
+        } as any);
+      } catch {
+        // no-op
+      }
+    }
+  }
 
   return {
     ok: true,
@@ -1839,6 +2178,10 @@ const processMetaLeadEvent = async (body: any) => {
     outreach: true,
     contactId: contact.id,
     ticketId: ticket.id,
+    helloTemplate: {
+      sent: helloTemplateSent,
+      error: helloTemplateError
+    },
     tokko: {
       synced: Boolean(tokkoLeadSync?.ok),
       skipped: Boolean(tokkoLeadSync?.skipped),
@@ -1850,6 +2193,22 @@ const processMetaLeadEvent = async (body: any) => {
 aiRoutes.post('/meta-leads/webhook', async (req: any, res) => {
   await ensureMetaLeadTables();
   const rootBody = req.body || {};
+
+  const signatureCheck = verifyMetaWebhookSignature(req, rootBody);
+  const signatureRequired = resolveMetaWebhookSignatureRequired();
+  if (!signatureCheck.ok) {
+    if (signatureRequired) {
+      console.warn('[meta-leads][hardening] blocked webhook due to invalid signature', {
+        reason: signatureCheck.reason
+      });
+      return res.status(401).json({ ok: false, error: 'invalid_signature', reason: signatureCheck.reason });
+    }
+
+    console.warn('[meta-leads][hardening] signature validation failed but accepted due to fail-open setting', {
+      reason: signatureCheck.reason
+    });
+  }
+
   const companyId = Number(rootBody.companyId || 1);
   const events = await extractMetaLeadEvents(rootBody, companyId);
   const results = [] as any[];

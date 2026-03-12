@@ -18,7 +18,8 @@ const ListContactsService = async ({
     where,
     include: [
       { association: "tags", through: { attributes: [] }, required: false },
-      { association: "assignedUser", required: false }
+      { association: "assignedUser", required: false },
+      { association: "tickets", required: false, attributes: ["id", "status", "unreadMessages", "updatedAt"] }
     ],
     order: [["updatedAt", "DESC"]]
   });

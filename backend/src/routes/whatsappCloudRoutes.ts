@@ -431,19 +431,29 @@ const validateWebhookTimestampWindow = (req: any): { ok: boolean; reason?: strin
 };
 
 const extractWebhookEventNonce = (req: any): string => {
+  const messageId = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.id;
+  const statusId = req.body?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.id;
+  const leadgenId = req.body?.entry?.[0]?.changes?.[0]?.value?.leadgen_id;
+  const changeField = req.body?.entry?.[0]?.changes?.[0]?.field;
+  const changeCreated = req.body?.entry?.[0]?.changes?.[0]?.value?.created_time;
+
   const candidates = [
     req.get("x-meta-event-id"),
     req.get("x-webhook-id"),
     req.get("x-event-id"),
     req.get("x-request-id"),
-    req.body?.entry?.[0]?.id,
+    messageId,
+    statusId,
+    leadgenId,
+    (changeField && changeCreated) ? `${changeField}:${changeCreated}` : null,
     req.body?.id
   ];
 
   for (const candidate of candidates) {
     if (candidate === undefined || candidate === null) continue;
-    const clean = String(candidate).trim().toLowerCase().replace(/[^a-z0-9:_\-.]/g, "").slice(0, 160);
-    if (clean) return clean;
+    const clean = String(candidate).trim().toLowerCase().replace(/[^a-z0-9:_\-.]/g, "").slice(0, 200);
+    // Ignore page-level ids that are reused across many events (e.g. entry[0].id / page id).
+    if (clean && !/^\d{12,20}$/.test(clean)) return clean;
   }
 
   return "";
@@ -807,7 +817,8 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
       replayGuardReservationConflictRate: integrationReplayGuardReservationConflictRate,
       missingIdempotencyFingerprintReplayBlocked: readCounter(integrationApiCounters, "outbound.missing_idempotency_fingerprint_replay_blocked"),
       missingIdempotencyFingerprintGuardReserved: readCounter(integrationApiCounters, "outbound.missing_idempotency_fingerprint_guard_reserved"),
-      retryWithoutIdempotencyFingerprintGuarded: readCounter(integrationApiCounters, "outbound.retry_without_idempotency_fingerprint_guarded")
+      retryWithoutIdempotencyFingerprintGuarded: readCounter(integrationApiCounters, "outbound.retry_without_idempotency_fingerprint_guarded"),
+      recentRetryWindowBlocked: readCounter(integrationApiCounters, "outbound.recent_retry_window_blocked")
     }
   };
 
@@ -887,6 +898,9 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
   }
   if (summary.integrationApi.retryWithoutIdempotencyFingerprintGuarded > 0) {
     recommendations.push("Se observaron retries sin Idempotency-Key protegidos por guard fallback: migrar clientes a idempotency key estable por request para reducir dependencia del fingerprint temporal (TTL). ");
+  }
+  if (summary.integrationApi.recentRetryWindowBlocked > 0) {
+    recommendations.push("La Integration API bloqueó duplicados por ventana corta de retry (recent_retry_window): serializar la cadena de retries por envío lógico y agregar jitter para evitar ráfagas paralelas del mismo payload.");
   }
   if (summary.integrationApi.replayGuardReservationConflict > 0) {
     recommendations.push("Se detectaron conflictos de reserva en replay guard outbound (carreras por misma Idempotency-Key): aplicar single-flight por clave idempotente y agregar jitter corto en retries para evitar stampede de workers.");
@@ -1734,6 +1748,21 @@ const buildDerivedHardeningAlerts = (inbound: any, outbound: any, integrationApi
     });
   }
 
+  const integrationRecentRetryWindowBlocked = readCounter(integrationApiCounters, "outbound.recent_retry_window_blocked");
+  if (integrationRecentRetryWindowBlocked >= 3) {
+    runtimeOutboundAlerts.push({
+      signal: "outbound_integration_recent_retry_window_blocked_spike",
+      threshold: 3,
+      inWindow: integrationRecentRetryWindowBlocked,
+      remaining: 0,
+      severity: integrationRecentRetryWindowBlocked >= 10 ? "critical" : "warn",
+      source: "derived_metrics",
+      details: {
+        metric: "outbound.recent_retry_window_blocked"
+      }
+    });
+  }
+
   const integrationIdempotencyTooWeakBlocked = readCounter(integrationApiCounters, "outbound.idempotency_key_too_weak_blocked");
   if (integrationIdempotencyTooWeakBlocked >= 3) {
     runtimeOutboundAlerts.push({
@@ -2080,18 +2109,22 @@ whatsappCloudRoutes.post("/webhook", async (req, res) => {
 
   const timestampValidation = validateWebhookTimestampWindow(req);
   if (!timestampValidation.ok) {
-    recordInboundTimestampOutsideAllowedSkewBlocked({
-      reason: timestampValidation.reason,
-      ageMs: timestampValidation.ageMs ?? null,
-      replayWindowMs: timestampValidation.replayWindowMs,
-      futureSkewMs: timestampValidation.futureSkewMs
-    });
-    return res.status(400).json({
-      error: "Invalid webhook timestamp",
-      reason: timestampValidation.reason,
-      replayWindowMs: timestampValidation.replayWindowMs,
-      futureSkewMs: timestampValidation.futureSkewMs
-    });
+    // Meta can omit explicit timestamp headers on some webhook deliveries.
+    // Keep strict enforcement for invalid/old/future values, but do not block missing timestamp.
+    if (String(timestampValidation.reason || "") !== "timestamp_missing") {
+      recordInboundTimestampOutsideAllowedSkewBlocked({
+        reason: timestampValidation.reason,
+        ageMs: timestampValidation.ageMs ?? null,
+        replayWindowMs: timestampValidation.replayWindowMs,
+        futureSkewMs: timestampValidation.futureSkewMs
+      });
+      return res.status(400).json({
+        error: "Invalid webhook timestamp",
+        reason: timestampValidation.reason,
+        replayWindowMs: timestampValidation.replayWindowMs,
+        futureSkewMs: timestampValidation.futureSkewMs
+      });
+    }
   }
 
   const nonceReservation = reserveWebhookEventNonce(req);

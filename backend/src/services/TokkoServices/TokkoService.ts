@@ -84,7 +84,7 @@ const resolveLocation = async (query?: string) => {
 
 export const syncLeadToTokko = async (lead: { name?: string; phone?: string; email?: string; message?: string; source?: string; propertyId?: number; tags?: string[] }) => {
   const s = getRuntimeSettings();
-  if (!s.tokkoEnabled || !s.tokkoSyncLeadsEnabled || !s.tokkoApiKey) return { ok: false, skipped: true, reason: "tokko_disabled_or_missing_key" };
+  if (!s.tokkoEnabled || !s.tokkoApiKey) return { ok: false, skipped: true, reason: "tokko_disabled_or_missing_key" };
 
   const url = buildUrl(s.tokkoBaseUrl, s.tokkoLeadsPath || "/webcontact/", s.tokkoApiKey);
   const payload: any = {
@@ -108,7 +108,7 @@ export const syncLeadToTokko = async (lead: { name?: string; phone?: string; ema
 
 export const searchTokkoProperties = async (args: { q?: string; operationType?: string; propertyType?: string; location?: string; minPrice?: number; maxPrice?: number; minBedrooms?: number; limit?: number; offset?: number; currency?: string }) => {
   const s = getRuntimeSettings();
-  if (!s.tokkoEnabled || !s.tokkoAgentSearchEnabled || !s.tokkoApiKey) return { ok: false, skipped: true, reason: "tokko_disabled_or_missing_key" };
+  if (!s.tokkoEnabled || !s.tokkoApiKey) return { ok: false, skipped: true, reason: "tokko_disabled_or_missing_key" };
 
   const limit = Math.max(1, Math.min(50, Number(args.limit || 20)));
   const offset = Math.max(0, Number(args.offset || 0));
@@ -204,7 +204,7 @@ export const syncTokkoLocationsToKnowledge = async (companyId = 1) => {
   if (!documentId) {
     const inserted: any = await sequelize.query(
       `INSERT INTO kb_documents (company_id, title, category, source_type, status, content, created_at, updated_at)
-       VALUES (:companyId, :title, :category, 'tokko_locations', 'active', :content, NOW(), NOW())
+       VALUES (:companyId, :title, :category, 'tokko_locations', 'ready', :content, NOW(), NOW())
        RETURNING id`,
       { replacements: { companyId, title: "Ubicaciones Tokko", category: "tokko", content }, type: QueryTypes.INSERT }
     );
@@ -212,7 +212,7 @@ export const syncTokkoLocationsToKnowledge = async (companyId = 1) => {
   } else {
     await sequelize.query(
       `UPDATE kb_documents
-       SET title = :title, category = :category, status = 'active', content = :content, updated_at = NOW()
+       SET title = :title, category = :category, status = 'ready', content = :content, updated_at = NOW()
        WHERE id = :documentId`,
       { replacements: { documentId, title: "Ubicaciones Tokko", category: "tokko", content }, type: QueryTypes.UPDATE }
     );

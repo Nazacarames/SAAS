@@ -56,6 +56,7 @@ export interface RuntimeSettings {
   waWebhookReplayWindowSeconds: number;
   waWebhookFutureSkewSeconds: number;
   waWebhookEventNonceCacheMaxEntries: number;
+  waWebhookAllowUnsigned: boolean;
   waOutboundRetryOnTimeout: boolean;
   waOutboundRetryRequireIdempotencyKey: boolean;
 }
@@ -137,6 +138,7 @@ export const getRuntimeSettings = (): RuntimeSettings => {
     waWebhookReplayWindowSeconds: clampInt(fromFile.waWebhookReplayWindowSeconds || process.env.WA_WEBHOOK_REPLAY_WINDOW_SECONDS || 120, 120, 30, 900),
     waWebhookFutureSkewSeconds: clampInt(fromFile.waWebhookFutureSkewSeconds || process.env.WA_WEBHOOK_FUTURE_SKEW_SECONDS || 120, 120, 5, 600),
     waWebhookEventNonceCacheMaxEntries: clampInt(fromFile.waWebhookEventNonceCacheMaxEntries || process.env.WA_WEBHOOK_EVENT_NONCE_CACHE_MAX_ENTRIES || 20000, 20000, 500, 200000),
+    waWebhookAllowUnsigned: parseBool(fromFile.waWebhookAllowUnsigned, false),
     waOutboundRetryOnTimeout: parseBool(fromFile.waOutboundRetryOnTimeout, false),
     waOutboundRetryRequireIdempotencyKey: parseBool(fromFile.waOutboundRetryRequireIdempotencyKey, true)
   };
@@ -194,6 +196,7 @@ export const saveRuntimeSettings = (patch: Partial<RuntimeSettings>) => {
     waWebhookReplayWindowSeconds: clampInt((patch as any).waWebhookReplayWindowSeconds ?? (current as any).waWebhookReplayWindowSeconds ?? 120, 120, 30, 900),
     waWebhookFutureSkewSeconds: clampInt((patch as any).waWebhookFutureSkewSeconds ?? (current as any).waWebhookFutureSkewSeconds ?? 120, 120, 5, 600),
     waWebhookEventNonceCacheMaxEntries: clampInt((patch as any).waWebhookEventNonceCacheMaxEntries ?? (current as any).waWebhookEventNonceCacheMaxEntries ?? 20000, 20000, 500, 200000),
+    waWebhookAllowUnsigned: typeof (patch as any).waWebhookAllowUnsigned === "boolean" ? Boolean((patch as any).waWebhookAllowUnsigned) : Boolean((current as any).waWebhookAllowUnsigned),
     waOutboundRetryOnTimeout: typeof (patch as any).waOutboundRetryOnTimeout === "boolean" ? Boolean((patch as any).waOutboundRetryOnTimeout) : Boolean((current as any).waOutboundRetryOnTimeout),
     waOutboundRetryRequireIdempotencyKey: typeof (patch as any).waOutboundRetryRequireIdempotencyKey === "boolean" ? Boolean((patch as any).waOutboundRetryRequireIdempotencyKey) : Boolean((current as any).waOutboundRetryRequireIdempotencyKey)
   };

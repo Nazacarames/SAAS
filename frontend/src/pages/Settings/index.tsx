@@ -15,22 +15,13 @@ const Settings = () => {
   const [tokkoBaseUrl, setTokkoBaseUrl] = useState('https://www.tokkobroker.com/api/v1');
   const [tokkoLeadsPath, setTokkoLeadsPath] = useState('/webcontact/');
   const [tokkoPropertiesPath, setTokkoPropertiesPath] = useState('/property/');
-  const [tokkoSyncLeadsEnabled, setTokkoSyncLeadsEnabled] = useState(true);
-  const [tokkoAgentSearchEnabled, setTokkoAgentSearchEnabled] = useState(true);
-  const [tokkoSyncContactsEnabled, setTokkoSyncContactsEnabled] = useState(false);
-  const [tokkoSyncContactTagsEnabled, setTokkoSyncContactTagsEnabled] = useState(false);
-  const [tokkoFallbackToLocalSearch, setTokkoFallbackToLocalSearch] = useState(true);
-  const [tokkoDebugLogsEnabled, setTokkoDebugLogsEnabled] = useState(false);
-  const [tokkoRateLimitEnabled, setTokkoRateLimitEnabled] = useState(true);
   const [tokkoCooldownSeconds, setTokkoCooldownSeconds] = useState('10');
-  const [tokkoSafeWriteMode, setTokkoSafeWriteMode] = useState(true);
 
   const [metaLeadAdsEnabled, setMetaLeadAdsEnabled] = useState(false);
   const [metaLeadAdsWebhookVerifyToken, setMetaLeadAdsWebhookVerifyToken] = useState(DEFAULT_META_LEADS_VERIFY_TOKEN);
   const [metaLeadAdsAppId, setMetaLeadAdsAppId] = useState('');
   const [metaLeadAdsAppSecret, setMetaLeadAdsAppSecret] = useState('');
   const [metaLeadAdsPageId, setMetaLeadAdsPageId] = useState('');
-  const [tokkoTabVisible, setTokkoTabVisible] = useState(true);
   const [webhookStatus, setWebhookStatus] = useState<any>(null);
 
   const [metaOauthStatus, setMetaOauthStatus] = useState<any>(null);
@@ -62,22 +53,13 @@ const Settings = () => {
       setTokkoBaseUrl(s.tokkoBaseUrl || 'https://www.tokkobroker.com/api/v1');
       setTokkoLeadsPath(s.tokkoLeadsPath || '/webcontact/');
       setTokkoPropertiesPath(s.tokkoPropertiesPath || '/property/');
-      setTokkoSyncLeadsEnabled(Boolean(s.tokkoSyncLeadsEnabled ?? true));
-      setTokkoAgentSearchEnabled(Boolean(s.tokkoAgentSearchEnabled ?? true));
-      setTokkoSyncContactsEnabled(Boolean(s.tokkoSyncContactsEnabled ?? false));
-      setTokkoSyncContactTagsEnabled(Boolean(s.tokkoSyncContactTagsEnabled ?? false));
-      setTokkoFallbackToLocalSearch(Boolean(s.tokkoFallbackToLocalSearch ?? true));
-      setTokkoDebugLogsEnabled(Boolean(s.tokkoDebugLogsEnabled ?? false));
-      setTokkoRateLimitEnabled(Boolean(s.tokkoRateLimitEnabled ?? true));
       setTokkoCooldownSeconds(String(s.tokkoCooldownSeconds || 10));
-      setTokkoSafeWriteMode(Boolean(s.tokkoSafeWriteMode ?? true));
 
       setMetaLeadAdsEnabled(Boolean(s.metaLeadAdsEnabled ?? false));
       setMetaLeadAdsWebhookVerifyToken(String(s.metaLeadAdsWebhookVerifyToken || DEFAULT_META_LEADS_VERIFY_TOKEN));
       setMetaLeadAdsAppId(String(s.metaLeadAdsAppId || ''));
       setMetaLeadAdsAppSecret('');
       setMetaLeadAdsPageId(String(s.metaLeadAdsPageId || ''));
-      setTokkoTabVisible(Boolean(s.tokkoTabVisible ?? true));
 
       try {
         const ws = await api.get('/settings/meta/webhook-status');
@@ -119,16 +101,16 @@ const Settings = () => {
         tokkoBaseUrl,
         tokkoLeadsPath,
         tokkoPropertiesPath,
-        tokkoSyncLeadsEnabled,
-        tokkoAgentSearchEnabled,
-        tokkoSyncContactsEnabled,
-        tokkoSyncContactTagsEnabled,
-        tokkoFallbackToLocalSearch,
-        tokkoDebugLogsEnabled,
-        tokkoRateLimitEnabled,
+        tokkoSyncLeadsEnabled: true,
+        tokkoAgentSearchEnabled: true,
+        tokkoSyncContactsEnabled: true,
+        tokkoSyncContactTagsEnabled: true,
+        tokkoFallbackToLocalSearch: true,
+        tokkoDebugLogsEnabled: false,
+        tokkoRateLimitEnabled: true,
         tokkoCooldownSeconds: Number(tokkoCooldownSeconds || 10),
-        tokkoSafeWriteMode,
-        tokkoTabVisible,
+        tokkoSafeWriteMode: true,
+        tokkoTabVisible: true,
 
         metaLeadAdsEnabled,
         metaLeadAdsAppId,
@@ -193,7 +175,7 @@ const Settings = () => {
         </Alert>
 
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant='scrollable' scrollButtons='auto'>
-          <Tab label={tokkoTabVisible ? 'Tokko' : 'Tokko (oculta en menú)'} />
+          <Tab label='Tokko' />
           <Tab label='Configuración Meta' />
           <Tab label='Templates' />
           <Tab label='Enrutamiento & Score' />
@@ -212,16 +194,7 @@ const Settings = () => {
               <Typography variant='h6'>Integración Tokko Broker</Typography>
               <Chip size='small' color={tokkoEnabled ? 'success' : 'default'} label={tokkoEnabled ? 'Activa' : 'Inactiva'} />
             </Stack>
-            <FormControlLabel control={<Switch checked={tokkoTabVisible} onChange={(e) => setTokkoTabVisible(e.target.checked)} />} label='Mostrar pestaña Tokko en UI' />
-            <FormControlLabel control={<Switch checked={tokkoEnabled} onChange={(e) => setTokkoEnabled(e.target.checked)} />} label='Master enable Tokko' />
-            <FormControlLabel control={<Switch checked={tokkoSyncLeadsEnabled} onChange={(e) => setTokkoSyncLeadsEnabled(e.target.checked)} />} label='Auto sync de leads' />
-            <FormControlLabel control={<Switch checked={tokkoAgentSearchEnabled} onChange={(e) => setTokkoAgentSearchEnabled(e.target.checked)} />} label='Búsqueda de propiedades para IA' />
-            <FormControlLabel control={<Switch checked={tokkoSyncContactsEnabled} onChange={(e) => setTokkoSyncContactsEnabled(e.target.checked)} />} label='Sync de contactos' />
-            <FormControlLabel control={<Switch checked={tokkoSyncContactTagsEnabled} onChange={(e) => setTokkoSyncContactTagsEnabled(e.target.checked)} />} label='Sync de tags de contacto' />
-            <FormControlLabel control={<Switch checked={tokkoFallbackToLocalSearch} onChange={(e) => setTokkoFallbackToLocalSearch(e.target.checked)} />} label='Fallback a Búsqueda local' />
-            <FormControlLabel control={<Switch checked={tokkoDebugLogsEnabled} onChange={(e) => setTokkoDebugLogsEnabled(e.target.checked)} />} label='Debug logs' />
-            <FormControlLabel control={<Switch checked={tokkoRateLimitEnabled} onChange={(e) => setTokkoRateLimitEnabled(e.target.checked)} />} label='Rate limit habilitado' />
-            <FormControlLabel control={<Switch checked={tokkoSafeWriteMode} onChange={(e) => setTokkoSafeWriteMode(e.target.checked)} />} label='Safe write mode (evita escrituras peligrosas)' />
+            <FormControlLabel control={<Switch checked={tokkoEnabled} onChange={(e) => setTokkoEnabled(e.target.checked)} />} label='Sincronización general Tokko (incluye todos los sync)' />
             <TextField label='Tokko API Key' type='password' value={tokkoApiKey} onChange={(e) => setTokkoApiKey(e.target.value)} />
             <TextField label='Tokko Base URL (editable)' value={tokkoBaseUrl} onChange={(e) => setTokkoBaseUrl(e.target.value)} />
             <TextField label='Tokko Leads endpoint path (editable)' value={tokkoLeadsPath} onChange={(e) => setTokkoLeadsPath(e.target.value)} />

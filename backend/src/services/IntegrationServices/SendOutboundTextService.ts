@@ -7,6 +7,12 @@ import AppError from "../../errors/AppError";
 import { getWbot } from "../../libs/wbot";
 import { getIO } from "../../libs/socket";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
+import {
+  recordOutboundAttempt,
+  recordOutboundDuplicate,
+  recordOutboundRejected,
+  recordOutboundSent
+} from "../../utils/messageStats";
 
 interface SendOutboundTextRequest {
   companyId: number;
@@ -85,6 +91,8 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
   const normalizedText = String(text || "").trim();
   if (!normalizedText) throw new AppError("Text is required", 400);
 
+  recordOutboundAttempt();
+
   const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey || "");
   if (normalizedIdempotencyKey) {
     if (normalizedIdempotencyKey.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
@@ -114,7 +122,11 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
         .digest("hex")
         .slice(0, 24)}`;
 
-  return withOutboundLock(`${companyId}:${toNorm}:${dedupFingerprint}`, async () => {
+  const lockScope = normalizedIdempotencyKey
+    ? `${companyId}:idemp:${normalizedIdempotencyKey}`
+    : `${companyId}:${toNorm}:${dedupFingerprint}`;
+
+  return withOutboundLock(lockScope, async () => {
     const wa = whatsappId
       ? await Whatsapp.findOne({ where: { id: whatsappId, companyId } })
       : await Whatsapp.findOne({ where: { companyId, isDefault: true } });
@@ -142,20 +154,42 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
     if (idempotencyProviderTag) {
       const existing = await Message.findOne({
         where: {
-          contactId: contact.id,
           fromMe: true,
           providerMessageId: idempotencyProviderTag
         },
+        include: [
+          {
+            model: Contact,
+            required: true,
+            where: { companyId }
+          }
+        ],
         order: [["createdAt", "DESC"]]
       });
 
       if (existing) {
         const existingBody = String((existing as any).body || "").trim();
+        const existingContact = (existing as any).contact as Contact | undefined;
+        const existingTo = normalizeNumber(String(existingContact?.number || ""));
+
         if (existingBody !== normalizedText) {
+          recordOutboundRejected("idempotency_payload_mismatch");
           throw new AppError("Idempotency key reuse with different payload is blocked", 409);
         }
 
-        return { conversationId: contact.id, contact, message: existing, idempotencyKey: normalizedIdempotencyKey, duplicate: true };
+        if (existingTo && existingTo !== toNorm) {
+          recordOutboundRejected("idempotency_destination_mismatch");
+          throw new AppError("Idempotency key reuse with different destination is blocked", 409);
+        }
+
+        recordOutboundDuplicate("idempotency_key_hit");
+        return {
+          conversationId: existingContact?.id || contact.id,
+          contact: existingContact || contact,
+          message: existing,
+          idempotencyKey: normalizedIdempotencyKey,
+          duplicate: true
+        };
       }
     }
 
@@ -173,6 +207,7 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
     });
 
     if (recentDuplicate) {
+      recordOutboundDuplicate("recent_retry_window");
       return {
         conversationId: contact.id,
         contact,
@@ -196,6 +231,8 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
       mediaType: "chat",
       providerMessageId: idempotencyProviderTag || null
     } as any);
+
+    recordOutboundSent();
 
     const io = getIO();
     io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message: msg, conversationId: contact.id, contact });

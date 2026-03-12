@@ -24,7 +24,7 @@ import {
   Tooltip
 } from '@mui/material';
 import { Search as SearchIcon, Send as SendIcon, Refresh as RefreshIcon, TextSnippet as TemplateIcon } from '@mui/icons-material';
-import { useEffect, useMemo, useState, type MouseEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
@@ -133,6 +133,8 @@ const Conversations = () => {
   const [savingProgress, setSavingProgress] = useState(false);
   const [savingHandoff, setSavingHandoff] = useState(false);
   const [decisionLogs, setDecisionLogs] = useState<any[]>([]);
+  const messagesFetchSeq = useRef(0);
+  const contactFetchSeq = useRef(0);
 
   const toTs = (value?: string | number) => {
     if (value === null || value === undefined || value === '') return 0;
@@ -163,44 +165,43 @@ const Conversations = () => {
   };
 
   const fetchContactData = async (contactId: number) => {
+    const seq = ++contactFetchSeq.current;
     try {
       const { data } = await api.get('/contacts');
+      if (seq !== contactFetchSeq.current) return;
       const arr = Array.isArray(data) ? data : [];
       const found = arr.find((c: any) => Number(c.id) === Number(contactId));
       setContactData(found || null);
     } catch {
+      if (seq !== contactFetchSeq.current) return;
       setContactData(null);
     }
   };
 
   const fetchConversationMessages = async (contactId: number) => {
+    const seq = ++messagesFetchSeq.current;
     setLoadingMessages(true);
     try {
-      const { data: tks } = await api.get('/conversations', { params: { contactId } });
-      const list = Array.isArray(tks) ? tks : [];
+      // Backend /messages/:conversationId expects contactId (not ticketId).
+      const { data: msgs } = await api.get(`/messages/${contactId}`);
+      const arr = Array.isArray(msgs) ? msgs : [];
 
-      const all = await Promise.all(
-        list.map(async (t: any) => {
-          const { data: msgs } = await api.get(`/messages/${t.id}`);
-          const arr = Array.isArray(msgs) ? msgs : [];
-          return arr.map((m: any) => ({ ...m, ticketId: t.id, ticketStatus: t.status }));
-        })
-      );
-
-      const merged = all.flat();
-      merged.sort((a: any, b: any) => {
+      arr.sort((a: any, b: any) => {
         const da = toTs(a?.createdAt) || toTs(a?.updatedAt) || toTs(a?.timestamp);
         const db = toTs(b?.createdAt) || toTs(b?.updatedAt) || toTs(b?.timestamp);
         if (da !== db) return da - db;
         return Number(a?.id || 0) - Number(b?.id || 0);
       });
 
-      setMessages(merged);
+      if (seq !== messagesFetchSeq.current) return;
+      setMessages(arr);
     } catch (e) {
+      if (seq !== messagesFetchSeq.current) return;
       console.error(e);
       toast.error('Error al cargar mensajes');
       setMessages([]);
     } finally {
+      if (seq !== messagesFetchSeq.current) return;
       setLoadingMessages(false);
     }
   };

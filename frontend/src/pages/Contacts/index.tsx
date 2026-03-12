@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
-type LeadStatus = 'unread' | 'read' | 'waiting';
+type LeadStatus = 'unread' | 'read' | 'waiting' | 'new' | 'engaged' | 'warm' | 'hot' | string;
 
 interface Lead {
   id: number;
@@ -40,20 +40,96 @@ interface Lead {
   lead_score?: number;
   assignedUserId?: number | null;
   assignedUser?: { id: number; name: string } | null;
+  tickets?: Array<{ id: number; status?: string; unreadMessages?: number; updatedAt?: string }>;
+  tags?: Array<{ id?: number; name?: string; color?: string }>;
   createdAt: string;
   updatedAt: string;
 }
 
-const statusLabel: Record<LeadStatus, string> = {
+const statusLabel: Record<string, string> = {
   unread: 'Nuevo',
   read: 'Leído',
-  waiting: 'Esperando'
+  waiting: 'Esperando',
+  new: 'Nuevo',
+  engaged: 'Contactado',
+  warm: 'Calificado',
+  hot: 'Caliente',
+  nuevo_ingreso: 'Nuevo ingreso',
+  primer_contacto: 'Primer contacto',
+  esperando_respuesta: 'Esperando respuesta',
+  calificacion: 'Calificación',
+  propuesta: 'Propuesta',
+  cierre: 'Cierre',
+  concretado: 'Concretado'
 };
 
-const statusColor: Record<LeadStatus, any> = {
+const statusColor: Record<string, any> = {
   unread: 'info',
   read: 'default',
-  waiting: 'warning'
+  waiting: 'warning',
+  new: 'info',
+  engaged: 'primary',
+  warm: 'warning',
+  hot: 'error',
+  nuevo_ingreso: 'default',
+  primer_contacto: 'primary',
+  esperando_respuesta: 'secondary',
+  calificacion: 'info',
+  propuesta: 'warning',
+  cierre: 'error',
+  concretado: 'success'
+};
+
+const formatSourceLabel = (source?: string) => {
+  const raw = String(source || '').trim();
+  if (!raw) return '-';
+  if (/^meta_form_/i.test(raw)) return raw.replace(/^meta_form_/i, '').replace(/_/g, ' ').trim();
+  if (/^formulario\s+\d+$/i.test(raw)) return 'Formulario Meta (nombre no disponible)';
+  return raw;
+};
+
+const getLatestTicket = (lead: Lead) => {
+  const tickets = Array.isArray(lead.tickets) ? lead.tickets : [];
+  if (!tickets.length) return null;
+  return [...tickets].sort((a, b) => {
+    const ta = new Date(a?.updatedAt || 0).getTime();
+    const tb = new Date(b?.updatedAt || 0).getTime();
+    return tb - ta;
+  })[0];
+};
+
+const conversationChipFromLead = (lead: Lead): { label: string; color: any } => {
+  const latest = getLatestTicket(lead);
+  if (!latest) return { label: 'Sin conversación', color: 'default' };
+
+  const unread = Number(latest?.unreadMessages || 0);
+  const st = String(latest?.status || '').toLowerCase();
+  if (unread > 0) return { label: `Con mensajes (${unread})`, color: 'warning' };
+  if (st === 'open') return { label: 'Conversación abierta', color: 'success' };
+  if (st === 'pending') return { label: 'Conversación pendiente', color: 'info' };
+  if (st === 'closed') return { label: 'Conversación cerrada', color: 'default' };
+  return { label: 'Con conversación', color: 'default' };
+};
+
+const pipelinePhaseFromLead = (lead: Lead): { key: string; label: string; color: any } => {
+  const score = Number(lead.lead_score || 0);
+  const leadStatus = String(lead.leadStatus || '').toLowerCase();
+  const latest = getLatestTicket(lead);
+  const ticketStatus = String(latest?.status || '').toLowerCase();
+  const unread = Number(latest?.unreadMessages || 0);
+
+  const explicitBotPhase = new Set(['nuevo_ingreso', 'primer_contacto', 'esperando_respuesta', 'calificacion', 'propuesta', 'cierre', 'concretado']);
+  if (explicitBotPhase.has(leadStatus)) {
+    return { key: leadStatus, label: statusLabel[leadStatus] || leadStatus, color: statusColor[leadStatus] || 'default' };
+  }
+
+  if (!latest) return { key: 'nuevo_ingreso', label: 'Nuevo ingreso', color: 'default' };
+  if (ticketStatus === 'closed' && score >= 80) return { key: 'concretado', label: 'Concretado', color: 'success' };
+  if (score >= 75 || leadStatus === 'hot') return { key: 'cierre', label: 'Cierre', color: 'error' };
+  if (score >= 55 || leadStatus === 'warm') return { key: 'propuesta', label: 'Propuesta', color: 'warning' };
+  if (score >= 30 || leadStatus === 'engaged') return { key: 'calificacion', label: 'Calificación', color: 'info' };
+  if (unread > 0 || ticketStatus === 'pending') return { key: 'esperando_respuesta', label: 'Esperando respuesta', color: 'secondary' };
+  return { key: 'primer_contacto', label: 'Primer contacto', color: 'primary' };
 };
 
 type UserOption = { id: number; name: string };
@@ -114,10 +190,19 @@ const Leads = () => {
 
   const stats = useMemo(() => {
     const total = leads.length;
-    const nuevos = leads.filter((l) => (l.leadStatus || 'unread') === 'unread').length;
-    const esperando = leads.filter((l) => (l.leadStatus || 'unread') === 'waiting').length;
-    const calientes = leads.filter((l) => Number(l.lead_score || 0) >= 70).length;
-    return { total, nuevos, esperando, calientes };
+    const byPhase = leads.reduce((acc: Record<string, number>, lead) => {
+      const phase = pipelinePhaseFromLead(lead).key;
+      acc[phase] = (acc[phase] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    return {
+      total,
+      nuevoIngreso: byPhase.nuevo_ingreso || 0,
+      procesoVenta: (byPhase.primer_contacto || 0) + (byPhase.calificacion || 0) + (byPhase.propuesta || 0) + (byPhase.esperando_respuesta || 0),
+      cierre: byPhase.cierre || 0,
+      concretado: byPhase.concretado || 0
+    };
   }, [leads]);
 
   const resetForm = () => {
@@ -200,10 +285,10 @@ const Leads = () => {
       </Stack>
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Total</Typography><Typography variant='h5'>{stats.total}</Typography></Paper></Grid>
-        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Nuevos</Typography><Typography variant='h5'>{stats.nuevos}</Typography></Paper></Grid>
-        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Esperando</Typography><Typography variant='h5'>{stats.esperando}</Typography></Paper></Grid>
-        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Calientes (score ≥ 70)</Typography><Typography variant='h5'>{stats.calientes}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Total leads</Typography><Typography variant='h5'>{stats.total}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Nuevo ingreso</Typography><Typography variant='h5'>{stats.nuevoIngreso}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>En proceso de venta</Typography><Typography variant='h5'>{stats.procesoVenta}</Typography></Paper></Grid>
+        <Grid item xs={12} sm={6} lg={3}><Paper sx={{ p: 2 }}><Typography variant='caption' color='text.secondary'>Cierre / Concretado</Typography><Typography variant='h5'>{stats.cierre + stats.concretado}</Typography></Paper></Grid>
       </Grid>
 
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -226,7 +311,7 @@ const Leads = () => {
               <TableRow>
                 <TableCell>Lead</TableCell>
                 <TableCell>Contacto</TableCell>
-                <TableCell>Estado</TableCell>
+                <TableCell>Fase comercial</TableCell>
                 <TableCell>Score</TableCell>
                 <TableCell>Fuente</TableCell>
                 <TableCell>Asignado</TableCell>
@@ -239,8 +324,10 @@ const Leads = () => {
                 <TableRow><TableCell colSpan={8} align='center'>Sin leads</TableCell></TableRow>
               ) : (
                 filtered.map((l) => {
-                  const st = (l.leadStatus || 'unread') as LeadStatus;
+                  const st = String(l.leadStatus || 'unread').toLowerCase();
                   const score = Number(l.lead_score || 0);
+                  const tagNames = (Array.isArray(l.tags) ? l.tags : []).map((t: any) => String(t?.name || '').toLowerCase());
+                  const sentToTokko = tagNames.includes('enviado_tokko');
                   return (
                     <TableRow key={l.id} hover>
                       <TableCell>
@@ -251,14 +338,37 @@ const Leads = () => {
                         <Typography variant='body2'>{l.number}</Typography>
                         <Typography variant='caption' color='text.secondary'>{l.email || '-'}</Typography>
                       </TableCell>
-                      <TableCell><Chip size='small' color={statusColor[st]} label={statusLabel[st]} /></TableCell>
+                      <TableCell>
+                        <Stack direction='row' spacing={0.7} useFlexGap flexWrap='wrap'>
+                          {(() => {
+                            const phase = pipelinePhaseFromLead(l);
+                            const statusText = statusLabel[st] || st || 'Sin estado';
+                            const sameAsPhase = String(statusText).trim().toLowerCase() === String(phase.label).trim().toLowerCase();
+                            return (
+                              <>
+                                <Chip size='small' color={phase.color} label={phase.label} />
+                                {!sameAsPhase && (
+                                  <Chip size='small' variant='outlined' color={statusColor[st] || 'default'} label={statusText} />
+                                )}
+                              </>
+                            );
+                          })()}
+                          {(() => {
+                            const conv = conversationChipFromLead(l);
+                            return <Chip size='small' variant='outlined' color={conv.color} label={conv.label} />;
+                          })()}
+                          {sentToTokko && (
+                            <Chip size='small' variant='outlined' color='info' label='Enviado Tokko' />
+                          )}
+                        </Stack>
+                      </TableCell>
                       <TableCell>
                         <Stack direction='row' spacing={0.8} alignItems='center'>
                           <Box sx={{ width: 80 }}><LinearProgress variant='determinate' value={Math.max(0, Math.min(100, score))} sx={{ height: 8, borderRadius: 8 }} /></Box>
                           <Typography variant='caption'>{score}%</Typography>
                         </Stack>
                       </TableCell>
-                      <TableCell>{l.source || '-'}</TableCell>
+                      <TableCell>{formatSourceLabel(l.source)}</TableCell>
                       <TableCell>{l.assignedUser?.name || 'Sin asignar'}</TableCell>
                       <TableCell>{new Date(l.updatedAt).toLocaleString()}</TableCell>
                       <TableCell align='right'>

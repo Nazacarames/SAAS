@@ -2,7 +2,8 @@ import express, { Application } from "express";
 import cors from "cors";
 import "express-async-errors";
 import errorHandler from "./middleware/errorHandler";
-import { getMessageStats } from "./utils/messageStats";
+import { getMessageAlerts, getMessageStats } from "./utils/messageStats";
+import { getMetaWebhookAlerts, getMetaWebhookMetrics } from "./routes/metaWebhookRoutes";
 import { requestContext } from "./middleware/requestContext";
 
 const app: Application = express();
@@ -26,11 +27,27 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/health/messages", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString(), stats: getMessageStats() });
+    const stats = getMessageStats();
+    const alerts = getMessageAlerts();
+    res.json({ status: alerts.some(a => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
 });
 
 app.get("/api/health/messages", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString(), stats: getMessageStats() });
+    const stats = getMessageStats();
+    const alerts = getMessageAlerts();
+    res.json({ status: alerts.some(a => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
+});
+
+app.get("/health/meta-webhook", (req, res) => {
+    const stats = getMetaWebhookMetrics();
+    const alerts = getMetaWebhookAlerts();
+    res.json({ status: alerts.some((a: any) => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
+});
+
+app.get("/api/health/meta-webhook", (req, res) => {
+    const stats = getMetaWebhookMetrics();
+    const alerts = getMetaWebhookAlerts();
+    res.json({ status: alerts.some((a: any) => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
 });
 
 // Routes
