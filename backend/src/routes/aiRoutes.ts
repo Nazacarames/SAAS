@@ -15,7 +15,25 @@ import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } 
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
 import { normalizeWaPhone } from "../utils/phoneNormalization";
 import { getMetaWebhookMetrics, getMetaWebhookAlerts } from "./metaWebhookRoutes";
-const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
+const syncLeadStatusToTokko = async (input: any): Promise<any> => {
+  try {
+    const status = String(input?.status || "").trim().toLowerCase();
+    const lossReason = String(input?.lossReason || "").trim();
+    const statusLabel = status || "actualizado";
+    const detail = lossReason ? ` Motivo: ${lossReason}.` : "";
+
+    return await syncLeadToTokko({
+      name: String(input?.name || "").trim(),
+      phone: String(input?.phone || "").replace(/\D/g, ""),
+      email: String(input?.email || "").trim(),
+      source: String(input?.source || "lead-status-sync"),
+      message: `Actualización de lead desde CRM: estado=${statusLabel}.${detail}`.slice(0, 500),
+      tags: ["status_sync", `crm_${statusLabel}`]
+    });
+  } catch (err: any) {
+    return { ok: false, skipped: false, reason: "status_sync_error", status: null, error: err?.message || String(err) };
+  }
+};
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
 
 const aiRoutes = Router();
