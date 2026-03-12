@@ -48,7 +48,7 @@ const UpdateContactService = async ({
   } as any);
 
   if (tags) {
-    const tagModels = await UpsertTagsService(tags);
+    const tagModels = await UpsertTagsService(tags, companyId);
     await (contact as any).$set("tags", tagModels);
   }
 

@@ -38,13 +38,14 @@ const validEmail = (raw?: string) => /^\S+@\S+\.\S+$/.test(String(raw || "").tri
 
 const withRetry429 = async (fn: () => Promise<Response>, max = 3): Promise<Response> => {
   let delay = 400;
+  let lastRes: Response | null = null;
   for (let i = 0; i < max; i++) {
-    const res = await fn();
-    if (res.status !== 429 || i === max - 1) return res;
+    lastRes = await fn();
+    if (lastRes.status !== 429 || i === max - 1) return lastRes;
     await new Promise((r) => setTimeout(r, delay));
     delay *= 2;
   }
-  return fn();
+  return lastRes!;
 };
 
 export const fetchTokkoLocations = async () => {

@@ -94,8 +94,11 @@ const CheckInactiveContactsService = async () => {
 
   const contacts = await Contact.findAll({
     where: {
-      number: { [Op.ne]: null }
-    } as any
+      number: { [Op.ne]: null },
+      leadStatus: { [Op.notIn]: ["read", "closed", "won", "lost"] }
+    } as any,
+    limit: 500,
+    order: [["lastInteractionAt", "ASC"]]
   });
 
   let defaultWa: any = null;

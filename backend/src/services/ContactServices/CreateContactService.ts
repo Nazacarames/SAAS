@@ -97,7 +97,7 @@ const CreateContactService = async ({
   } as any);
 
   if (tags?.length) {
-    const tagModels = await UpsertTagsService(tags);
+    const tagModels = await UpsertTagsService(tags, companyId);
     await (contact as any).$set("tags", tagModels);
   }
 
@@ -135,7 +135,9 @@ const CreateContactService = async ({
         } as any);
       }
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[CreateContact] ticket auto-creation failed for contact ${contact.id}:`, err?.message || err);
+  }
 
   const reloaded = await Contact.findByPk(contact.id, { include: [{ model: Tag, as: "tags" }] });
   return reloaded || contact;

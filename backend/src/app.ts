@@ -8,14 +8,24 @@ import { requestContext } from "./middleware/requestContext";
 
 const app: Application = express();
 
-// Middleware
+// Security headers
+app.use((_req: any, res: any, next: any) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-XSS-Protection", "1; mode=block");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    next();
+});
+
+// CORS
 app.use(cors({
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true
 }));
 
-app.use(express.json({ verify: (req: any, _res, buf) => { (req as any).rawBody = buf?.toString("utf8") || ""; } }));
-app.use(express.urlencoded({ extended: true }));
+// Body parsers with size limits
+app.use(express.json({ limit: "2mb", verify: (req: any, _res, buf) => { (req as any).rawBody = buf?.toString("utf8") || ""; } }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use(requestContext);
 
 // Static files

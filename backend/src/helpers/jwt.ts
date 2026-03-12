@@ -20,17 +20,17 @@ if (!JWT_REFRESH_SECRET) {
 
 export const createAccessToken = (payload: TokenPayload): string => {
     const expiresIn = process.env.JWT_EXPIRES_IN || "15m";
-    return jwt.sign(payload, JWT_SECRET, { expiresIn } as SignOptions);
+    return jwt.sign(payload, JWT_SECRET, { algorithm: "HS256", expiresIn } as SignOptions);
 };
 
 export const createRefreshToken = (payload: TokenPayload): string => {
-    return jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: "7d" } as SignOptions);
+    return jwt.sign(payload, JWT_REFRESH_SECRET, { algorithm: "HS256", expiresIn: "7d" } as SignOptions);
 };
 
 export const verifyToken = (token: string): TokenPayload => {
-    return jwt.verify(token, JWT_SECRET) as TokenPayload;
+    return jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as TokenPayload;
 };
 
 export const verifyRefreshToken = (token: string): TokenPayload => {
-    return jwt.verify(token, JWT_REFRESH_SECRET) as TokenPayload;
+    return jwt.verify(token, JWT_REFRESH_SECRET, { algorithms: ["HS256"] }) as TokenPayload;
 };

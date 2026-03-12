@@ -4,8 +4,9 @@ import ListTagsService from "../services/TagServices/ListTagsService";
 
 const tagRoutes = Router();
 
-tagRoutes.get("/", isAuth, async (req, res) => {
-  const tags = await ListTagsService();
+tagRoutes.get("/", isAuth, async (req: any, res) => {
+  const { companyId } = req.user;
+  const tags = await ListTagsService(companyId);
   return res.json(tags);
 });
 

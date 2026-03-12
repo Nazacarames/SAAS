@@ -1,7 +1,10 @@
 import Tag from "../../models/Tag";
 
-const ListTagsService = async () => {
-  const tags = await Tag.findAll({ order: [["name", "ASC"]] });
+const ListTagsService = async (companyId: number) => {
+  const tags = await Tag.findAll({
+    where: { companyId },
+    order: [["name", "ASC"]]
+  });
   return tags;
 };
 

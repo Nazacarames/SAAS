@@ -7,22 +7,34 @@ import {
   PrimaryKey,
   AutoIncrement,
   AllowNull,
-  Unique,
   Default,
+  ForeignKey,
+  BelongsTo,
   BelongsToMany
 } from "sequelize-typescript";
+import Company from "./Company";
 import Contact from "./Contact";
 import ContactTag from "./ContactTag";
 
-@Table({ tableName: "tags" })
+@Table({
+  tableName: "tags",
+  indexes: [{ unique: true, fields: ["companyId", "name"], name: "uq_tags_company_name" }]
+})
 class Tag extends Model {
   @PrimaryKey
   @AutoIncrement
   @Column
   id: number;
 
+  @ForeignKey(() => Company)
   @AllowNull(false)
-  @Unique
+  @Column
+  companyId: number;
+
+  @BelongsTo(() => Company)
+  company: Company;
+
+  @AllowNull(false)
   @Column
   name: string;
 

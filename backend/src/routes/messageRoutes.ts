@@ -40,9 +40,10 @@ const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRa
 
 // List messages for a conversation (contact-based)
 messageRoutes.get("/:conversationId", isAuth, async (req: any, res) => {
+  const { companyId } = req.user;
   const { conversationId } = req.params;
   const contactId = parseInt(conversationId);
-  const messages: any[] = await (ListMessagesService as any)({ contactId });
+  const messages: any[] = await (ListMessagesService as any)({ contactId, companyId });
   return res.json(messages);
 });
 
