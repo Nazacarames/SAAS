@@ -13,7 +13,6 @@ const ShowWhatsappService = async ({ whatsappId, companyId }: ShowWhatsappReques
       "id",
       "name",
       "status",
-      "qrcode",
       "battery",
       "plugged",
       "isDefault",

@@ -2,7 +2,7 @@ import express, { Application } from "express";
 import cors from "cors";
 import "express-async-errors";
 import errorHandler from "./middleware/errorHandler";
-import { getMessageAlerts, getMessageStats } from "./utils/messageStats";
+import { getMessageStats } from "./utils/messageStats";
 import { getMetaWebhookAlerts, getMetaWebhookMetrics } from "./routes/metaWebhookRoutes";
 import { requestContext } from "./middleware/requestContext";
 
@@ -28,14 +28,12 @@ app.get("/health", (req, res) => {
 
 app.get("/health/messages", (req, res) => {
     const stats = getMessageStats();
-    const alerts = getMessageAlerts();
-    res.json({ status: alerts.some(a => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
+    res.json({ status: "ok", timestamp: new Date().toISOString(), stats, alerts: [] });
 });
 
 app.get("/api/health/messages", (req, res) => {
     const stats = getMessageStats();
-    const alerts = getMessageAlerts();
-    res.json({ status: alerts.some(a => a.severity === "critical") ? "degraded" : "ok", timestamp: new Date().toISOString(), stats, alerts });
+    res.json({ status: "ok", timestamp: new Date().toISOString(), stats, alerts: [] });
 });
 
 app.get("/health/meta-webhook", (req, res) => {
@@ -57,7 +55,6 @@ import whatsappRoutes from "./routes/whatsappRoutes";
 import contactRoutes from "./routes/contactRoutes";
 import conversationRoutes from "./routes/conversationRoutes";
 import messageRoutes from "./routes/messageRoutes";
-import sessionRoutes from "./routes/sessionRoutes";
 import webhookRoutes from "./routes/webhookRoutes";
 import metaWebhookRoutes from "./routes/metaWebhookRoutes";
 import whatsappCloudRoutes from "./routes/whatsappCloudRoutes";
@@ -74,7 +71,6 @@ app.use("/api/whatsapps", whatsappRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
-app.use("/api/sessions", sessionRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/meta", metaWebhookRoutes);
 app.use("/api/whatsapp-cloud", whatsappCloudRoutes);

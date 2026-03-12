@@ -8,7 +8,7 @@ interface ListWhatsappsRequest {
 const ListWhatsappsService = async ({ companyId }: ListWhatsappsRequest): Promise<Whatsapp[]> => {
     const whatsapps = await Whatsapp.findAll({
         where: { companyId },
-        attributes: ["id", "name", "status", "qrcode", "battery", "plugged", "isDefault"],
+        attributes: ["id", "name", "status", "battery", "plugged", "isDefault"],
         order: [["name", "ASC"]]
     });
 
