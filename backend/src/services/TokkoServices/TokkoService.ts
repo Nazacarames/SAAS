@@ -189,7 +189,7 @@ export const syncTokkoLocationsToKnowledge = async (companyId = 1) => {
   const flat = flattenLocations(loc.objects || []);
   const uniq = Array.from(new Map(flat.map((x) => [x.full.toLowerCase(), x.full])).values()).sort((a, b) => a.localeCompare(b, "es"));
 
-  const header = "Ubicaciones disponibles de Tokko (location tree):";
+  const header = "Zonas disponibles:";
   const body = uniq.map((l) => `- ${l}`).join("\n");
   const content = `${header}\n${body}`.slice(0, 50000);
 

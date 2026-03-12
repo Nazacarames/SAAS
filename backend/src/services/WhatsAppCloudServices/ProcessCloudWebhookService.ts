@@ -1248,8 +1248,13 @@ const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): P
 
   const rows = await ragLookup(companyId, text, 3);
   if (rows[0]?.chunk_text) {
-    const snippet = rows.slice(0, 2).map((r: any) => `• ${String(r.chunk_text || "").slice(0, 180)}`).join("\n");
-    return `Te respondo con info de la base:\n${snippet}`;
+    const sanitize = (s: string) => String(s || "")
+      .replace(/tokko/gi, "sistema")
+      .replace(/ubicaciones disponibles de\s+sistema\s*\(location tree\):?/gi, "Zonas disponibles:")
+      .replace(/location tree/gi, "zonas")
+      .trim();
+    const snippet = rows.slice(0, 2).map((r: any) => `• ${sanitize(String(r.chunk_text || "")).slice(0, 180)}`).join("\n");
+    return `Te comparto info disponible:\n${snippet}`;
   }
   return "Entendido 👍 ¿Querés que te ayude con precios, agenda de cita, o soporte?";
 };
