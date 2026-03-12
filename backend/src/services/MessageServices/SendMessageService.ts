@@ -1,4 +1,3 @@
-import { getWbot } from "../../libs/wbot";
 import Message from "../../models/Message";
 import Ticket from "../../models/Ticket";
 import Contact from "../../models/Contact";
@@ -1277,7 +1276,7 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
 
   try {
     let msgId: any = crypto.randomUUID();
-    const wbot = getWbot(ticket.whatsappId);
+    const wbot = null;
 
     const tenantScope = `company:${String((ticket as any)?.companyId || "na")}:wa:${String((ticket as any)?.whatsappId || "na")}`;
     const dedupeKey = buildOutboundDedupeKey(ticket.contact.number, payload, cleanIdempotencyKey, tenantScope);
