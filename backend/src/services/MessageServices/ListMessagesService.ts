@@ -5,17 +5,21 @@ import Ticket from "../../models/Ticket";
 interface ListMessagesRequest {
     contactId?: number;
     ticketId?: number;
+    companyId: number;
 }
 
-const ListMessagesService = async ({ contactId, ticketId }: ListMessagesRequest): Promise<Message[]> => {
-    const where: any = contactId ? { contactId } : { ticketId };
+const ListMessagesService = async ({ contactId, ticketId, companyId }: ListMessagesRequest): Promise<Message[]> => {
+    const baseWhere: any = contactId ? { contactId } : { ticketId };
+
     const messages = await Message.findAll({
-        where,
+        where: baseWhere,
         include: [
             {
                 model: Contact,
                 as: "contact",
-                attributes: ["id", "name", "number", "profilePicUrl"]
+                attributes: ["id", "name", "number", "profilePicUrl"],
+                where: { companyId },
+                required: true
             }
         ],
         order: [["createdAt", "ASC"]]

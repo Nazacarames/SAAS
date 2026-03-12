@@ -5,7 +5,7 @@ import {
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
-const DEFAULT_META_LEADS_VERIFY_TOKEN = 'claw-meta-1771044100';
+const DEFAULT_META_LEADS_VERIFY_TOKEN = import.meta.env.VITE_META_LEADS_VERIFY_TOKEN || '';
 
 const Settings = () => {
   const [tab, setTab] = useState(0);
@@ -151,10 +151,21 @@ const Settings = () => {
       const redirectAfter = `${window.location.origin}/settings`;
       const { data } = await api.get(`/ai/meta/oauth/start?redirectAfter=${encodeURIComponent(redirectAfter)}`);
       if (data?.oauthUrl) {
+        try {
+          const oauthHost = new URL(data.oauthUrl).hostname;
+          if (!oauthHost.endsWith('facebook.com') && !oauthHost.endsWith('meta.com')) {
+            toast.error('URL de OAuth no válida');
+            return;
+          }
+        } catch {
+          toast.error('URL de OAuth malformada');
+          return;
+        }
         window.location.href = data.oauthUrl;
         return;
       }
-    } catch (e: any) {
+    } catch {
+      toast.error('No se pudo iniciar conexión con Meta');
     } finally {
       setMetaOauthLoading(false);
     }

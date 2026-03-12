@@ -54,6 +54,10 @@ authRoutes.post("/register", async (req, res) => {
         throw new AppError("Faltan datos requeridos", 400);
     }
 
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(safeEmail)) {
+        throw new AppError("Email inválido", 400);
+    }
+
     if (safePassword.length < 8) {
         throw new AppError("La contraseña debe tener al menos 8 caracteres", 400);
     }

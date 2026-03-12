@@ -76,7 +76,9 @@ const SendMessageToContactService = async ({ companyId, userId, contactId, body,
       leadStatus: "waiting",
       lastInteractionAt: new Date()
     });
-  } catch {}
+  } catch (err: any) {
+    console.error(`[SendMessageToContact] contact status update failed for ${contactId}:`, err?.message || err);
+  }
 
   return { ticket, contact, message };
 };

@@ -3,7 +3,13 @@ import crypto from "crypto";
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
 const WINDOW_MS = 60_000;
-const MAX_PER_WINDOW = Number(process.env.BASIC_RATE_LIMIT_PER_MINUTE || 180);
+const MAX_PER_WINDOW = (() => {
+  const raw = Number(process.env.BASIC_RATE_LIMIT_PER_MINUTE);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180;
+})();
+const MAX_BUCKETS = 50_000;
+const CLEANUP_INTERVAL = 120_000;
+let lastCleanup = Date.now();
 
 const isPublicPath = (path: string) =>
   path.startsWith("/api/integrations") ||
@@ -11,6 +17,15 @@ const isPublicPath = (path: string) =>
   path.startsWith("/api/meta") ||
   path.startsWith("/api/webhooks") ||
   path.startsWith("/health");
+
+const cleanupBuckets = (now: number) => {
+  if (now - lastCleanup < CLEANUP_INTERVAL) return;
+  lastCleanup = now;
+  for (const [key, val] of buckets) {
+    if (val.resetAt <= now) buckets.delete(key);
+  }
+  if (buckets.size > MAX_BUCKETS) buckets.clear();
+};
 
 export const requestContext = (req: Request, res: Response, next: NextFunction) => {
   const requestId = String(req.header("x-request-id") || crypto.randomUUID());
@@ -20,6 +35,8 @@ export const requestContext = (req: Request, res: Response, next: NextFunction) 
   if (isPublicPath(req.path)) return next();
 
   const now = Date.now();
+  cleanupBuckets(now);
+
   const key = `${req.ip}:${req.path}`;
   const item = buckets.get(key);
 
