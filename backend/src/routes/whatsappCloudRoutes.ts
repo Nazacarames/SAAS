@@ -611,7 +611,7 @@ const hasValidHardeningToken = (req: any): boolean => {
 
 const CRITICAL_HARDENING_SIGNALS = new Set([
   "outbound_retry_exhausted",
-  "outbound_wbot_retry_exhausted",
+
   "outbound_dedupe_fail_closed_blocked",
   "outbound_integration_retry_blocked_missing_idempotency_key",
   "outbound_integration_retry_idempotency_key_required_blocked", // backward-compatible signal name from integrationRoutes
@@ -833,10 +833,7 @@ const buildHardeningSummary = (inbound: any, outbound: any, integrationApi: any,
     if (summary.outbound.providerConflictBlockedCloud > 0) {
       recommendations.push("Cloud API devolvió conflictos outbound (409/códigos de colisión): verificar reuse de Idempotency-Key por envío lógico y evitar retries paralelos del mismo mensaje.");
     }
-    if (summary.outbound.providerConflictBlockedWbot > 0) {
-      recommendations.push("wbot reportó conflictos outbound con riesgo de duplicado: serializar envíos por destinatario/ticket y aplicar backoff con jitter para evitar carreras de reintento.");
-    }
-    if (!summary.outbound.providerConflictBlockedCloud && !summary.outbound.providerConflictBlockedWbot) {
+    if (!summary.outbound.providerConflictBlockedCloud) {
       recommendations.push("El proveedor devolvió conflictos outbound (409/códigos de colisión): revisar reuso de Idempotency-Key y dedupe de cliente para evitar duplicados lógicos.");
     }
   }

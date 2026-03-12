@@ -102,8 +102,8 @@ export const getSendHardeningAlertSnapshot = () => {
   const duplicateBlocked = toNum("outbound.duplicate_blocked");
   const dedupeReserved = toNum("outbound.dedupe_reserved");
   const providerFailed = toNum("outbound.provider_send_failed");
+  const providerConflictBlocked = toNum("outbound.provider_conflict_blocked");
   const cloudOk = toNum("outbound.cloud_send_ok");
-  const wbotOk = toNum("outbound.wbot_send_ok");
   const idempotencyKeyUsed = toNum("outbound.idempotency_key_used");
   const idempotencyPayloadConflictBlocked = toNum("outbound.idempotency_key_payload_conflict_blocked");
   const dedupeInfraError = toNum("outbound.dedupe_infra_error");
@@ -111,7 +111,7 @@ export const getSendHardeningAlertSnapshot = () => {
   const dedupeFailClosedBlocked = toNum("outbound.dedupe_fail_closed_blocked");
 
   const duplicateObserved = duplicateBlocked + dedupeReserved;
-  const providerObserved = providerFailed + cloudOk + wbotOk;
+  const providerObserved = providerFailed + cloudOk;
 
   const duplicateRate = safeRate(duplicateBlocked, duplicateObserved);
   if (duplicateObserved >= 20 && duplicateRate >= 0.2) {
@@ -132,6 +132,22 @@ export const getSendHardeningAlertSnapshot = () => {
       inWindow: providerFailureRate,
       remaining: 0,
       sampleSize: providerObserved
+    });
+  }
+
+  const providerConflictObserved = providerConflictBlocked + providerObserved;
+  const providerConflictRate = safeRate(providerConflictBlocked, providerConflictObserved);
+  if (providerConflictObserved >= 20 && providerConflictRate >= 0.05) {
+    pendingAlerts.push({
+      signal: "outbound_provider_conflict_rate_high",
+      threshold: 0.05,
+      inWindow: providerConflictRate,
+      remaining: 0,
+      sampleSize: providerConflictObserved,
+      breakdown: {
+        providerConflictBlocked,
+        providerObserved
+      }
     });
   }
 
@@ -1276,7 +1292,6 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
 
   try {
     let msgId: any = crypto.randomUUID();
-    const wbot = null;
 
     const tenantScope = `company:${String((ticket as any)?.companyId || "na")}:wa:${String((ticket as any)?.whatsappId || "na")}`;
     const dedupeKey = buildOutboundDedupeKey(ticket.contact.number, payload, cleanIdempotencyKey, tenantScope);
@@ -1378,17 +1393,13 @@ const SendMessageService = async ({ body, ticketId, templateName, languageCode, 
     bumpOutboundModeMetric("outbound.dedupe_reserved_mode", payload.mode);
 
     try {
-      if (wbot) {
-        msgId = await sendViaWbot(wbot, ticket.contact.number, payload, Boolean(cleanIdempotencyKey));
-      } else {
-        msgId = await sendViaCloud(
-          ticket.contact.number,
-          payload,
-          String((ticket as any)?.contact?.name || ""),
-          String((ticket as any)?.contact?.needs || ""),
-          cleanIdempotencyKey
-        );
-      }
+      msgId = await sendViaCloud(
+        ticket.contact.number,
+        payload,
+        String((ticket as any)?.contact?.name || ""),
+        String((ticket as any)?.contact?.needs || ""),
+        cleanIdempotencyKey
+      );
     } catch (sendErr: any) {
       bumpHardeningMetric("outbound.provider_send_failed");
 

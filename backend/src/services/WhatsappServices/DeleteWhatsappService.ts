@@ -6,7 +6,6 @@ import Message from "../../models/Message";
 import Ticket from "../../models/Ticket";
 import User from "../../models/User";
 import Whatsapp from "../../models/Whatsapp";
-import { removeWbot } from "../../libs/wbot";
 
 interface DeleteWhatsappRequest {
   whatsappId: number;
@@ -47,7 +46,6 @@ const DeleteWhatsappService = async ({ whatsappId, companyId }: DeleteWhatsappRe
     await whatsapp.destroy({ transaction });
   });
 
-  removeWbot(whatsappId);
 };
 
 export default DeleteWhatsappService;
