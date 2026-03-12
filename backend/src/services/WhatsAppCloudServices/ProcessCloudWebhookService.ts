@@ -1106,6 +1106,16 @@ const tokkoPropertyHint = async (text: string): Promise<string | null> => {
   const rt = getRuntimeSettings();
   if (!rt.tokkoEnabled || !rt.tokkoAgentSearchEnabled || !rt.tokkoApiKey) return null;
   if (!/departamento|depto|casa|propiedad|ambientes|m2|usd|d[oó]lares?|alquiler|venta/i.test(text)) return null;
+
+  const hasBudget = Boolean(parseBudget(text));
+  const hasAmbientes = /\b(1|2|3|4|5|6)\s*(amb|ambientes?|dorm|dormitorios?)\b|monoamb/i.test(text);
+  const hasZone = /rosario|funes|fisherton|centro|pichincha|echesortu|abasto|zona\s+norte|zona\s+sur|zona\s+oeste|barrio|ubicaci[oó]n/i.test(text);
+
+  // Antes de listar opciones, pedir filtros mínimos.
+  if (!(hasZone && (hasAmbientes || hasBudget))) {
+    return "Dale, te ayudo a buscar 🙌 Antes de pasarte opciones, decime: zona, cantidad de ambientes y presupuesto aproximado.";
+  }
+
   try {
     const base = String(rt.tokkoBaseUrl || "https://www.tokkobroker.com/api/v1").replace(/\/$/, "");
     const path = String(rt.tokkoPropertiesPath || "/property/").startsWith("/") ? String(rt.tokkoPropertiesPath || "/property/") : `/${String(rt.tokkoPropertiesPath || "property/")}`;
@@ -1116,13 +1126,13 @@ const tokkoPropertyHint = async (text: string): Promise<string | null> => {
     if (!resp.ok) return null;
     const data: any = await resp.json().catch(() => null);
     const list = Array.isArray(data?.objects) ? data.objects : (Array.isArray(data) ? data : []);
-    if (!list.length) return "No encontré propiedades exactas en Tokko con ese criterio todavía; si querés te pido zona, ambientes y presupuesto para afinar.";
+    if (!list.length) return "No encontré opciones exactas con ese criterio todavía. Si querés, ajustamos zona, ambientes o presupuesto y pruebo de nuevo.";
     const top = list.slice(0, 2).map((p: any) => {
       const title = p?.publication_title || p?.title || p?.address || "Propiedad";
       const price = p?.operations?.[0]?.prices?.[0]?.price || p?.price || "s/p";
       return `• ${String(title).slice(0, 70)} (${price})`;
     }).join("\n");
-    return `Encontré opciones en Tokko:\n${top}\nSi querés, te paso más opciones filtradas.`;
+    return `Te comparto algunas opciones:\n${top}\nSi querés, te filtro más fino por zona, ambientes y presupuesto.`;
   } catch {
     return null;
   }
