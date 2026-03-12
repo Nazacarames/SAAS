@@ -1,144 +1,22 @@
-import makeWASocket, {
-    DisconnectReason,
-    fetchLatestBaileysVersion,
-    useMultiFileAuthState,
-    WASocket,
-    BaileysEventMap
-} from "@whiskeysockets/baileys";
-import { Boom } from "@hapi/boom";
-import pino from "pino";
-import path from "path";
-import fs from "fs";
 import Whatsapp from "../models/Whatsapp";
-import { getIO } from "./socket";
-import { wbotMessageListener } from "../services/WbotServices/wbotMessageListener";
 
-const sessions: { [key: number]: WASocket } = {};
-const retries: { [key: number]: number } = {};
+// Baileys removed: Cloud API only runtime.
+const sessions: Record<number, null> = {};
 
-const logger = pino({ level: "silent" });
-
-export const getWbot = (whatsappId: number): WASocket => {
-    return sessions[whatsappId];
-};
+export const getWbot = (_whatsappId: number): null => null;
 
 export const removeWbot = (whatsappId: number): void => {
-    delete sessions[whatsappId];
-    delete retries[whatsappId];
+  delete sessions[whatsappId];
 };
 
-export const initWbot = async (whatsapp: Whatsapp): Promise<WASocket> => {
-    return new Promise(async (resolve, reject) => {
-        try {
-            const io = getIO();
-            const whatsappId = whatsapp.id;
-
-            // Crear directorio para sesiones si no existe
-            const sessionPath = path.join(__dirname, "..", "..", "sessions", `session-${whatsappId}`);
-            if (!fs.existsSync(sessionPath)) {
-                fs.mkdirSync(sessionPath, { recursive: true });
-            }
-
-            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-
-            const { version } = await fetchLatestBaileysVersion();
-
-            const sock = makeWASocket({
-                version,
-                logger,
-                printQRInTerminal: false,
-                auth: state,
-                browser: ["Atiendechat", "Chrome", "10.0"],
-                defaultQueryTimeoutMs: undefined
-            });
-
-            sock.ev.on("creds.update", saveCreds);
-
-            sock.ev.on("connection.update", async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-
-                if (qr) {
-                    // Emitir QR code via Socket.io
-                    io.emit(`whatsapp-${whatsappId}`, {
-                        action: "update",
-                        session: {
-                            qrcode: qr,
-                            status: "qrcode"
-                        }
-                    });
-
-                    await whatsapp.update({
-                        qrcode: qr,
-                        status: "qrcode"
-                    });
-                }
-
-                if (connection === "close") {
-                    const shouldReconnect =
-                        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-
-                    if (shouldReconnect) {
-                        const retryCount = retries[whatsappId] || 0;
-                        if (retryCount < 5) {
-                            retries[whatsappId] = retryCount + 1;
-                            setTimeout(() => initWbot(whatsapp), 2000);
-                        } else {
-                            await whatsapp.update({ status: "DISCONNECTED" });
-                            io.emit(`whatsapp-${whatsappId}`, {
-                                action: "update",
-                                session: { status: "DISCONNECTED" }
-                            });
-                            removeWbot(whatsappId);
-                        }
-                    } else {
-                        await whatsapp.update({ status: "DISCONNECTED", qrcode: null });
-                        io.emit(`whatsapp-${whatsappId}`, {
-                            action: "update",
-                            session: { status: "DISCONNECTED" }
-                        });
-                        removeWbot(whatsappId);
-                    }
-                }
-
-                if (connection === "open") {
-                    await whatsapp.update({
-                        status: "CONNECTED",
-                        qrcode: null,
-                        retries: 0
-                    });
-
-                    io.emit(`whatsapp-${whatsappId}`, {
-                        action: "update",
-                        session: {
-                            status: "CONNECTED"
-                        }
-                    });
-
-                    const wbotVersion = await sock.fetchPrivacySettings();
-                    console.log(`WhatsApp ${whatsappId} conectado. Versión: ${version}`);
-
-                    retries[whatsappId] = 0;
-                    resolve(sock);
-                }
-            });
-
-            sessions[whatsappId] = sock;
-            (sock as any).id = whatsappId;
-            wbotMessageListener(sock as any);
-        } catch (error) {
-            console.error(`Error al inicializar WhatsApp ${whatsapp.id}:`, error);
-            reject(error);
-        }
-    });
+export const initWbot = async (whatsapp: Whatsapp): Promise<null> => {
+  await whatsapp.update({ status: "DISCONNECTED", qrcode: null } as any);
+  return null;
 };
 
 export const initWbots = async (): Promise<void> => {
-    const whatsapps = await Whatsapp.findAll({
-        where: { status: { [require("sequelize").Op.ne]: "DISCONNECTED" } }
-    });
-
-    if (whatsapps.length > 0) {
-        console.log(`Inicializando ${whatsapps.length} sesiones de WhatsApp...`);
-        await Promise.all(whatsapps.map(whatsapp => initWbot(whatsapp)));
-    }
+  const whatsapps = await Whatsapp.findAll();
+  for (const w of whatsapps) {
+    await w.update({ status: "DISCONNECTED", qrcode: null } as any);
+  }
 };

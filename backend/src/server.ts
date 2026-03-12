@@ -4,7 +4,6 @@ import sequelize from "./database";
 import http from "http";
 import path from "path";
 import { initIO } from "./libs/socket";
-import { initWbots } from "./libs/wbot";
 import CheckInactiveContactsService from "./services/ContactServices/CheckInactiveContactsService";
 import { syncTokkoLocationsToKnowledge } from "./services/TokkoServices/TokkoService";
 
@@ -51,19 +50,7 @@ const startServer = async () => {
     await sequelize.authenticate();
     console.log("✓ Database connection established successfully");
 
-    // Restore WhatsApp sessions (if any)
-    try {
-      await Promise.race([
-        initWbots(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("initWbots timeout after 15s")), 15000)
-        )
-      ]);
-      console.log("✓ WhatsApp sessions initialized");
-    } catch (err: any) {
-      console.error("! WhatsApp sessions init failed:", err?.message || err);
-    }
-
+    // Cloud API only: no local WhatsApp-web sessions to restore.
     // Sync models only in development to avoid destructive resets in production
     if ((process.env.NODE_ENV || "development") !== "production") {
       await sequelize.sync({ alter: true });

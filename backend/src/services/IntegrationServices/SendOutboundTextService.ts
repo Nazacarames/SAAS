@@ -4,15 +4,8 @@ import Message from "../../models/Message";
 import crypto from "crypto";
 import { Op } from "sequelize";
 import AppError from "../../errors/AppError";
-import { getWbot } from "../../libs/wbot";
 import { getIO } from "../../libs/socket";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
-import {
-  recordOutboundAttempt,
-  recordOutboundDuplicate,
-  recordOutboundRejected,
-  recordOutboundSent
-} from "../../utils/messageStats";
 
 interface SendOutboundTextRequest {
   companyId: number;
@@ -91,7 +84,6 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
   const normalizedText = String(text || "").trim();
   if (!normalizedText) throw new AppError("Text is required", 400);
 
-  recordOutboundAttempt();
 
   const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey || "");
   if (normalizedIdempotencyKey) {
@@ -133,8 +125,10 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
 
     if (!wa) throw new AppError("No WhatsApp connection available", 400);
 
-    const wbot = getWbot(wa.id);
-    if (!wbot) throw new AppError("WhatsApp not connected", 400);
+    const settings = getRuntimeSettings() as any;
+    const phoneNumberId = String(settings.waCloudPhoneNumberId || "").trim();
+    const accessToken = String(settings.waCloudAccessToken || "").trim();
+    if (!phoneNumberId || !accessToken) throw new AppError("WhatsApp Cloud credentials missing", 400);
 
     let contact = await Contact.findOne({ where: { companyId, number: toNorm } });
     if (!contact) {
@@ -173,16 +167,13 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
         const existingTo = normalizeNumber(String(existingContact?.number || ""));
 
         if (existingBody !== normalizedText) {
-          recordOutboundRejected("idempotency_payload_mismatch");
           throw new AppError("Idempotency key reuse with different payload is blocked", 409);
         }
 
         if (existingTo && existingTo !== toNorm) {
-          recordOutboundRejected("idempotency_destination_mismatch");
           throw new AppError("Idempotency key reuse with different destination is blocked", 409);
         }
 
-        recordOutboundDuplicate("idempotency_key_hit");
         return {
           conversationId: existingContact?.id || contact.id,
           contact: existingContact || contact,
@@ -207,7 +198,6 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
     });
 
     if (recentDuplicate) {
-      recordOutboundDuplicate("recent_retry_window");
       return {
         conversationId: contact.id,
         contact,
@@ -218,11 +208,25 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
       };
     }
 
-    const jid = `${toNorm}@s.whatsapp.net`;
-    const sent = await wbot.sendMessage(jid, { text: normalizedText });
+    const cloudResp = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(phoneNumberId)}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        ...(idempotencyProviderTag ? { "Idempotency-Key": idempotencyProviderTag } : {})
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: toNorm,
+        type: "text",
+        text: { body: normalizedText }
+      })
+    });
+    const cloudJson: any = await cloudResp.json().catch(() => ({}));
+    if (!cloudResp.ok) throw new AppError(cloudJson?.error?.message || `Cloud send failed (${cloudResp.status})`, 400);
 
     const msg = await Message.create({
-      id: sent?.key?.id || crypto.randomUUID(),
+      id: String(cloudJson?.messages?.[0]?.id || crypto.randomUUID()),
       body: normalizedText,
       contactId: contact.id,
       ticketId: null,
@@ -232,7 +236,6 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
       providerMessageId: idempotencyProviderTag || null
     } as any);
 
-    recordOutboundSent();
 
     const io = getIO();
     io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message: msg, conversationId: contact.id, contact });

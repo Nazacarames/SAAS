@@ -23,7 +23,6 @@
     "license": "MIT",
     "dependencies": {
         "@hapi/boom": "^10.0.1",
-        "@whiskeysockets/baileys": "^7.0.0-rc.9",
         "axios": "^1.13.6",
         "bcryptjs": "^2.4.3",
         "bull": "^4.12.0",
