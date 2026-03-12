@@ -16,7 +16,12 @@ interface CreateLeadRequest {
   metadata?: any;
 }
 
-const normalizeNumber = (raw: string): string => (raw || "").replace(/\D/g, "");
+const normalizeNumber = (raw: string): string => {
+  const d = (raw || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("54") && d.length >= 12 && d[2] !== "9") return `549${d.slice(2)}`;
+  return d;
+};
 
 const CreateLeadService = async (data: CreateLeadRequest) => {
   const { companyId, whatsappId, name, number, email } = data;

@@ -330,9 +330,28 @@ const resolveWhatsapp = async () => {
   const anyWhatsapp = await Whatsapp.findOne(); if (anyWhatsapp) return anyWhatsapp;
   return Whatsapp.create({ name: "WhatsApp Cloud", status: "CONNECTED", isDefault: true, companyId: 1 } as any);
 };
+const normalizeWaPhone = (raw: string): string => {
+  const d = String(raw || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("54") && d.length >= 12 && d[2] !== "9") return `549${d.slice(2)}`;
+  return d;
+};
+
 const getOrCreateContact = async (phone: string, companyId: number) => {
-  let contact = await Contact.findOne({ where: { number: phone, companyId } });
-  if (!contact) contact = await Contact.create({ name: phone, number: phone, companyId, isGroup: false });
+  const normalized = normalizeWaPhone(phone);
+  let contact = await Contact.findOne({ where: { number: normalized, companyId } });
+
+  if (!contact && normalized) {
+    const [fallback]: any = await sequelize.query(
+      `SELECT id FROM contacts WHERE "companyId" = :companyId AND RIGHT(REGEXP_REPLACE(COALESCE(number,''), '\\D', '', 'g'), 10) = :last10 ORDER BY id DESC LIMIT 1`,
+      { replacements: { companyId, last10: normalized.slice(-10) }, type: QueryTypes.SELECT }
+    );
+    if (fallback?.id) contact = await Contact.findByPk(Number(fallback.id));
+  }
+
+  if (!contact) contact = await Contact.create({ name: normalized || phone, number: normalized || phone, companyId, isGroup: false });
+  else if (normalized && String(contact.number || "") !== normalized) await (contact as any).update({ number: normalized, updatedAt: new Date() } as any);
+
   return contact;
 };
 const getOrCreateTicket = async (contactId: number, whatsappId: number, companyId: number) => {
