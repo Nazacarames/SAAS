@@ -11,6 +11,7 @@ import sequelize from "../../database";
 import { getIO } from "../../libs/socket";
 import { recordInboundDuplicate, recordInboundError, recordInboundMessage } from "../../utils/messageStats";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
+import { normalizeWaPhone } from "../../utils/phoneNormalization";
 
 type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }> } }> }> };
 type ConversationType = "sales" | "support" | "scheduling" | "general";
@@ -330,13 +331,6 @@ const resolveWhatsapp = async () => {
   const anyWhatsapp = await Whatsapp.findOne(); if (anyWhatsapp) return anyWhatsapp;
   return Whatsapp.create({ name: "WhatsApp Cloud", status: "CONNECTED", isDefault: true, companyId: 1 } as any);
 };
-const normalizeWaPhone = (raw: string): string => {
-  const d = String(raw || "").replace(/\D/g, "");
-  if (!d) return "";
-  if (d.startsWith("54") && d.length >= 12 && d[2] !== "9") return `549${d.slice(2)}`;
-  return d;
-};
-
 const getOrCreateContact = async (phone: string, companyId: number) => {
   const normalized = normalizeWaPhone(phone);
   let contact = await Contact.findOne({ where: { number: normalized, companyId } });

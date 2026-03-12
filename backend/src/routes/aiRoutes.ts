@@ -13,6 +13,7 @@ import { getWaHardeningMetrics, getWaHardeningAlertSnapshot } from "../services/
 import { getSendHardeningMetrics, getSendHardeningAlertSnapshot } from "../services/MessageServices/SendMessageService";
 import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } from "./integrations/integrationRoutes";
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
+import { normalizeWaPhone } from "../utils/phoneNormalization";
 import { getMetaWebhookMetrics, getMetaWebhookAlerts } from "./metaWebhookRoutes";
 const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
@@ -2064,13 +2065,6 @@ const processMetaLeadEvent = async (body: any) => {
     },
     type: QueryTypes.INSERT
   });
-
-  const normalizeWaPhone = (raw: string) => {
-    const d = String(raw || '').replace(/\D/g, '');
-    if (!d) return '';
-    if (d.startsWith('54') && d.length >= 12 && d[2] !== '9') return `549${d.slice(2)}`;
-    return d;
-  };
 
   const normalizedPhone = normalizeWaPhone(phone);
   if (!normalizedPhone) return { ok: true, ingested: true, outreach: false, reason: 'no_phone' };

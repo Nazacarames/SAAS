@@ -4,6 +4,7 @@ import AppError from "../../errors/AppError";
 import { syncLeadToTokko } from "../TokkoServices/TokkoService";
 import Tag from "../../models/Tag";
 import ContactTag from "../../models/ContactTag";
+import { normalizeWaPhone } from "../../utils/phoneNormalization";
 
 interface CreateLeadRequest {
   companyId: number;
@@ -16,12 +17,7 @@ interface CreateLeadRequest {
   metadata?: any;
 }
 
-const normalizeNumber = (raw: string): string => {
-  const d = (raw || "").replace(/\D/g, "");
-  if (!d) return "";
-  if (d.startsWith("54") && d.length >= 12 && d[2] !== "9") return `549${d.slice(2)}`;
-  return d;
-};
+const normalizeNumber = (raw: string): string => normalizeWaPhone(raw);
 
 const CreateLeadService = async (data: CreateLeadRequest) => {
   const { companyId, whatsappId, name, number, email } = data;
