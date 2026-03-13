@@ -18,10 +18,11 @@ type ConversationType = "sales" | "support" | "scheduling" | "general";
 type Policy = { maxReplyChars?: number; allowAutoClose?: boolean; autoHandoffOnSensitive?: boolean; forbiddenKeywords?: string[] };
 
 const defaultPolicies: Record<ConversationType, Policy> = {
-  sales: { maxReplyChars: 280, allowAutoClose: false, autoHandoffOnSensitive: false, forbiddenKeywords: ["descuento extremo", "garantía absoluta"] },
-  support: { maxReplyChars: 320, allowAutoClose: false, autoHandoffOnSensitive: true, forbiddenKeywords: ["culpa del cliente"] },
-  scheduling: { maxReplyChars: 220, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] },
-  general: { maxReplyChars: 260, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
+  // Increased limits so real estate responses with property details fit in full
+  sales: { maxReplyChars: 800, allowAutoClose: false, autoHandoffOnSensitive: false, forbiddenKeywords: ["descuento extremo", "garantía absoluta"] },
+  support: { maxReplyChars: 800, allowAutoClose: false, autoHandoffOnSensitive: true, forbiddenKeywords: ["culpa del cliente"] },
+  scheduling: { maxReplyChars: 500, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] },
+  general: { maxReplyChars: 800, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
 };
 
 const DEFAULT_MAX_WEBHOOK_MESSAGE_AGE_SECONDS = 60 * 60 * 24; // 24h
@@ -308,7 +309,8 @@ const classifyConversation = (text: string): ConversationType => {
   const t = String(text || "").toLowerCase();
   if (/turno|agenda|cita|horario|fecha|mañana|lunes|martes/.test(t)) return "scheduling";
   if (/error|soporte|no funciona|problema|incidente|ca[ií]do/.test(t)) return "support";
-  if (/precio|plan|comprar|contratar|promo|descuento|cotiz/.test(t)) return "sales";
+  // Real estate intent also counts as sales
+  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote/.test(t)) return "sales";
   return "general";
 };
 const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
@@ -317,7 +319,6 @@ const applyGuardrails = async ({ text, reply, conversationType }: { text: string
   if (policy.autoHandoffOnSensitive && /legal|abogado|demanda|tarjeta|transferencia|cbu/.test(low)) return { handoff: true, reason: "Tema sensible detectado para soporte", action: "handoff_sensitive" };
   const forbidden = (policy.forbiddenKeywords || []).find((k) => k && reply.toLowerCase().includes(k.toLowerCase()));
   let safeReply = forbidden ? "Gracias por tu consulta. Te derivo con un asesor humano para darte una respuesta precisa." : reply;
-  if (conversationType === "scheduling" && !/\d{1,2}[:.]\d{2}|mañana|tarde|noche|lunes|martes|miércoles|jueves|viernes|sábado|domingo/.test(low)) safeReply = "Perfecto, lo coordinamos. Indicame por favor día y franja horaria (ej: martes 15:30).";
   const max = Number(policy.maxReplyChars || 260);
   if (safeReply.length > max) safeReply = `${safeReply.slice(0, Math.max(60, max - 1))}…`;
   return { finalReply: safeReply, reason: forbidden ? `Keyword bloqueada: ${forbidden}` : "Guardrails aplicados", action: forbidden ? "rewrite_forbidden" : "allow" };
