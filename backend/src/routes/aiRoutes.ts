@@ -1886,7 +1886,9 @@ const resolveMetaWebhookSignatureSecret = (): string => {
   const runtimeSecret = String(runtime?.metaLeadAdsAppSecret || "").trim();
   if (runtimeSecret) return runtimeSecret;
 
-  return String(process.env.META_APP_SECRET || process.env.META_CLIENT_SECRET || "").trim();
+  // Check the same env vars that metaWebhookRoutes uses for signature
+  // verification to ensure both handlers agree on the secret.
+  return String(process.env.META_LEAD_ADS_APP_SECRET || process.env.META_APP_SECRET || process.env.META_CLIENT_SECRET || "").trim();
 };
 
 const resolveMetaWebhookSignatureRequired = (): boolean => {
@@ -1908,7 +1910,13 @@ const verifyMetaWebhookSignature = (req: any, body: any): { ok: boolean; reason?
   const provided = signatureHeader.slice("sha256=".length).trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(provided)) return { ok: false, reason: "invalid_signature_hex" };
 
-  const rawPayload = JSON.stringify(body || {});
+  // Prefer the raw body stored by express.json() verify callback so the HMAC
+  // is computed over the exact bytes that were signed.  Fall back to
+  // JSON.stringify(body) for backwards-compatibility (e.g. internal forwards
+  // where rawBody may equal the serialised payload anyway).
+  const rawPayload = typeof req.rawBody === "string" && req.rawBody.length > 0
+    ? req.rawBody
+    : JSON.stringify(body || {});
   const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload).digest("hex");
 
   try {
