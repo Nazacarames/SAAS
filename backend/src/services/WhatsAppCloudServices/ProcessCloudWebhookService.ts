@@ -898,14 +898,16 @@ const normalizeMediaUrlForDedupe = (rawUrl: string): string => {
 const buildOutboundDedupeKey = (
   companyId: number,
   to: string,
-  payload: { mode: "text"; text: string } | { mode: "media"; mediaUrl: string; mediaType?: string; caption?: string }
+  payload: { mode: "text"; text: string } | { mode: "media"; mediaUrl: string; mediaType?: string; caption?: string },
+  inboundScope = "global"
 ) => {
   const cleanTo = String(to || "").replace(/\D/g, "").slice(0, 20);
   const semantic = payload.mode === "media"
     ? `media:${String(payload.mediaType || "image").toLowerCase()}:${normalizeMediaUrlForDedupe(payload.mediaUrl)}:${normalizeForDedupe(String(payload.caption || ""))}`
     : `text:${normalizeForDedupe(payload.text)}`;
   const tenant = Math.max(0, Number(companyId) || 0);
-  const base = `${tenant}:${cleanTo}:${semantic}`;
+  const scope = String(inboundScope || "global").slice(0, 120);
+  const base = `${tenant}:${cleanTo}:${scope}:${semantic}`;
   return `wa-out:${crypto.createHash("sha1").update(base).digest("hex")}`;
 };
 
@@ -922,7 +924,12 @@ const sendManagedReply = async ({ ticket, contact, text }: { ticket: any; contac
     return null;
   }
 
-  const dedupeKey = buildOutboundDedupeKey(ticket.companyId, String(contact.number), { mode: "text", text: cleanText });
+  const lastInbound: any = await Message.findOne({
+    where: { ticketId: ticket.id, fromMe: false },
+    order: [["createdAt", "DESC"]]
+  } as any);
+  const inboundScope = String(lastInbound?.id || "global");
+  const dedupeKey = buildOutboundDedupeKey(ticket.companyId, String(contact.number), { mode: "text", text: cleanText }, inboundScope);
   const dedupeTtlSeconds = resolveOutboundDedupeTtlSeconds();
   let shouldSend = true;
   let dedupeReservationMode: "persistent" | "memory" = "persistent";

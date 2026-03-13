@@ -15,7 +15,25 @@ import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } 
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
 import { normalizeWaPhone } from "../utils/phoneNormalization";
 import { getMetaWebhookMetrics, getMetaWebhookAlerts } from "./metaWebhookRoutes";
-const syncLeadStatusToTokko = async (_input: any): Promise<any> => ({ ok: false, skipped: true, reason: "not_implemented", status: null, error: null });
+export const syncLeadStatusToTokko = async (input: any): Promise<any> => {
+  try {
+    const status = String(input?.status || "").trim().toLowerCase();
+    const lossReason = String(input?.lossReason || "").trim();
+    const statusLabel = status || "actualizado";
+    const detail = lossReason ? ` Motivo: ${lossReason}.` : "";
+
+    return await syncLeadToTokko({
+      name: String(input?.name || "").trim(),
+      phone: String(input?.phone || "").replace(/\D/g, ""),
+      email: String(input?.email || "").trim(),
+      source: String(input?.source || "lead-status-sync"),
+      message: `Actualización de lead desde CRM: estado=${statusLabel}.${detail}`.slice(0, 500),
+      tags: ["status_sync", `crm_${statusLabel}`]
+    });
+  } catch (err: any) {
+    return { ok: false, skipped: false, reason: "status_sync_error", status: null, error: err?.message || String(err) };
+  }
+};
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
 
 const aiRoutes = Router();
@@ -1910,14 +1928,10 @@ const verifyMetaWebhookSignature = (req: any, body: any): { ok: boolean; reason?
   const provided = signatureHeader.slice("sha256=".length).trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(provided)) return { ok: false, reason: "invalid_signature_hex" };
 
-  // Prefer the raw body stored by express.json() verify callback so the HMAC
-  // is computed over the exact bytes that were signed.  Fall back to
-  // JSON.stringify(body) for backwards-compatibility (e.g. internal forwards
-  // where rawBody may equal the serialised payload anyway).
-  const rawPayload = typeof req.rawBody === "string" && req.rawBody.length > 0
+  const rawPayload = typeof req?.rawBody === "string" && req.rawBody.length > 0
     ? req.rawBody
     : JSON.stringify(body || {});
-  const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload).digest("hex");
+  const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload, "utf8").digest("hex");
 
   try {
     const providedBuf = Buffer.from(provided, "hex");
@@ -2561,7 +2575,7 @@ aiRoutes.post('/routing/execute', isAuth, async (req: any, res) => {
   return res.json({ ok: true, applied: true, ticketId: ticketId || null, contactId: contactId || null, matched: match, assignUserId: match?.assignUserId || null, queue: match?.queue || null });
 });
 
-const applyLeadStatusAndTokkoSync = async ({ companyId, contactId, status, lossReason }: { companyId: number; contactId: number; status: string; lossReason: string }) => {
+export const applyLeadStatusAndTokkoSync = async ({ companyId, contactId, status, lossReason }: { companyId: number; contactId: number; status: string; lossReason: string }) => {
   const normalizedStatus = status === 'perdido' ? 'lost' : status;
   const validStatus = ['lost', 'won', 'read', 'engaged', 'warm', 'hot', 'new'];
   if (!validStatus.includes(normalizedStatus)) return { error: 'status inválido', statusCode: 400 } as any;
