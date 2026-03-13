@@ -15,7 +15,7 @@ import { getIntegrationHardeningMetrics, getIntegrationHardeningAlertSnapshot } 
 import { syncLeadToTokko } from "../services/TokkoServices/TokkoService";
 import { normalizeWaPhone } from "../utils/phoneNormalization";
 import { getMetaWebhookMetrics, getMetaWebhookAlerts } from "./metaWebhookRoutes";
-const syncLeadStatusToTokko = async (input: any): Promise<any> => {
+export const syncLeadStatusToTokko = async (input: any): Promise<any> => {
   try {
     const status = String(input?.status || "").trim().toLowerCase();
     const lossReason = String(input?.lossReason || "").trim();
@@ -1926,8 +1926,10 @@ const verifyMetaWebhookSignature = (req: any, body: any): { ok: boolean; reason?
   const provided = signatureHeader.slice("sha256=".length).trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(provided)) return { ok: false, reason: "invalid_signature_hex" };
 
-  const rawPayload = JSON.stringify(body || {});
-  const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload).digest("hex");
+  const rawPayload = typeof req?.rawBody === "string" && req.rawBody.length > 0
+    ? req.rawBody
+    : JSON.stringify(body || {});
+  const expected = crypto.createHmac("sha256", signatureSecret).update(rawPayload, "utf8").digest("hex");
 
   try {
     const providedBuf = Buffer.from(provided, "hex");
@@ -2571,7 +2573,7 @@ aiRoutes.post('/routing/execute', isAuth, async (req: any, res) => {
   return res.json({ ok: true, applied: true, ticketId: ticketId || null, contactId: contactId || null, matched: match, assignUserId: match?.assignUserId || null, queue: match?.queue || null });
 });
 
-const applyLeadStatusAndTokkoSync = async ({ companyId, contactId, status, lossReason }: { companyId: number; contactId: number; status: string; lossReason: string }) => {
+export const applyLeadStatusAndTokkoSync = async ({ companyId, contactId, status, lossReason }: { companyId: number; contactId: number; status: string; lossReason: string }) => {
   const normalizedStatus = status === 'perdido' ? 'lost' : status;
   const validStatus = ['lost', 'won', 'read', 'engaged', 'warm', 'hot', 'new'];
   if (!validStatus.includes(normalizedStatus)) return { error: 'status inválido', statusCode: 400 } as any;
