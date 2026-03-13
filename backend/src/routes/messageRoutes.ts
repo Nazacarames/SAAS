@@ -42,8 +42,14 @@ const resolveRetryAttempt = (req: any): { retryAttempt: number | null; invalidRa
 messageRoutes.get("/:conversationId", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
   const { conversationId } = req.params;
+  const { page, limit } = req.query as any;
   const contactId = parseInt(conversationId);
-  const messages: any[] = await (ListMessagesService as any)({ contactId, companyId });
+  const messages: any = await (ListMessagesService as any)({
+    contactId,
+    companyId,
+    page: page ? parseInt(page) : undefined,
+    limit: limit ? parseInt(limit) : undefined
+  });
   return res.json(messages);
 });
 

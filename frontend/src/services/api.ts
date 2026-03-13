@@ -1,34 +1,23 @@
 import axios from 'axios';
 
 const api = axios.create({
-    baseURL: import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000/api',
+    baseURL: import.meta.env.VITE_BACKEND_URL || '/api',
     headers: {
         'Content-Type': 'application/json',
     },
+    withCredentials: true,
 });
 
-// Request interceptor to add token
-api.interceptors.request.use(
-    (config) => {
-        const token = localStorage.getItem('token');
-        if (token) {
-            config.headers.Authorization = `Bearer ${token}`;
-        }
-        return config;
-    },
-    (error) => {
-        return Promise.reject(error);
-    }
-);
+// No need to add token in request interceptor - cookies are sent automatically
 
 // Flag to prevent infinite refresh loops
 let isRefreshing = false;
-let failedQueue: Array<{ resolve: (token: string) => void; reject: (err: any) => void }> = [];
+let failedQueue: Array<{ resolve: (v: unknown) => void; reject: (err: any) => void }> = [];
 
-const processQueue = (error: any, token: string | null) => {
+const processQueue = (error: any) => {
     failedQueue.forEach(({ resolve, reject }) => {
         if (error) reject(error);
-        else resolve(token!);
+        else resolve(undefined);
     });
     failedQueue = [];
 };
@@ -40,20 +29,10 @@ api.interceptors.response.use(
         const originalRequest = error.config;
 
         if (error.response?.status === 401 && !originalRequest._retry) {
-            const refreshToken = localStorage.getItem('refreshToken');
-            if (!refreshToken) {
-                localStorage.removeItem('token');
-                localStorage.removeItem('refreshToken');
-                localStorage.removeItem('user');
-                window.location.href = '/login';
-                return Promise.reject(error);
-            }
-
             if (isRefreshing) {
                 return new Promise((resolve, reject) => {
                     failedQueue.push({ resolve, reject });
-                }).then((token) => {
-                    originalRequest.headers.Authorization = `Bearer ${token}`;
+                }).then(() => {
                     return api(originalRequest);
                 });
             }
@@ -62,20 +41,15 @@ api.interceptors.response.use(
             isRefreshing = true;
 
             try {
-                const { data } = await axios.post(
+                await axios.post(
                     `${api.defaults.baseURL}/auth/refresh`,
-                    { refreshToken }
+                    {},
+                    { withCredentials: true }
                 );
-                const newToken = data.token;
-                localStorage.setItem('token', newToken);
-                api.defaults.headers.common.Authorization = `Bearer ${newToken}`;
-                processQueue(null, newToken);
-                originalRequest.headers.Authorization = `Bearer ${newToken}`;
+                processQueue(null);
                 return api(originalRequest);
             } catch (refreshError) {
-                processQueue(refreshError, null);
-                localStorage.removeItem('token');
-                localStorage.removeItem('refreshToken');
+                processQueue(refreshError);
                 localStorage.removeItem('user');
                 window.location.href = '/login';
                 return Promise.reject(refreshError);

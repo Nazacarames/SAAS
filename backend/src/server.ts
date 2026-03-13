@@ -1,3 +1,4 @@
+import "./instrument";
 import dotenv from "dotenv";
 import app from "./app";
 import sequelize from "./database";
@@ -15,6 +16,13 @@ if (missing.length) {
   console.error("✗ Missing required environment variables:", missing.join(", "));
   process.exit(1);
 }
+
+if (!process.env.NODE_ENV) {
+  console.warn("⚠ NODE_ENV not set — defaulting to 'development'. Set NODE_ENV=production for production deployments.");
+}
+
+const NODE_ENV = process.env.NODE_ENV || "development";
+console.log(`✓ Environment: ${NODE_ENV}`);
 
 const PORT = process.env.PORT || 4000;
 const TOKKO_KB_SYNC_INTERVAL_MS = Math.max(60_000, Number(process.env.TOKKO_KB_SYNC_INTERVAL_MS || 24 * 60 * 60 * 1000));
@@ -50,16 +58,10 @@ const startServer = async () => {
     await sequelize.authenticate();
     console.log("✓ Database connection established successfully");
 
-    // Cloud API only: no local WhatsApp-web sessions to restore.
-    // Sync models only in development to avoid destructive resets in production
-    if ((process.env.NODE_ENV || "development") !== "production") {
-      await sequelize.sync({ alter: true });
-      console.log("✓ Database models synchronized (dev)");
-    }
+    console.log("✓ Database ready (run 'npm run db:migrate' for schema changes)");
 
     server.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
-      console.log(`✓ Environment: `);
 
       setInterval(() => {
         CheckInactiveContactsService().catch((e: any) => console.error("inactivity scan error:", e?.message || e));

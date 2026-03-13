@@ -82,6 +82,17 @@ import { getIntegrationHardeningAlertSnapshot, getIntegrationHardeningMetrics } 
 const settingsRoutes = Router();
 const maskKey = (key: string) => (!key ? "" : key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}${"*".repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`);
 
+settingsRoutes.get("/public", (req, res) => {
+    const s = getRuntimeSettings() as any;
+    return res.json({
+        leadScoreHot: Number(s?.leadScoreHot) || 75,
+        leadScoreWarm: Number(s?.leadScoreWarm) || 50,
+        leadScoreContacted: Number(s?.leadScoreContacted) || 25,
+        conversationPollIntervalMs: Number(s?.conversationPollIntervalMs) || 30000,
+        dashboardPollIntervalMs: Number(s?.dashboardPollIntervalMs) || 60000,
+    });
+});
+
 settingsRoutes.get("/integrations/api-key", isAuth, isAdmin, async (_req, res) => {
   const apiKey = process.env.INTEGRATIONS_API_KEY || "";
   return res.json({ configured: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : "" });

@@ -109,6 +109,10 @@ echo "Step 14: Building backend..."
 sudo -u deploy npm run build
 
 echo ""
+echo "Step 14b: Running post-build database migrations..."
+sudo -u deploy npm run db:migrate
+
+echo ""
 echo "Step 15: Installing frontend dependencies..."
 cd $DEPLOY_DIR/frontend
 sudo -u deploy npm install

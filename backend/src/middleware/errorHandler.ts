@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/node";
 import { Request, Response, NextFunction } from "express";
 import AppError from "../errors/AppError";
 
@@ -24,6 +25,7 @@ const errorHandler = (
         });
     }
 
+    Sentry.captureException(err);
     console.error("Internal Server Error:", err);
 
     return res.status(500).json({

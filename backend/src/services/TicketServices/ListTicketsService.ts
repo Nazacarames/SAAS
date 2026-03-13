@@ -6,9 +6,11 @@ interface ListTicketsRequest {
     companyId: number;
     status?: string;
     contactId?: number;
+    page?: number;
+    limit?: number;
 }
 
-const ListTicketsService = async ({ companyId, status, contactId }: ListTicketsRequest): Promise<Ticket[]> => {
+const ListTicketsService = async ({ companyId, status, contactId, page = 1, limit = 50 }: ListTicketsRequest) => {
     const whereCondition: any = { companyId };
 
     if (status) {
@@ -19,7 +21,10 @@ const ListTicketsService = async ({ companyId, status, contactId }: ListTicketsR
         whereCondition.contactId = contactId;
     }
 
-    const tickets = await Ticket.findAll({
+    const safeLimit = Math.min(Math.max(1, limit), 200);
+    const offset = (Math.max(1, page) - 1) * safeLimit;
+
+    const { rows, count } = await Ticket.findAndCountAll({
         where: whereCondition,
         include: [
             {
@@ -33,10 +38,13 @@ const ListTicketsService = async ({ companyId, status, contactId }: ListTicketsR
                 attributes: ["id", "name"]
             }
         ],
-        order: [["updatedAt", "DESC"]]
+        order: [["updatedAt", "DESC"]],
+        limit: safeLimit,
+        offset,
+        distinct: true
     });
 
-    return tickets;
+    return { data: rows, total: count, page, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) };
 };
 
 export default ListTicketsService;

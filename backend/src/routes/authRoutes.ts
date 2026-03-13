@@ -21,15 +21,42 @@ authRoutes.post("/login", validateSchema(loginSchema), async (req, res) => {
 
     const result = await LoginService({ email, password });
 
-    return res.json(result);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const cookieOptions = {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' as const : 'lax' as const,
+        path: '/',
+    };
+
+    res.cookie('token', result.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
+    res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
+    return res.json({ user: result.user });
 });
 
 authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res) => {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
 
     const result = await RefreshTokenService(refreshToken);
 
-    return res.json(result);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const cookieOptions = {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' as const : 'lax' as const,
+        path: '/',
+    };
+    res.cookie('token', result.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
+    if (result.refreshToken) {
+        res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
+    }
+    return res.json({ ok: true });
+});
+
+authRoutes.post("/logout", (req, res) => {
+    res.clearCookie('token', { path: '/' });
+    res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
+    return res.json({ ok: true });
 });
 
 authRoutes.post("/register", validateSchema(registerSchema), async (req, res) => {
@@ -114,8 +141,19 @@ authRoutes.post("/register", validateSchema(registerSchema), async (req, res) =>
         await tx.commit();
 
         const login = await LoginService({ email: safeEmail, password: safePassword });
+
+        const isProduction = process.env.NODE_ENV === 'production';
+        const cookieOptions = {
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: isProduction ? 'strict' as const : 'lax' as const,
+            path: '/',
+        };
+
+        res.cookie('token', login.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
+        res.cookie('refreshToken', login.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
         return res.status(201).json({
-            ...login,
+            user: login.user,
             onboarding: {
                 trialDays: 30,
                 companyId: company.id,

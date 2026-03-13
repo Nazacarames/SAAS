@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useEffect } from 'react';
 import { Typography, Box, Grid, Paper, Card, CardContent, Stack, Chip, LinearProgress } from '@mui/material';
 import {
   Chat as ChatIcon,
@@ -8,36 +8,44 @@ import {
   AccountTree as AccountTreeIcon,
   TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
-import api from '../../services/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useConversations, useContacts, useWhatsapps, useFunnelStats } from '../../hooks/useApi';
+import { socketConnection } from '../../services/socket';
 
 const Dashboard = () => {
-  const [tickets, setTickets] = useState<any[]>([]);
-  const [contacts, setContacts] = useState<any[]>([]);
-  const [connections, setConnections] = useState<any[]>([]);
-  const [funnel, setFunnel] = useState({ nuevo: 0, contactado: 0, calificado: 0, interesado: 0 });
+  const queryClient = useQueryClient();
+  const { data: ticketsRaw } = useConversations();
+  const { data: contactsRaw } = useContacts();
+  const { data: connectionsRaw } = useWhatsapps();
+  const { data: funnel } = useFunnelStats();
 
-  const load = async () => {
-    try {
-      const [t, c, w, f] = await Promise.all([
-        api.get('/conversations'),
-        api.get('/contacts'),
-        api.get('/whatsapps'),
-        api.get('/ai/funnel/stats')
-      ]);
-      setTickets(Array.isArray(t.data) ? t.data : []);
-      setContacts(Array.isArray(c.data) ? c.data : []);
-      setConnections(Array.isArray(w.data) ? w.data : []);
-      setFunnel(f.data || { nuevo: 0, contactado: 0, calificado: 0, interesado: 0 });
-    } catch {
-      // silent fallback
-    }
-  };
+  // Handle both paginated { data: [...] } and plain array responses
+  const tickets = Array.isArray(ticketsRaw) ? ticketsRaw : Array.isArray(ticketsRaw?.data) ? ticketsRaw.data : [];
+  const contacts = Array.isArray(contactsRaw) ? contactsRaw : Array.isArray(contactsRaw?.data) ? contactsRaw.data : [];
+  const connections = Array.isArray(connectionsRaw) ? connectionsRaw : [];
+  const funnelData = funnel || { nuevo: 0, contactado: 0, calificado: 0, interesado: 0 };
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, 15000);
-    return () => clearInterval(id);
-  }, []);
+    const socket = socketConnection.connect();
+
+    const handleUpdate = () => {
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      queryClient.invalidateQueries({ queryKey: ['contacts'] });
+      queryClient.invalidateQueries({ queryKey: ['funnel-stats'] });
+    };
+
+    if (socket) {
+      socket.on('newMessage', handleUpdate);
+      socket.on('ticketUpdate', handleUpdate);
+    }
+
+    return () => {
+      if (socket) {
+        socket.off('newMessage', handleUpdate);
+        socket.off('ticketUpdate', handleUpdate);
+      }
+    };
+  }, [queryClient]);
 
   const openTickets = tickets.filter((x: any) => x.status === 'open' || x.status === 'pending').length;
   const closedToday = tickets.filter((x: any) => {
@@ -55,15 +63,15 @@ const Dashboard = () => {
   ];
 
   const funnelCards = [
-    { title: 'Nuevo', value: funnel.nuevo, color: '#7D8CA8' },
-    { title: 'Contactado', value: funnel.contactado, color: '#5BB2FF' },
-    { title: 'Calificado', value: funnel.calificado, color: '#A78BFA' },
-    { title: 'Interesado', value: funnel.interesado, color: '#22C55E' }
+    { title: 'Nuevo', value: funnelData.nuevo, color: '#7D8CA8' },
+    { title: 'Contactado', value: funnelData.contactado, color: '#5BB2FF' },
+    { title: 'Calificado', value: funnelData.calificado, color: '#A78BFA' },
+    { title: 'Interesado', value: funnelData.interesado, color: '#22C55E' }
   ];
 
   const funnelTotal = useMemo(
-    () => funnel.nuevo + funnel.contactado + funnel.calificado + funnel.interesado,
-    [funnel]
+    () => funnelData.nuevo + funnelData.contactado + funnelData.calificado + funnelData.interesado,
+    [funnelData]
   );
 
   return (
@@ -73,7 +81,7 @@ const Dashboard = () => {
           <Typography variant='h4'>Dashboard ejecutivo</Typography>
           <Typography variant='body2' color='text.secondary'>Visión operativa en tiempo real de conversaciones, leads y conversión.</Typography>
         </Box>
-        <Chip icon={<TrendingUpIcon />} label='Actualiza cada 15s' color='primary' variant='outlined' />
+        <Chip icon={<TrendingUpIcon />} label='Tiempo real' color='primary' variant='outlined' />
       </Stack>
 
       <Grid container spacing={2}>

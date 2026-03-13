@@ -9,11 +9,13 @@ const conversationRoutes = Router();
 // Unified conversations endpoint (conversation + leads view)
 conversationRoutes.get("/", isAuth, async (req: any, res) => {
   const companyId = req.user.companyId;
-  const { status, contactId } = req.query;
+  const { status, contactId, page, limit } = req.query;
   const conversations = await ListTicketsService({
     companyId,
     status,
-    contactId: contactId ? parseInt(contactId) : undefined
+    contactId: contactId ? parseInt(contactId) : undefined,
+    page: page ? parseInt(page) : undefined,
+    limit: limit ? parseInt(limit) : undefined
   });
   return res.json(conversations);
 });

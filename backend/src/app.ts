@@ -1,5 +1,7 @@
 import express, { Application } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
+import helmet from "helmet";
 import "express-async-errors";
 import errorHandler from "./middleware/errorHandler";
 import { getMessageStats } from "./utils/messageStats";
@@ -8,14 +10,11 @@ import { requestContext } from "./middleware/requestContext";
 
 const app: Application = express();
 
-// Security headers
-app.use((_req: any, res: any, next: any) => {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-XSS-Protection", "1; mode=block");
-    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-    next();
-});
+// Security headers via helmet
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// Cookie parser
+app.use(cookieParser());
 
 // CORS
 app.use(cors({
@@ -90,19 +89,6 @@ app.use("/api/ai", aiRoutes);
 app.use("/api/saved-replies", savedReplyRoutes);
 app.use("/api/billing", billingRoutes);
 
-
-// Temporary endpoint to sync webhooks table (development only)
-if ((process.env.NODE_ENV || "development") !== "production") {
-    app.post("/api/sync-webhooks", async (req, res) => {
-        try {
-            await Webhook.sync({ alter: true });
-            const count = await Webhook.count();
-            res.json({ success: true, message: "Tabla webhooks sincronizada", count });
-        } catch (error: any) {
-            res.status(500).json({ success: false, error: error.message });
-        }
-    });
-}
 
 // Error handler (must be last)
 app.use(errorHandler);

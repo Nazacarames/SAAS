@@ -14,9 +14,15 @@ const contactRoutes = Router();
 
 contactRoutes.get("/", isAuth, async (req: any, res) => {
   const { companyId } = req.user;
-  const { status, assignedUserId } = req.query as any;
-  const contacts = await ListContactsService({ companyId, status, assignedUserId: assignedUserId === undefined ? undefined : (assignedUserId === "null" ? null : Number(assignedUserId)) });
-  return res.json(contacts);
+  const { status, assignedUserId, page, limit } = req.query as any;
+  const result = await ListContactsService({
+    companyId,
+    status,
+    assignedUserId: assignedUserId === undefined ? undefined : (assignedUserId === "null" ? null : Number(assignedUserId)),
+    page: page ? parseInt(page) : undefined,
+    limit: limit ? parseInt(limit) : undefined
+  });
+  return res.json(result);
 });
 
 contactRoutes.post("/", isAuth, validateSchema(createContactSchema), async (req: any, res) => {

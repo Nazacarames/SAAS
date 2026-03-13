@@ -27,12 +27,8 @@ import { Search as SearchIcon, Send as SendIcon, Refresh as RefreshIcon, TextSni
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
-
-type SavedReply = {
-  id: number;
-  shortcut: string;
-  message: string;
-};
+import { socketConnection } from '../../services/socket';
+import { useSavedReplies, useTemplates } from '../../hooks/useApi';
 
 type TemplateItem = {
   id: number;
@@ -122,8 +118,8 @@ const Conversations = () => {
   const [search, setSearch] = useState('');
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
-  const [savedReplies, setSavedReplies] = useState<SavedReply[]>([]);
-  const [templates, setTemplates] = useState<TemplateItem[]>([]);
+  const { data: savedReplies = [] } = useSavedReplies();
+  const { data: templates = [] } = useTemplates();
   const [templateLanguage] = useState('es_AR');
   const [templateMenuAnchor, setTemplateMenuAnchor] = useState<null | HTMLElement>(null);
   const [linkPreviews, setLinkPreviews] = useState<Record<string, { title?: string; description?: string; image?: string; host?: string }>>({});
@@ -154,7 +150,8 @@ const Conversations = () => {
     setLoadingTickets(true);
     try {
       const { data } = await api.get('/conversations');
-      setTickets(Array.isArray(data) ? data : []);
+      const arr = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+      setTickets(arr);
     } catch (e) {
       console.error(e);
       toast.error('Error al cargar conversaciones');
@@ -169,7 +166,8 @@ const Conversations = () => {
     try {
       const { data } = await api.get('/contacts');
       if (seq !== contactFetchSeq.current) return;
-      const arr = Array.isArray(data) ? data : [];
+      const raw = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+      const arr = raw;
       const found = arr.find((c: any) => Number(c.id) === Number(contactId));
       setContactData(found || null);
     } catch {
@@ -184,7 +182,7 @@ const Conversations = () => {
     try {
       // Backend /messages/:conversationId expects contactId (not ticketId).
       const { data: msgs } = await api.get(`/messages/${contactId}`);
-      const arr = Array.isArray(msgs) ? msgs : [];
+      const arr = Array.isArray(msgs) ? msgs : Array.isArray(msgs?.data) ? msgs.data : [];
 
       arr.sort((a: any, b: any) => {
         const da = toTs(a?.createdAt) || toTs(a?.updatedAt) || toTs(a?.timestamp);
@@ -211,28 +209,37 @@ const Conversations = () => {
   }, []);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      fetchTickets();
-    }, 10000);
-    return () => clearInterval(id);
-  }, []);
+    const socket = socketConnection.connect();
+
+    const handleNewMessage = (data: any) => {
+        fetchTickets();
+        if (selectedConv && Number(data?.contactId) === selectedConv.contactId) {
+            fetchConversationMessages(selectedConv.contactId);
+        }
+    };
+
+    const handleTicketUpdate = () => {
+        fetchTickets();
+    };
+
+    if (socket) {
+        socket.on('newMessage', handleNewMessage);
+        socket.on('ticketUpdate', handleTicketUpdate);
+        socket.on('contactUpdate', handleTicketUpdate);
+    }
+
+    return () => {
+        if (socket) {
+            socket.off('newMessage', handleNewMessage);
+            socket.off('ticketUpdate', handleTicketUpdate);
+            socket.off('contactUpdate', handleTicketUpdate);
+        }
+    };
+  }, [selectedConv?.contactId]);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get('/saved-replies');
-        setSavedReplies(Array.isArray(data) ? data : []);
-      } catch {
-        setSavedReplies([]);
-      }
-
-      try {
-        const { data } = await api.get('/ai/templates');
-        setTemplates(Array.isArray(data) ? data : []);
-      } catch {
-        setTemplates([]);
-      }
-    })();
+    const id = setInterval(() => { fetchTickets(); }, 30000);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {

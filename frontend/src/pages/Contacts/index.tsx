@@ -158,7 +158,8 @@ const Leads = () => {
       const params: any = {};
       if (filterStatus !== 'all') params.status = filterStatus;
       const { data } = await api.get('/contacts', { params });
-      setLeads(Array.isArray(data) ? data : []);
+      const arr = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+      setLeads(arr);
     } catch {
       toast.error('Error al cargar leads');
     } finally {
@@ -169,7 +170,8 @@ const Leads = () => {
   const fetchUsers = async () => {
     try {
       const { data } = await api.get('/users');
-      const list = Array.isArray(data) ? data.map((u: any) => ({ id: Number(u.id), name: String(u.name || `Usuario ${u.id}`) })) : [];
+      const raw = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+      const list = raw.map((u: any) => ({ id: Number(u.id), name: String(u.name || `Usuario ${u.id}`) }));
       setUsers(list);
     } catch {
       setUsers([]);

@@ -24,20 +24,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        const token = localStorage.getItem('token');
         const storedUser = localStorage.getItem('user');
 
-        if (token && storedUser) {
+        if (storedUser) {
             try {
                 const parsed = JSON.parse(storedUser);
                 if (parsed && typeof parsed.id === 'number') {
                     setUser(parsed);
                 } else {
-                    localStorage.removeItem('token');
                     localStorage.removeItem('user');
                 }
             } catch {
-                localStorage.removeItem('token');
                 localStorage.removeItem('user');
             }
         }
@@ -47,19 +44,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const handleLogin = async (email: string, password: string) => {
         const { data } = await api.post('/auth/login', { email, password });
-
-        localStorage.setItem('token', data.token);
-        if (data.refreshToken) {
-            localStorage.setItem('refreshToken', data.refreshToken);
-        }
+        // Tokens are now set as HttpOnly cookies by the backend
         localStorage.setItem('user', JSON.stringify(data.user));
-
         setUser(data.user);
     };
 
-    const handleLogout = () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('refreshToken');
+    const handleLogout = async () => {
+        try {
+            await api.post('/auth/logout');
+        } catch {
+            // ignore logout errors
+        }
         localStorage.removeItem('user');
         setUser(null);
         window.location.href = '/login';

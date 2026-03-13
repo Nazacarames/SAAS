@@ -6,12 +6,17 @@ interface ListMessagesRequest {
     contactId?: number;
     ticketId?: number;
     companyId: number;
+    page?: number;
+    limit?: number;
 }
 
-const ListMessagesService = async ({ contactId, ticketId, companyId }: ListMessagesRequest): Promise<Message[]> => {
+const ListMessagesService = async ({ contactId, ticketId, companyId, page = 1, limit = 50 }: ListMessagesRequest) => {
     const baseWhere: any = contactId ? { contactId } : { ticketId };
 
-    const messages = await Message.findAll({
+    const safeLimit = Math.min(Math.max(1, limit), 200);
+    const offset = (Math.max(1, page) - 1) * safeLimit;
+
+    const { rows, count } = await Message.findAndCountAll({
         where: baseWhere,
         include: [
             {
@@ -22,10 +27,13 @@ const ListMessagesService = async ({ contactId, ticketId, companyId }: ListMessa
                 required: true
             }
         ],
-        order: [["createdAt", "ASC"]]
+        order: [["createdAt", "ASC"]],
+        limit: safeLimit,
+        offset,
+        distinct: true
     });
 
-    return messages;
+    return { data: rows, total: count, page, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) };
 };
 
 export default ListMessagesService;

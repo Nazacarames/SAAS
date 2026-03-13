@@ -16,7 +16,14 @@ export const initIO = (httpServer: Server): SocketIO => {
 
     // Authentication middleware
     io.use((socket, next) => {
-        const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(" ")[1];
+        const token = socket.handshake.auth?.token
+            || socket.handshake.headers?.authorization?.split(" ")[1]
+            || (() => {
+                // Parse cookie header for HttpOnly token
+                const cookieHeader = socket.handshake.headers?.cookie || "";
+                const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/);
+                return match?.[1] || "";
+            })();
         if (!token) {
             return next(new Error("Authentication required"));
         }

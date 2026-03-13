@@ -43,10 +43,10 @@ const Login = () => {
             >
                 <Paper elevation={3} sx={{ p: 4, width: '100%' }}>
                     <Typography component="h1" variant="h5" align="center" gutterBottom>
-                        LMTM CRM
+                        Charlott
                     </Typography>
                     <Typography variant="body2" align="center" color="text.secondary" sx={{ mb: 3 }}>
-                        Sistema de Atención WhatsApp
+                        CRM de WhatsApp inteligente
                     </Typography>
 
                     <form onSubmit={handleSubmit}>
