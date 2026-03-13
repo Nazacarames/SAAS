@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { Op, QueryTypes } from "sequelize";
 
+import { generateConversationalReply } from "../AIServices/ConversationOrchestrator";
 import Contact from "../../models/Contact";
 import Ticket from "../../models/Ticket";
 import Message from "../../models/Message";
@@ -1285,23 +1286,29 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     return;
   }
 
-  const metaFormHint = await getLatestMetaLeadFormHint(ticket.companyId, String((contact as any)?.number || ""));
-  const baseReplyCore = await aiReplyFor(text, ticket.companyId, metaFormHint);
-  const contactNeedsRaw = String((contact as any)?.needs || "");
-  const isMetaFormLead = (() => {
-    const n = contactNeedsRaw.toLowerCase();
-    const h = String(metaFormHint || "").toLowerCase();
-    return n.includes("meta") || n.includes("form") || n.includes("leadgen") || n.includes("lote") || n.startsWith("{") || h.includes("form") || h.includes("lead") || h.includes("meta");
-  })();
-  const shouldInjectLeadFormContext = isMetaFormLead && /asistente de charlott/i.test(String(ticket.lastMessage || "")) && !/hola|buenas|buen d[ií]a/.test(low);
-  const leadFormIntro = shouldInjectLeadFormContext ? buildLeadFormContextIntro(contactNeedsRaw) : "";
-  const leadFormFollowup = shouldInjectLeadFormContext
-    ? buildLeadFormFollowup(contactNeedsRaw)
-    : "";
-  const baseReply = [leadFormIntro, baseReplyCore, leadFormFollowup].filter((x) => String(x || "").trim()).join(" ").trim();
-
-  if (!String(baseReply || "").trim()) {
+  // Silence truly low-signal messages (pure emoji, "ok", "dale") before calling OpenAI
+  if (isLowSignalMessage(low)) {
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
+    return;
+  }
+
+  // Use the AI orchestrator: OpenAI with full multi-turn history, Tokko search, RAG
+  let baseReply = "";
+  try {
+    const orchResult = await generateConversationalReply({
+      companyId: ticket.companyId,
+      text,
+      contactId: contact.id,
+      ticketId: ticket.id
+    });
+    baseReply = String(orchResult.reply || "").trim();
+  } catch (orchErr: any) {
+    console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
+    baseReply = "";
+  }
+
+  if (!baseReply) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "silence", responsePreview: "" });
     return;
   }
   const guardrail = await applyGuardrails({ text, reply: baseReply, conversationType });
