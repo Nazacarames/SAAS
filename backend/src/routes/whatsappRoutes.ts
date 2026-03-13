@@ -4,6 +4,8 @@ import ListWhatsappsService from "../services/WhatsappServices/ListWhatsappsServ
 import CreateWhatsappService from "../services/WhatsappServices/CreateWhatsappService";
 import ShowWhatsappService from "../services/WhatsappServices/ShowWhatsappService";
 import DeleteWhatsappService from "../services/WhatsappServices/DeleteWhatsappService";
+import validateSchema from "../middleware/validateSchema";
+import { createWhatsappSchema } from "../schemas/whatsappSchemas";
 
 const whatsappRoutes = Router();
 
@@ -13,7 +15,7 @@ whatsappRoutes.get("/", isAuth, async (req: any, res) => {
   return res.json(whatsapps);
 });
 
-whatsappRoutes.post("/", isAuth, async (req: any, res) => {
+whatsappRoutes.post("/", isAuth, validateSchema(createWhatsappSchema), async (req: any, res) => {
   const { companyId } = req.user;
   const { name, isDefault } = req.body;
 
