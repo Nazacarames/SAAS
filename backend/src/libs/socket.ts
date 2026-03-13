@@ -1,6 +1,7 @@
 import { Server as SocketIO } from "socket.io";
 import { Server } from "http";
 import { verifyToken } from "../helpers/jwt";
+import Ticket from "../models/Ticket";
 
 let io: SocketIO;
 
@@ -37,8 +38,16 @@ export const initIO = (httpServer: Server): SocketIO => {
             socket.join(`company-${user.companyId}`);
         }
 
-        socket.on("joinChatBox", (ticketId: string) => {
-            // Ticket room is company-scoped to prevent cross-tenant access
+        socket.on("joinChatBox", async (ticketId: string) => {
+            // Verify ticket belongs to user's company before joining
+            const ticket = await Ticket.findOne({
+                where: { id: Number(ticketId), companyId: user?.companyId },
+                attributes: ["id"]
+            });
+            if (!ticket) {
+                socket.emit("error", { message: "Ticket no encontrado" });
+                return;
+            }
             const room = `company-${user?.companyId}:ticket-${ticketId}`;
             socket.join(room);
         });

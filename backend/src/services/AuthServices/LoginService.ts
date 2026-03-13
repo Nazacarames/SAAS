@@ -1,4 +1,5 @@
 import User from "../../models/User";
+import RefreshToken from "../../models/RefreshToken";
 import AppError from "../../errors/AppError";
 import { createAccessToken, createRefreshToken } from "../../helpers/jwt";
 
@@ -44,6 +45,13 @@ const LoginService = async ({ email, password }: LoginRequest): Promise<LoginRes
 
     const token = createAccessToken(tokenPayload);
     const refreshToken = createRefreshToken(tokenPayload);
+
+    // Store refresh token in database with 7-day expiry
+    await RefreshToken.create({
+        token: refreshToken,
+        userId: user.id,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    } as any);
 
     return {
         token,

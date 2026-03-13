@@ -308,13 +308,11 @@ const sendCloudTemplateWithCredentials = async (
       template: {
         name: templateName,
         language: { code: languageCode },
+        // Only send body parameters — sending a 'header' component for templates
+        // that don't have one causes a Meta API error (code 132000).
         ...(Array.isArray(templateVariables) && templateVariables.length > 0
           ? {
               components: [
-                {
-                  type: 'header',
-                  parameters: [{ type: 'text', text: String(templateVariables[0] || '') }]
-                },
                 {
                   type: 'body',
                   parameters: templateVariables.map((v) => ({ type: 'text', text: String(v || '') }))
@@ -364,8 +362,9 @@ const scoreFromText = (text: string, current = 0) => {
   return Math.min(100, score);
 };
 
-const buildHolaTemplatePreview = (_rawName?: string): string => {
-  return 'Template hola enviado';
+const buildHolaTemplatePreview = (rawName?: string): string => {
+  const firstName = String(rawName || '').trim().split(/\s+/)[0];
+  return firstName ? `¡Hola ${firstName}! 👋 Soy el asistente virtual. ¿En qué te puedo ayudar?` : '¡Hola! 👋 Soy el asistente virtual. ¿En qué te puedo ayudar?';
 };
 
 const inferLeadStatusByBotSignals = ({ text, leadScore, currentStatus }: { text: string; leadScore: number; currentStatus?: string }): string => {

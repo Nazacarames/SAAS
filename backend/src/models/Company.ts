@@ -46,19 +46,19 @@ class Company extends Model {
     @UpdatedAt
     updatedAt: Date;
 
-    @HasMany(() => User)
+    @HasMany(() => User, { onDelete: "CASCADE", hooks: true })
     users: User[];
 
-    @HasMany(() => Whatsapp)
+    @HasMany(() => Whatsapp, { onDelete: "CASCADE", hooks: true })
     whatsapps: Whatsapp[];
 
-    @HasMany(() => Contact)
+    @HasMany(() => Contact, { onDelete: "CASCADE", hooks: true })
     contacts: Contact[];
 
-    @HasMany(() => Ticket)
+    @HasMany(() => Ticket, { onDelete: "CASCADE", hooks: true })
     tickets: Ticket[];
 
-    @HasMany(() => Queue)
+    @HasMany(() => Queue, { onDelete: "CASCADE", hooks: true })
     queues: Queue[];
 }
 

@@ -6,6 +6,8 @@ import Company from "../models/Company";
 import User from "../models/User";
 import sequelize from "../database";
 import AppError from "../errors/AppError";
+import validateSchema from "../middleware/validateSchema";
+import { loginSchema, refreshTokenSchema, registerSchema } from "../schemas/authSchemas";
 
 const authRoutes = Router();
 
@@ -14,7 +16,7 @@ const registerBuckets = new Map<string, { count: number; resetAt: number }>();
 const REGISTER_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const REGISTER_MAX_PER_WINDOW = 5;
 
-authRoutes.post("/login", async (req, res) => {
+authRoutes.post("/login", validateSchema(loginSchema), async (req, res) => {
     const { email, password } = req.body;
 
     const result = await LoginService({ email, password });
@@ -22,7 +24,7 @@ authRoutes.post("/login", async (req, res) => {
     return res.json(result);
 });
 
-authRoutes.post("/refresh", async (req, res) => {
+authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res) => {
     const { refreshToken } = req.body;
 
     const result = await RefreshTokenService(refreshToken);
@@ -30,7 +32,7 @@ authRoutes.post("/refresh", async (req, res) => {
     return res.json(result);
 });
 
-authRoutes.post("/register", async (req, res) => {
+authRoutes.post("/register", validateSchema(registerSchema), async (req, res) => {
     // Rate limit check
     const ip = String(req.ip || "unknown");
     const now = Date.now();

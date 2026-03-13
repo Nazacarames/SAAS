@@ -7,6 +7,8 @@ import DeleteContactService from "../services/ContactServices/DeleteContactServi
 import SendMessageToContactService from "../services/ContactServices/SendMessageToContactService";
 import Contact from "../models/Contact";
 import AppError from "../errors/AppError";
+import validateSchema from "../middleware/validateSchema";
+import { createContactSchema, updateContactSchema } from "../schemas/contactSchemas";
 
 const contactRoutes = Router();
 
@@ -17,7 +19,7 @@ contactRoutes.get("/", isAuth, async (req: any, res) => {
   return res.json(contacts);
 });
 
-contactRoutes.post("/", isAuth, async (req: any, res) => {
+contactRoutes.post("/", isAuth, validateSchema(createContactSchema), async (req: any, res) => {
   const { companyId } = req.user;
   const { name, number, email, whatsappId, source, leadStatus, assignedUserId, inactivityMinutes, inactivityWebhookId, tags } = req.body;
   const contact = await CreateContactService({
@@ -36,7 +38,7 @@ contactRoutes.post("/", isAuth, async (req: any, res) => {
   return res.status(201).json(contact);
 });
 
-contactRoutes.put("/:contactId", isAuth, async (req: any, res) => {
+contactRoutes.put("/:contactId", isAuth, validateSchema(updateContactSchema), async (req: any, res) => {
   const { companyId } = req.user;
   const { contactId } = req.params;
   const { name, number, email, whatsappId, source, leadStatus, assignedUserId, inactivityMinutes, inactivityWebhookId, tags } = req.body;

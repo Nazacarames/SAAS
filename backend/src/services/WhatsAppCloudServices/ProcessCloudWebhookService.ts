@@ -1270,7 +1270,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     return;
   }
 
-  if (/gracias|perfecto|listo|resuelto/.test(low) && resolvePolicies()[conversationType]?.allowAutoClose) {
+  // Only auto-close on clearly conclusive short messages (≤40 chars) or standalone keywords.
+  // Avoids false positives like "Perfecto, entonces espero a que vuelvan".
+  const isStandaloneConclusion = /^(gracias[.!]?|muchas gracias[.!]?|perfecto[.!]?|listo[.!]?|resuelto[.!]?|ok[.!]?|dale[.!]?|buenísimo[.!]?)$/i.test(low.trim());
+  const isShortConclusion = low.trim().length <= 40 && /^(gracias|perfecto|listo|resuelto)[\s.,!]/.test(low.trim());
+  if ((isStandaloneConclusion || isShortConclusion) && resolvePolicies()[conversationType]?.allowAutoClose) {
     const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "auto_close", reason: "Cierre positivo detectado", guardrailAction: "close", responsePreview: closeText });
     const out = await sendManagedReply({ ticket, contact, text: closeText });
