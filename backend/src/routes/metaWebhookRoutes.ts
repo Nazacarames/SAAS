@@ -220,16 +220,23 @@ metaWebhookRoutes.post("/leadgen", async (req: any, res) => {
   let localResult: any = null;
   try {
     const internalPayload = { ...payload, companyId };
+    const internalBodyStr = JSON.stringify(internalPayload);
+
+    // Re-compute HMAC signature over the new body so the internal handler
+    // can verify it.  The original Meta signature is invalid for the
+    // modified payload (companyId was added).
+    const internalHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    if (appSecret) {
+      const internalSig = crypto.createHmac("sha256", appSecret).update(internalBodyStr).digest("hex");
+      internalHeaders["x-hub-signature-256"] = `sha256=${internalSig}`;
+    }
+
     const internalResp = await fetch(
       `http://localhost:${process.env.PORT || 3001}/api/ai/meta-leads/webhook`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Forward the original signature so the internal handler can verify
-          ...(req.get("x-hub-signature-256") ? { "x-hub-signature-256": String(req.get("x-hub-signature-256")) } : {})
-        },
-        body: JSON.stringify(internalPayload)
+        headers: internalHeaders,
+        body: internalBodyStr
       }
     );
     localResult = await internalResp.json().catch(() => null);

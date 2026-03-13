@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { Op, QueryTypes } from "sequelize";
 
+import { generateConversationalReply } from "../AIServices/ConversationOrchestrator";
 import Contact from "../../models/Contact";
 import Ticket from "../../models/Ticket";
 import Message from "../../models/Message";
@@ -18,10 +19,11 @@ type ConversationType = "sales" | "support" | "scheduling" | "general";
 type Policy = { maxReplyChars?: number; allowAutoClose?: boolean; autoHandoffOnSensitive?: boolean; forbiddenKeywords?: string[] };
 
 const defaultPolicies: Record<ConversationType, Policy> = {
-  sales: { maxReplyChars: 280, allowAutoClose: false, autoHandoffOnSensitive: false, forbiddenKeywords: ["descuento extremo", "garantía absoluta"] },
-  support: { maxReplyChars: 320, allowAutoClose: false, autoHandoffOnSensitive: true, forbiddenKeywords: ["culpa del cliente"] },
-  scheduling: { maxReplyChars: 220, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] },
-  general: { maxReplyChars: 260, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
+  // Increased limits so real estate responses with property details fit in full
+  sales: { maxReplyChars: 800, allowAutoClose: false, autoHandoffOnSensitive: false, forbiddenKeywords: ["descuento extremo", "garantía absoluta"] },
+  support: { maxReplyChars: 800, allowAutoClose: false, autoHandoffOnSensitive: true, forbiddenKeywords: ["culpa del cliente"] },
+  scheduling: { maxReplyChars: 500, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] },
+  general: { maxReplyChars: 800, allowAutoClose: true, autoHandoffOnSensitive: false, forbiddenKeywords: [] }
 };
 
 const DEFAULT_MAX_WEBHOOK_MESSAGE_AGE_SECONDS = 60 * 60 * 24; // 24h
@@ -308,7 +310,8 @@ const classifyConversation = (text: string): ConversationType => {
   const t = String(text || "").toLowerCase();
   if (/turno|agenda|cita|horario|fecha|mañana|lunes|martes/.test(t)) return "scheduling";
   if (/error|soporte|no funciona|problema|incidente|ca[ií]do/.test(t)) return "support";
-  if (/precio|plan|comprar|contratar|promo|descuento|cotiz/.test(t)) return "sales";
+  // Real estate intent also counts as sales
+  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote/.test(t)) return "sales";
   return "general";
 };
 const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
@@ -317,7 +320,6 @@ const applyGuardrails = async ({ text, reply, conversationType }: { text: string
   if (policy.autoHandoffOnSensitive && /legal|abogado|demanda|tarjeta|transferencia|cbu/.test(low)) return { handoff: true, reason: "Tema sensible detectado para soporte", action: "handoff_sensitive" };
   const forbidden = (policy.forbiddenKeywords || []).find((k) => k && reply.toLowerCase().includes(k.toLowerCase()));
   let safeReply = forbidden ? "Gracias por tu consulta. Te derivo con un asesor humano para darte una respuesta precisa." : reply;
-  if (conversationType === "scheduling" && !/\d{1,2}[:.]\d{2}|mañana|tarde|noche|lunes|martes|miércoles|jueves|viernes|sábado|domingo/.test(low)) safeReply = "Perfecto, lo coordinamos. Indicame por favor día y franja horaria (ej: martes 15:30).";
   const max = Number(policy.maxReplyChars || 260);
   if (safeReply.length > max) safeReply = `${safeReply.slice(0, Math.max(60, max - 1))}…`;
   return { finalReply: safeReply, reason: forbidden ? `Keyword bloqueada: ${forbidden}` : "Guardrails aplicados", action: forbidden ? "rewrite_forbidden" : "allow" };
@@ -1291,23 +1293,29 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     return;
   }
 
-  const metaFormHint = await getLatestMetaLeadFormHint(ticket.companyId, String((contact as any)?.number || ""));
-  const baseReplyCore = await aiReplyFor(text, ticket.companyId, metaFormHint);
-  const contactNeedsRaw = String((contact as any)?.needs || "");
-  const isMetaFormLead = (() => {
-    const n = contactNeedsRaw.toLowerCase();
-    const h = String(metaFormHint || "").toLowerCase();
-    return n.includes("meta") || n.includes("form") || n.includes("leadgen") || n.includes("lote") || n.startsWith("{") || h.includes("form") || h.includes("lead") || h.includes("meta");
-  })();
-  const shouldInjectLeadFormContext = isMetaFormLead && /asistente de charlott/i.test(String(ticket.lastMessage || "")) && !/hola|buenas|buen d[ií]a/.test(low);
-  const leadFormIntro = shouldInjectLeadFormContext ? buildLeadFormContextIntro(contactNeedsRaw) : "";
-  const leadFormFollowup = shouldInjectLeadFormContext
-    ? buildLeadFormFollowup(contactNeedsRaw)
-    : "";
-  const baseReply = [leadFormIntro, baseReplyCore, leadFormFollowup].filter((x) => String(x || "").trim()).join(" ").trim();
-
-  if (!String(baseReply || "").trim()) {
+  // Silence truly low-signal messages (pure emoji, "ok", "dale") before calling OpenAI
+  if (isLowSignalMessage(low)) {
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
+    return;
+  }
+
+  // Use the AI orchestrator: OpenAI with full multi-turn history, Tokko search, RAG
+  let baseReply = "";
+  try {
+    const orchResult = await generateConversationalReply({
+      companyId: ticket.companyId,
+      text,
+      contactId: contact.id,
+      ticketId: ticket.id
+    });
+    baseReply = String(orchResult.reply || "").trim();
+  } catch (orchErr: any) {
+    console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
+    baseReply = "";
+  }
+
+  if (!baseReply) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "silence", responsePreview: "" });
     return;
   }
   const guardrail = await applyGuardrails({ text, reply: baseReply, conversationType });

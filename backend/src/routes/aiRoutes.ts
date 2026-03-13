@@ -1904,7 +1904,9 @@ const resolveMetaWebhookSignatureSecret = (): string => {
   const runtimeSecret = String(runtime?.metaLeadAdsAppSecret || "").trim();
   if (runtimeSecret) return runtimeSecret;
 
-  return String(process.env.META_APP_SECRET || process.env.META_CLIENT_SECRET || "").trim();
+  // Check the same env vars that metaWebhookRoutes uses for signature
+  // verification to ensure both handlers agree on the secret.
+  return String(process.env.META_LEAD_ADS_APP_SECRET || process.env.META_APP_SECRET || process.env.META_CLIENT_SECRET || "").trim();
 };
 
 const resolveMetaWebhookSignatureRequired = (): boolean => {
