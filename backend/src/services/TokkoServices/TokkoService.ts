@@ -148,18 +148,20 @@ export const searchTokkoProperties = async (args: { q?: string; operationType?: 
 
   const parsed: any = await safeJson(res);
   const objects = Array.isArray(parsed?.objects) ? parsed.objects : [];
-  const mapped = objects.map((p: any) => ({
-    id: p?.id,
-    code: p?.code,
-    title: p?.publication_title || p?.title || p?.address || "Propiedad",
-    price: p?.price || p?.operations?.[0]?.prices?.[0]?.price || null,
-    currency: p?.operations?.[0]?.prices?.[0]?.currency || null,
-    location: p?.location?.full_location || p?.location?.name || p?.real_address || "",
-    type: p?.type?.name || p?.property_type?.name || "",
-    operation: p?.operations?.[0]?.operation_type?.type || "",
-    url: p?.url || p?.public_url || "",
-    imageUrl: p?.photos?.[0]?.image || p?.photos?.[0]?.url || p?.cover?.url || ""
-  }));
+  const mapped = objects
+    .filter((p: any) => p && (p?.id !== undefined && p?.id !== null))
+    .map((p: any) => ({
+      id: p?.id,
+      code: String(p?.code || ""),
+      title: String(p?.publication_title || p?.title || p?.address || "Propiedad"),
+      price: p?.price || p?.operations?.[0]?.prices?.[0]?.price || null,
+      currency: String(p?.operations?.[0]?.prices?.[0]?.currency || ""),
+      location: String(p?.location?.full_location || p?.location?.name || p?.real_address || ""),
+      type: String(p?.type?.name || p?.property_type?.name || ""),
+      operation: String(p?.operations?.[0]?.operation_type?.type || ""),
+      url: String(p?.url || p?.public_url || ""),
+      imageUrl: String(p?.photos?.[0]?.image || p?.photos?.[0]?.url || p?.cover?.url || "")
+    }));
 
   return {
     ok: res.ok,

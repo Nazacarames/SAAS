@@ -1,6 +1,8 @@
 import { Router } from "express";
 import axios from "axios";
 import crypto from "crypto";
+import { QueryTypes } from "sequelize";
+import sequelize from "../database";
 
 const metaWebhookRoutes = Router();
 
@@ -209,25 +211,53 @@ metaWebhookRoutes.post("/leadgen", async (req: any, res) => {
     return res.status(202).json({ ok: true, ignored: true, reason: "replay_blocked" });
   }
 
-  const target =
-    process.env.META_N8N_WEBHOOK_URL ||
-    "https://lmtmlatam.app.n8n.cloud/webhook/meta-leads";
+  // Determine company from payload or env default
+  const companyId = Number(payload.companyId || process.env.META_DEFAULT_COMPANY_ID || 1);
 
+  // --- Local processing: forward internally to the AI meta-leads handler ---
+  // This ensures leads are created, contacts are stored, and welcome template
+  // is sent even if n8n is unavailable.
+  let localResult: any = null;
   try {
-    // Forward raw payload to n8n (n8n should use a POST Webhook trigger)
-    const r = await axios.post(target, payload, {
+    const internalPayload = { ...payload, companyId };
+    const internalResp = await fetch(
+      `http://localhost:${process.env.PORT || 3001}/api/ai/meta-leads/webhook`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Forward the original signature so the internal handler can verify
+          ...(req.get("x-hub-signature-256") ? { "x-hub-signature-256": String(req.get("x-hub-signature-256")) } : {})
+        },
+        body: JSON.stringify(internalPayload)
+      }
+    );
+    localResult = await internalResp.json().catch(() => null);
+    bumpWebhookMetric("meta_webhook.local_process_ok");
+  } catch (localErr: any) {
+    bumpWebhookMetric("meta_webhook.local_process_failed");
+    console.error("[meta-leadgen] local processing failed:", localErr?.message);
+  }
+
+  // --- Also forward to n8n if configured (best-effort, non-blocking for response) ---
+  const target = process.env.META_N8N_WEBHOOK_URL || "";
+  if (target) {
+    axios.post(target, payload, {
       timeout: 15000,
       headers: { "content-type": "application/json" }
+    }).then(() => {
+      bumpWebhookMetric("meta_webhook.forward_ok");
+    }).catch((e: any) => {
+      bumpWebhookMetric("meta_webhook.forward_failed");
+      console.error("[meta-leadgen] n8n forward failed:", e?.message);
     });
-
-    bumpWebhookMetric("meta_webhook.forward_ok");
-    return res.status(200).json({ ok: true, forwarded: true, status: r.status });
-  } catch (e: any) {
-    bumpWebhookMetric("meta_webhook.forward_failed");
-    console.error("Meta forward failed:", e?.message);
-    const status = e?.response?.status || 500;
-    return res.status(200).json({ ok: false, forwarded: false, errorStatus: status });
   }
+
+  return res.status(200).json({
+    ok: true,
+    localProcessed: Boolean(localResult?.ok),
+    localResult: localResult || null
+  });
 });
 
 export default metaWebhookRoutes;
