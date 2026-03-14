@@ -311,7 +311,7 @@ const classifyConversation = (text: string): ConversationType => {
   if (/turno|agenda|cita|horario|fecha|mañana|lunes|martes/.test(t)) return "scheduling";
   if (/error|soporte|no funciona|problema|incidente|ca[ií]do/.test(t)) return "support";
   // Real estate intent also counts as sales
-  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote/.test(t)) return "sales";
+  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote|zonas?/.test(t)) return "sales";
   return "general";
 };
 const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
@@ -1281,7 +1281,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
 
   // Only auto-close on clearly conclusive short messages (≤40 chars) or standalone keywords.
   // Avoids false positives like "Perfecto, entonces espero a que vuelvan".
-  const isStandaloneConclusion = /^(gracias[.!]?|muchas gracias[.!]?|perfecto[.!]?|listo[.!]?|resuelto[.!]?|ok[.!]?|dale[.!]?|buenísimo[.!]?)$/i.test(low.trim());
+  // "dale", "ok", "listo", "perfecto" mean "go ahead" in Argentine Spanish, not "goodbye" — exclude them.
+  const isStandaloneConclusion = /^(gracias[.!]?|muchas gracias[.!]?|resuelto[.!]?|buenísimo[.!]?)$/i.test(low.trim());
   const isShortConclusion = low.trim().length <= 40 && /^(gracias|perfecto|listo|resuelto)[\s.,!]/.test(low.trim());
   if ((isStandaloneConclusion || isShortConclusion) && resolvePolicies()[conversationType]?.allowAutoClose) {
     const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
@@ -1308,10 +1309,27 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       contactId: contact.id,
       ticketId: ticket.id
     });
+    if (orchResult.usedFallback) {
+      // OpenAI failed — don't send a misleading "hold on" message, escalate to a human agent instead
+      console.error("[wa-cloud][agent] orchestrator used fallback (AI failure), escalating to human", { ticketId: ticket.id });
+      await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+      const errText = "Tuve un inconveniente técnico. Te paso con un asesor para que te atienda enseguida 🙏";
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "ai_failure_handoff", reason: "Fallo de IA: escalado a humano", guardrailAction: "handoff", responsePreview: errText });
+      const out = await sendManagedReply({ ticket, contact, text: errText });
+      if (!out) return;
+      await ticket.update({ lastMessage: errText, updatedAt: new Date() } as any);
+      return;
+    }
     baseReply = String(orchResult.reply || "").trim();
   } catch (orchErr: any) {
     console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
-    baseReply = "";
+    // Hard failure — escalate to human so the user isn't left hanging
+    await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+    const errText = "Tuve un inconveniente técnico. Te paso con un asesor para que te atienda enseguida 🙏";
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "ai_failure_handoff", reason: `Excepción: ${orchErr?.message || "unknown"}`, guardrailAction: "handoff", responsePreview: errText });
+    const out = await sendManagedReply({ ticket, contact, text: errText });
+    if (out) await ticket.update({ lastMessage: errText, updatedAt: new Date() } as any);
+    return;
   }
 
   if (!baseReply) {
