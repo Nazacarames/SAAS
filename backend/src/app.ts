@@ -72,6 +72,7 @@ import settingsRoutes from "./routes/settingsRoutes";
 import aiRoutes from "./routes/aiRoutes";
 import savedReplyRoutes from "./routes/savedReplyRoutes";
 import billingRoutes from "./routes/billingRoutes";
+import chatwootRoutes from "./routes/chatwootRoutes";
 import Webhook from "./models/Webhook";
 
 app.use("/api/auth", authRoutes);
@@ -88,6 +89,7 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/saved-replies", savedReplyRoutes);
 app.use("/api/billing", billingRoutes);
+app.use("/api/chatwoot", chatwootRoutes);
 
 
 // Error handler (must be last)
