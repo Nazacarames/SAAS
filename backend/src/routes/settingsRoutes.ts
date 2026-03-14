@@ -1,6 +1,8 @@
 import { Router } from "express";
+import { QueryTypes } from "sequelize";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
+import sequelize from "../database";
 import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
 const parseBoolWithDefault = (value: unknown, fallback: boolean): boolean => {
   if (value === undefined || value === null || String(value).trim() === "") return fallback;
@@ -81,6 +83,14 @@ import { getIntegrationHardeningAlertSnapshot, getIntegrationHardeningMetrics } 
 
 const settingsRoutes = Router();
 const maskKey = (key: string) => (!key ? "" : key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}${"*".repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`);
+
+const parseJsonSafe = (value: any): any => {
+  try {
+    return JSON.parse(String(value || "{}"));
+  } catch {
+    return {};
+  }
+};
 
 settingsRoutes.get("/public", (req, res) => {
     const s = getRuntimeSettings() as any;
@@ -312,6 +322,122 @@ settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_
       primaryOperationalSignal,
       operational: operationalRecommendations
     }
+  });
+});
+
+settingsRoutes.get("/agent/funnel-report", isAuth, isAdmin, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  if (!companyId) return res.status(400).json({ error: "invalid_company" });
+
+  const daysRaw = Number(req.query?.days || 7);
+  const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(90, Math.round(daysRaw))) : 7;
+
+  const stageCounts: any[] = await sequelize.query(
+    `SELECT to_stage, COUNT(*)::int AS qty
+     FROM ai_stage_events
+     WHERE company_id = :companyId
+       AND created_at >= NOW() - (:days::text || ' days')::interval
+     GROUP BY to_stage
+     ORDER BY qty DESC`,
+    { replacements: { companyId, days }, type: QueryTypes.SELECT }
+  ).catch(() => [] as any[]);
+
+  const transitions: any[] = await sequelize.query(
+    `SELECT COALESCE(from_stage, 'unknown') AS from_stage, to_stage, COUNT(*)::int AS qty
+     FROM ai_stage_events
+     WHERE company_id = :companyId
+       AND created_at >= NOW() - (:days::text || ' days')::interval
+     GROUP BY COALESCE(from_stage, 'unknown'), to_stage
+     ORDER BY qty DESC`,
+    { replacements: { companyId, days }, type: QueryTypes.SELECT }
+  ).catch(() => [] as any[]);
+
+  const stageDurations: any[] = await sequelize.query(
+    `WITH ordered AS (
+       SELECT ticket_id, to_stage, created_at,
+              LEAD(created_at) OVER (PARTITION BY ticket_id ORDER BY created_at) AS next_created_at
+       FROM ai_stage_events
+       WHERE company_id = :companyId
+         AND created_at >= NOW() - (:days::text || ' days')::interval
+     )
+     SELECT to_stage,
+            AVG(EXTRACT(EPOCH FROM (next_created_at - created_at)) / 3600.0)::numeric(10,2) AS avg_hours
+     FROM ordered
+     WHERE next_created_at IS NOT NULL
+     GROUP BY to_stage
+     ORDER BY avg_hours DESC`,
+    { replacements: { companyId, days }, type: QueryTypes.SELECT }
+  ).catch(() => [] as any[]);
+
+  const stageReachedRows: any[] = await sequelize.query(
+    `SELECT ticket_id, to_stage
+     FROM ai_stage_events
+     WHERE company_id = :companyId
+       AND created_at >= NOW() - (:days::text || ' days')::interval`,
+    { replacements: { companyId, days }, type: QueryTypes.SELECT }
+  ).catch(() => [] as any[]);
+
+  const reachedByTicket = new Map<number, Set<string>>();
+  for (const r of stageReachedRows) {
+    const tid = Number(r.ticket_id || 0);
+    if (!tid) continue;
+    if (!reachedByTicket.has(tid)) reachedByTicket.set(tid, new Set());
+    reachedByTicket.get(tid)!.add(String(r.to_stage || ""));
+  }
+
+  const totalTickets = reachedByTicket.size;
+  let discovery = 0;
+  let qualification = 0;
+  let visit = 0;
+  let closing = 0;
+  for (const stages of reachedByTicket.values()) {
+    if (stages.has("discovery")) discovery += 1;
+    if (stages.has("qualification")) qualification += 1;
+    if (stages.has("visit")) visit += 1;
+    if (stages.has("closing")) closing += 1;
+  }
+
+  const pct = (num: number, den: number) => (den > 0 ? Number(((num / den) * 100).toFixed(2)) : 0);
+
+  const stateRows: any[] = await sequelize.query(
+    `SELECT state_json
+     FROM ai_ticket_state
+     WHERE company_id = :companyId`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  ).catch(() => [] as any[]);
+
+  const objectionCounts: Record<string, number> = {};
+  for (const row of stateRows) {
+    const parsed = parseJsonSafe(row?.state_json);
+    const objections = Array.isArray(parsed?.objections) ? parsed.objections : [];
+    for (const obj of objections) {
+      const key = String(obj || "").trim().toLowerCase();
+      if (!key) continue;
+      objectionCounts[key] = (objectionCounts[key] || 0) + 1;
+    }
+  }
+
+  const topObjections = Object.entries(objectionCounts)
+    .map(([objection, qty]) => ({ objection, qty }))
+    .sort((a, b) => b.qty - a.qty)
+    .slice(0, 10);
+
+  return res.json({
+    window: { days },
+    stageCounts,
+    transitions,
+    stageDurations,
+    funnel: {
+      ticketsObserved: totalTickets,
+      reached: { discovery, qualification, visit, closing },
+      conversion: {
+        discoveryToQualificationPct: pct(qualification, Math.max(discovery, 1)),
+        qualificationToVisitPct: pct(visit, Math.max(qualification, 1)),
+        visitToClosingPct: pct(closing, Math.max(visit, 1)),
+        discoveryToClosingPct: pct(closing, Math.max(discovery, 1))
+      }
+    },
+    topObjections
   });
 });
 
