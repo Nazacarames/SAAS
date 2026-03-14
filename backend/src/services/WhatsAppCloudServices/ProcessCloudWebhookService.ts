@@ -1169,6 +1169,9 @@ const extractObjection = (text: string): string | null => {
 
 const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map((x) => String(x).trim().toLowerCase()))).slice(0, 8);
 
+const inboundFingerprint = (text: string) =>
+  crypto.createHash("sha1").update(String(text || "").trim().toLowerCase()).digest("hex");
+
 const getMissingCriteriaLabels = (state: Record<string, any>): string[] => {
   const missing: string[] = [];
   if (!state?.location) missing.push("zona");
@@ -1523,6 +1526,14 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   // Use the AI orchestrator: OpenAI with full multi-turn history, Tokko search, RAG
   let baseReply = "";
   const stateBefore = await loadAgentState(ticket.id);
+  const fp = inboundFingerprint(text);
+  const lastFp = String(stateBefore?.lastInboundFingerprint || "");
+  const lastAutoReplyAt = Date.parse(String(stateBefore?.lastAutoReplyAt || ""));
+  if (lastFp && lastFp === fp && Number.isFinite(lastAutoReplyAt) && (Date.now() - lastAutoReplyAt) < 45_000) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_deduped", reason: "same inbound fingerprint recently replied", guardrailAction: "skip", responsePreview: "" });
+    return;
+  }
+
   const statePatchFromInbound = extractAgentCriteriaPatch(text);
   const previousStage = String(stateBefore?.salesStage || "").trim() || undefined;
   const inferredStage = detectSalesStage(text, previousStage);
@@ -1585,7 +1596,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
             objections,
             lastOutcome: "tokko_direct_replied",
             lastTokkoResults: results.length,
-            nextBestAction: "schedule_visit"
+            nextBestAction: "schedule_visit",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
           });
           return;
         }
@@ -1606,7 +1619,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       objections,
       lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_no_results",
       lastAgentQuestion: ask,
-      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "relax_filters"
+      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "relax_filters",
+      lastInboundFingerprint: fp,
+      lastAutoReplyAt: new Date().toISOString()
     });
     return;
   }
@@ -1633,7 +1648,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     objections,
     lastOutcome: "replied",
     lastAgentReply: reply.slice(0, 600),
-    nextBestAction: inferredStage === "visit" ? "schedule_visit" : inferredStage === "closing" ? "close_or_reserve" : "continue_qualification"
+    nextBestAction: inferredStage === "visit" ? "schedule_visit" : inferredStage === "closing" ? "close_or_reserve" : "continue_qualification",
+    lastInboundFingerprint: fp,
+    lastAutoReplyAt: new Date().toISOString()
   });
   await autoSummaryAndScore(ticket.id, contact);
 };
