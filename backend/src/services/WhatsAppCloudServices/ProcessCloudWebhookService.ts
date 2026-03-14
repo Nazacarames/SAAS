@@ -1204,8 +1204,20 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
   return `Contexto acumulado del cliente: ${parts.join(" | ")}.`;
 };
 
+const stripAgentFiller = (reply: string): string => {
+  const raw = String(reply || "").trim();
+  if (!raw) return "";
+  const cleaned = raw
+    .replace(/^(entendido|perfecto|genial|dale)[,\s]+ya te ayudo\.?\s*/i, "")
+    .replace(/^dame un segundo\.?\s*/i, "")
+    .replace(/^un momento\.?\s*/i, "")
+    .replace(/^ya te paso\.?\s*/i, "")
+    .trim();
+  return cleaned || raw;
+};
+
 const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
-  const base = String(reply || "").trim();
+  const base = stripAgentFiller(String(reply || "").trim());
   if (!base) return base;
   if (/\?$/.test(base) && base.length < 650) return base;
 
