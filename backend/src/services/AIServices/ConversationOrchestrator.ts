@@ -223,6 +223,8 @@ const runAgentLoop = async (args: {
   messages: OpenAIMessage[];
   companyId: number;
   maxIterations?: number;
+  forceFirstTool?: "search_properties" | "search_knowledge_base";
+  requirePropertyToolCall?: boolean;
 }): Promise<{ reply: string; toolCallCount: number; tokkoResults: any[]; knowledgeRows: any[] }> => {
   const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
   if (!apiKey) throw new Error("missing_openai_api_key");
@@ -234,6 +236,10 @@ const runAgentLoop = async (args: {
   const allKnowledgeRows: any[] = [];
 
   for (let iter = 0; iter < maxIter; iter++) {
+    const toolChoice = iter === 0 && args.forceFirstTool
+      ? { type: "function", function: { name: args.forceFirstTool } }
+      : "auto";
+
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -246,7 +252,7 @@ const runAgentLoop = async (args: {
         max_tokens: args.maxTokens,
         messages,
         tools: AGENT_TOOLS,
-        tool_choice: "auto"
+        tool_choice: toolChoice
       })
     });
 
@@ -298,6 +304,10 @@ const runAgentLoop = async (args: {
     // Model is done — return the final response
     const content = String(assistantMsg.content || "").trim();
     if (!content) throw new Error("empty_openai_response");
+
+    if (args.requirePropertyToolCall && totalToolCalls === 0) {
+      throw new Error("property_tool_required_but_not_called");
+    }
 
     return {
       reply: content,
@@ -387,6 +397,13 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
   let tokkoResults: any[] = [];
   let knowledgeRows: any[] = [];
 
+  const lowerInput = String(input || "").toLowerCase();
+  const hasLocation = /(rosario|fisherton|funes|centro|pichincha|echesortu|abasto|palermo|belgrano|caballito|tigre|san isidro|zona\s+norte|zona\s+sur|zona\s+oeste)/i.test(lowerInput);
+  const hasBudget = /(\d{2,3}(?:[\.,]\d{3})+|\d{5,8})\s*(usd|u\$s|d[oó]lares?)/i.test(lowerInput);
+  const hasRooms = /\b(1|2|3|4|5|6)\s*(amb|ambientes?|dorm|dormitorios?)\b|monoamb/i.test(lowerInput);
+  const asksOptions = /mostrame|mostrame opciones|opciones|buscar|busc[aá]|propiedades|casas|departamentos|depto|publicaciones/i.test(lowerInput);
+  const shouldForcePropertySearch = asksOptions || ((hasLocation ? 1 : 0) + (hasBudget ? 1 : 0) + (hasRooms ? 1 : 0) >= 2);
+
   try {
     const result = await runAgentLoop({
       model,
@@ -394,7 +411,9 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
       maxTokens,
       messages: openAIMessages,
       companyId: args.companyId,
-      maxIterations: 5
+      maxIterations: 5,
+      forceFirstTool: shouldForcePropertySearch ? "search_properties" : undefined,
+      requirePropertyToolCall: shouldForcePropertySearch
     });
     reply = result.reply;
     toolCallCount = result.toolCallCount;
