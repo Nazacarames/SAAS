@@ -310,8 +310,6 @@ const runAgentLoop = async (args: {
   throw new Error("agent_max_iterations_exceeded");
 };
 
-const fallbackReply = (name: string) =>
-  `Entendido, ya te ayudo. Dame un segundo.`;
 
 export const generateConversationalReply = async (args: OrchestratorArgs): Promise<OrchestratorResult> => {
   const input = sanitizeForPrompt(String(args.text || ""), 2000);
@@ -404,7 +402,8 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
     knowledgeRows = result.knowledgeRows;
   } catch {
     usedFallback = true;
-    reply = fallbackReply(assistantName);
+    // Never send stalling filler. Caller handles fallback with deterministic behavior.
+    reply = "";
   }
 
   await sequelize.query(
