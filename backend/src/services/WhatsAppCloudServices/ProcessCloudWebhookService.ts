@@ -1275,18 +1275,28 @@ const buildTokkoQueryFromState = (state: Record<string, any>, fallbackText: stri
   return String(parts.join(" ")).slice(0, 300);
 };
 
-const formatTokkoOptionsReply = (results: any[]) => {
-  if (!Array.isArray(results) || results.length === 0) return "";
+const formatTokkoOptionsMessages = (results: any[]): string[] => {
+  if (!Array.isArray(results) || results.length === 0) return [];
   const top = results.slice(0, 3);
-  const lines = top.map((r: any, i: number) => {
+  const perProperty = top.map((r: any) => {
     const title = String(r?.title || "Propiedad");
     const location = r?.location ? `📍 ${r.location}` : "";
     const price = r?.price ? `💰 USD ${r.price}` : "";
     const rooms = r?.rooms ? `🏠 ${r.rooms} amb.` : "";
     const link = r?.url ? `🔗 ${r.url}` : "";
-    return `${i + 1}) ${[title, location, price, rooms, link].filter(Boolean).join(" | ")}`;
+    return [title, location, price, rooms, link].filter(Boolean).join(" | ");
   });
-  return `Te paso opciones concretas:\n${lines.join("\n")}\n\nSi querés, te filtro más fino y coordinamos visita.`;
+  return [
+    "Te paso opciones concretas:",
+    ...perProperty,
+    "Si querés, te filtro más fino y coordinamos visita."
+  ];
+};
+
+const formatTokkoOptionsReply = (results: any[]) => {
+  const msgs = formatTokkoOptionsMessages(results);
+  if (!msgs.length) return "";
+  return msgs.join("\n");
 };
 
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
@@ -1532,6 +1542,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   // Guard: once replyPlan is set, no subsequent branch may overwrite it.
   type ReplyPlan = {
     text: string;
+    messages?: string[];
     preActions?: () => Promise<void>;
     postActions: () => Promise<void>;
     decisionKey: string;
@@ -1650,15 +1661,18 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
           const tokko = await searchTokkoProperties({ q, limit: 4 });
           const results = Array.isArray((tokko as any)?.results) ? (tokko as any).results : [];
           const formatted = formatTokkoOptionsReply(results);
+          const perMessages = formatTokkoOptionsMessages(results);
           if (formatted) {
             tokkoDirectHandled = true;
             replyPlan = {
               text: formatted,
+              messages: perMessages,
               decisionKey: "orchestrator_empty_tokko_direct",
               decisionReason: "Orquestador vacío; búsqueda directa Tokko",
               guardrailAction: "direct_tokko",
               postActions: async () => {
-                await ticket.update({ lastMessage: formatted, updatedAt: new Date() } as any);
+                const lastMsg = perMessages.length ? perMessages[perMessages.length - 1] : formatted;
+                await ticket.update({ lastMessage: lastMsg, updatedAt: new Date() } as any);
                 await saveAgentState(ticket.id, ticket.companyId, {
                   ...statePatchFromInbound,
                   salesStage: inferredStage,
@@ -1757,9 +1771,16 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await replyPlan.preActions();
   }
 
-  const out = await sendManagedReply({ ticket, contact, text: replyPlan.text });
-  if (!out) return;
-  touchTicketAutoReplyLock(ticket.id);
+  const outboundTexts = Array.isArray(replyPlan.messages) && replyPlan.messages.length
+    ? replyPlan.messages
+    : [replyPlan.text];
+
+  for (const txt of outboundTexts) {
+    const out = await sendManagedReply({ ticket, contact, text: txt });
+    if (!out) return;
+    touchTicketAutoReplyLock(ticket.id);
+  }
+
   await replyPlan.postActions();
   } finally {
     agentTurnInFlight.delete(ticket.id);
