@@ -12,6 +12,7 @@ import sequelize from "../../database";
 import { getIO } from "../../libs/socket";
 import { recordInboundDuplicate, recordInboundError, recordInboundMessage } from "../../utils/messageStats";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
+import { searchTokkoProperties } from "../TokkoServices/TokkoService";
 import { normalizeWaPhone } from "../../utils/phoneNormalization";
 
 type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }> } }> }> };
@@ -1249,6 +1250,31 @@ const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
   return `${base}\n\nSi querés, te paso una selección más precisa y avanzamos con el próximo paso.`;
 };
 
+const buildTokkoQueryFromState = (state: Record<string, any>, fallbackText: string) => {
+  const parts = [
+    state?.propertyType,
+    state?.location,
+    state?.rooms ? `${state.rooms} ambientes` : "",
+    state?.maxPriceUsd ? `hasta USD ${state.maxPriceUsd}` : "",
+    fallbackText
+  ].filter(Boolean);
+  return String(parts.join(" ")).slice(0, 300);
+};
+
+const formatTokkoOptionsReply = (results: any[]) => {
+  if (!Array.isArray(results) || results.length === 0) return "";
+  const top = results.slice(0, 3);
+  const lines = top.map((r: any, i: number) => {
+    const title = String(r?.title || "Propiedad");
+    const location = r?.location ? `📍 ${r.location}` : "";
+    const price = r?.price ? `💰 USD ${r.price}` : "";
+    const rooms = r?.rooms ? `🏠 ${r.rooms} amb.` : "";
+    const link = r?.url ? `🔗 ${r.url}` : "";
+    return `${i + 1}) ${[title, location, price, rooms, link].filter(Boolean).join(" | ")}`;
+  });
+  return `Te paso opciones concretas:\n${lines.join("\n")}\n\nSi querés, te filtro más fino y coordinamos visita.`;
+};
+
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
   const ts = Number(timestamp || 0);
   if (!ts) return { ok: false, reason: "missing", ageSec: null };
@@ -1541,9 +1567,34 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
 
   if (!baseReply) {
     const missing = getMissingCriteriaLabels(mergedStateForPrompt);
+
+    if (missing.length === 0) {
+      try {
+        const q = buildTokkoQueryFromState(mergedStateForPrompt, text);
+        const tokko = await searchTokkoProperties({ q, limit: 4 });
+        const results = Array.isArray((tokko as any)?.results) ? (tokko as any).results : [];
+        const formatted = formatTokkoOptionsReply(results);
+        if (formatted) {
+          await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "orchestrator_empty_tokko_direct", reason: "Orquestador vacío; búsqueda directa Tokko", guardrailAction: "direct_tokko", responsePreview: formatted });
+          const out = await sendManagedReply({ ticket, contact, text: formatted });
+          if (!out) return;
+          await ticket.update({ lastMessage: formatted, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "tokko_direct_replied",
+            lastTokkoResults: results.length,
+            nextBestAction: "schedule_visit"
+          });
+          return;
+        }
+      } catch {}
+    }
+
     const ask = missing.length > 0
       ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
-      : "Perfecto, ya tengo tus criterios. Enseguida te paso opciones concretas y, si querés, coordinamos visita.";
+      : "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
 
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
     const out = await sendManagedReply({ ticket, contact, text: ask });
@@ -1553,9 +1604,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       ...statePatchFromInbound,
       salesStage: inferredStage,
       objections,
-      lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_ready_waiting_results",
+      lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_no_results",
       lastAgentQuestion: ask,
-      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "present_options"
+      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "relax_filters"
     });
     return;
   }
