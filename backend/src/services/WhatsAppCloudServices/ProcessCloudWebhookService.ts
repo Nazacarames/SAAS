@@ -1526,173 +1526,241 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   const conversationType = classifyConversation(text);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
 
+  // ── Exactly-once reply plan ──────────────────────────────────────────
+  // Every branch that wants to reply sets replyPlan ONCE.  A single
+  // sendManagedReply call at the bottom of the function dispatches it.
+  // Guard: once replyPlan is set, no subsequent branch may overwrite it.
+  type ReplyPlan = {
+    text: string;
+    preActions?: () => Promise<void>;
+    postActions: () => Promise<void>;
+    decisionKey: string;
+    decisionReason: string;
+    guardrailAction: string;
+  };
+  let replyPlan: ReplyPlan | null = null;
+
+  // ── Branch: manual handoff ───────────────────────────────────────────
   if (/\b(humano|asesor humano|agente humano|hablar con (una )?persona|pasar con (una )?persona|quiero.{0,20}persona real)\b/.test(low)) {
-    await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
     const transferText = "Perfecto. Te paso con un asesor humano para continuar 🙌";
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "manual_handoff", reason: "Cliente pidió humano", guardrailAction: "handoff", responsePreview: transferText });
-    const out = await sendManagedReply({ ticket, contact, text: transferText });
-    if (!out) return;
-    touchTicketAutoReplyLock(ticket.id);
-    await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
-    return;
+    replyPlan = {
+      text: transferText,
+      decisionKey: "manual_handoff",
+      decisionReason: "Cliente pidió humano",
+      guardrailAction: "handoff",
+      preActions: async () => {
+        await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+      },
+      postActions: async () => {
+        await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
+      }
+    };
   }
 
-  // Silence truly low-signal messages (pure emoji, "ok", "dale") BEFORE auto-close check —
-  // "ok" and "dale" are conversational filler, not conversation-ending signals.
-  if (isLowSignalMessage(low)) {
+  // ── Branch: low-signal silence (no reply) ────────────────────────────
+  if (!replyPlan && isLowSignalMessage(low)) {
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
     return;
   }
 
-  // Only auto-close on clearly conclusive short messages (≤40 chars) or standalone keywords.
-  // Avoids false positives like "Perfecto, entonces espero a que vuelvan".
-  const isStandaloneConclusion = /^(gracias[.!]?|muchas gracias[.!]?|perfecto[.!]?|listo[.!]?|resuelto[.!]?|ok[.!]?|dale[.!]?|buenísimo[.!]?)$/i.test(low.trim());
-  const isShortConclusion = low.trim().length <= 40 && /^(gracias|perfecto|listo|resuelto)[\s.,!]/.test(low.trim());
-  if ((isStandaloneConclusion || isShortConclusion) && resolvePolicies()[conversationType]?.allowAutoClose) {
-    const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "auto_close", reason: "Cierre positivo detectado", guardrailAction: "close", responsePreview: closeText });
-    const out = await sendManagedReply({ ticket, contact, text: closeText });
-    if (!out) return;
-    touchTicketAutoReplyLock(ticket.id);
-    await ticket.update({ status: "closed", unreadMessages: 0, lastMessage: closeText, updatedAt: new Date() } as any);
-    await ensureArchivedTag(contact.id); await (contact as any).update({ leadStatus: "read", lastInteractionAt: new Date() } as any);
-    return;
-  }
-
-  // Use the AI orchestrator: OpenAI with full multi-turn history, Tokko search, RAG
-  let baseReply = "";
-  const stateBefore = await loadAgentState(ticket.id);
-  const fp = inboundFingerprint(text);
-  const lastFp = String(stateBefore?.lastInboundFingerprint || "");
-  const lastAutoReplyAt = Date.parse(String(stateBefore?.lastAutoReplyAt || ""));
-  if (lastFp && lastFp === fp && Number.isFinite(lastAutoReplyAt) && (Date.now() - lastAutoReplyAt) < 45_000) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_deduped", reason: "same inbound fingerprint recently replied", guardrailAction: "skip", responsePreview: "" });
-    return;
-  }
-
-  const statePatchFromInbound = extractAgentCriteriaPatch(text);
-  const previousStage = String(stateBefore?.salesStage || "").trim() || undefined;
-  const inferredStage = detectSalesStage(text, previousStage);
-  const newObjection = extractObjection(text);
-  const objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
-  const mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
-  if (!previousStage || previousStage !== inferredStage) {
-    await recordStageEvent({
-      ticketId: ticket.id,
-      companyId: ticket.companyId,
-      fromStage: previousStage,
-      toStage: inferredStage,
-      reason: "inbound_intent"
-    });
-  }
-  const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
-  const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
-
-  try {
-    const orchResult = await generateConversationalReply({
-      companyId: ticket.companyId,
-      text: orchestratorInput,
-      contactId: contact.id,
-      ticketId: ticket.id
-    });
-    baseReply = String(orchResult.reply || "").trim();
-    await saveAgentState(ticket.id, ticket.companyId, {
-      ...statePatchFromInbound,
-      salesStage: inferredStage,
-      objections,
-      lastUserMessage: text.slice(0, 600),
-      lastAgentModel: orchResult.model,
-      lastToolCallCount: orchResult.toolCallCount,
-      lastTokkoResults: Number(orchResult?.tokko?.results || 0),
-      lastKnowledgeHits: Number(orchResult?.knowledge?.length || 0),
-      lastOutcome: orchResult.usedFallback ? "fallback" : "ok"
-    });
-  } catch (orchErr: any) {
-    console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
-    baseReply = "";
-  }
-
-  if (!baseReply) {
-    const missing = getMissingCriteriaLabels(mergedStateForPrompt);
-
-    if (missing.length === 0) {
-      try {
-        const q = buildTokkoQueryFromState(mergedStateForPrompt, text);
-        const tokko = await searchTokkoProperties({ q, limit: 4 });
-        const results = Array.isArray((tokko as any)?.results) ? (tokko as any).results : [];
-        const formatted = formatTokkoOptionsReply(results);
-        if (formatted) {
-          await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "orchestrator_empty_tokko_direct", reason: "Orquestador vacío; búsqueda directa Tokko", guardrailAction: "direct_tokko", responsePreview: formatted });
-          const out = await sendManagedReply({ ticket, contact, text: formatted });
-          if (!out) return;
-          touchTicketAutoReplyLock(ticket.id);
-          await ticket.update({ lastMessage: formatted, updatedAt: new Date() } as any);
-          await saveAgentState(ticket.id, ticket.companyId, {
-            ...statePatchFromInbound,
-            salesStage: inferredStage,
-            objections,
-            lastOutcome: "tokko_direct_replied",
-            lastTokkoResults: results.length,
-            nextBestAction: "schedule_visit",
-            lastInboundFingerprint: fp,
-            lastAutoReplyAt: new Date().toISOString()
-          });
-          return;
+  // ── Branch: auto-close ───────────────────────────────────────────────
+  if (!replyPlan) {
+    const isStandaloneConclusion = /^(gracias[.!]?|muchas gracias[.!]?|perfecto[.!]?|listo[.!]?|resuelto[.!]?|ok[.!]?|dale[.!]?|buenísimo[.!]?)$/i.test(low.trim());
+    const isShortConclusion = low.trim().length <= 40 && /^(gracias|perfecto|listo|resuelto)[\s.,!]/.test(low.trim());
+    if ((isStandaloneConclusion || isShortConclusion) && resolvePolicies()[conversationType]?.allowAutoClose) {
+      const closeText = "¡Excelente! Cierro esta conversación por ahora ✅ Si necesitás algo más, escribime y la retomamos enseguida.";
+      replyPlan = {
+        text: closeText,
+        decisionKey: "auto_close",
+        decisionReason: "Cierre positivo detectado",
+        guardrailAction: "close",
+        postActions: async () => {
+          await ticket.update({ status: "closed", unreadMessages: 0, lastMessage: closeText, updatedAt: new Date() } as any);
+          await ensureArchivedTag(contact.id);
+          await (contact as any).update({ leadStatus: "read", lastInteractionAt: new Date() } as any);
         }
-      } catch {}
+      };
+    }
+  }
+
+  // ── Orchestrator + Tokko branches (only if no plan yet) ──────────────
+  if (!replyPlan) {
+    let baseReply = "";
+    const stateBefore = await loadAgentState(ticket.id);
+    const fp = inboundFingerprint(text);
+    const lastFp = String(stateBefore?.lastInboundFingerprint || "");
+    const lastAutoReplyAt = Date.parse(String(stateBefore?.lastAutoReplyAt || ""));
+    if (lastFp && lastFp === fp && Number.isFinite(lastAutoReplyAt) && (Date.now() - lastAutoReplyAt) < 45_000) {
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_deduped", reason: "same inbound fingerprint recently replied", guardrailAction: "skip", responsePreview: "" });
+      return;
     }
 
-    const ask = missing.length > 0
-      ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
-      : "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+    const statePatchFromInbound = extractAgentCriteriaPatch(text);
+    const previousStage = String(stateBefore?.salesStage || "").trim() || undefined;
+    const inferredStage = detectSalesStage(text, previousStage);
+    const newObjection = extractObjection(text);
+    const objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
+    const mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
+    if (!previousStage || previousStage !== inferredStage) {
+      await recordStageEvent({
+        ticketId: ticket.id,
+        companyId: ticket.companyId,
+        fromStage: previousStage,
+        toStage: inferredStage,
+        reason: "inbound_intent"
+      });
+    }
+    const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
+    const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
 
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
-    const out = await sendManagedReply({ ticket, contact, text: ask });
-    if (!out) return;
-    touchTicketAutoReplyLock(ticket.id);
-    await ticket.update({ lastMessage: ask, updatedAt: new Date() } as any);
-    await saveAgentState(ticket.id, ticket.companyId, {
-      ...statePatchFromInbound,
-      salesStage: inferredStage,
-      objections,
-      lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_no_results",
-      lastAgentQuestion: ask,
-      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "relax_filters",
-      lastInboundFingerprint: fp,
-      lastAutoReplyAt: new Date().toISOString()
-    });
-    return;
-  }
-  const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt);
-  const guardrail = await applyGuardrails({ text, reply: playbookReply, conversationType });
-  if (guardrail.handoff) {
-    await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
-    const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "guardrail_handoff", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: txt });
-    const out = await sendManagedReply({ ticket, contact, text: txt });
-    if (!out) return;
-    touchTicketAutoReplyLock(ticket.id);
-    await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
-    return;
+    try {
+      const orchResult = await generateConversationalReply({
+        companyId: ticket.companyId,
+        text: orchestratorInput,
+        contactId: contact.id,
+        ticketId: ticket.id
+      });
+      baseReply = String(orchResult.reply || "").trim();
+      await saveAgentState(ticket.id, ticket.companyId, {
+        ...statePatchFromInbound,
+        salesStage: inferredStage,
+        objections,
+        lastUserMessage: text.slice(0, 600),
+        lastAgentModel: orchResult.model,
+        lastToolCallCount: orchResult.toolCallCount,
+        lastTokkoResults: Number(orchResult?.tokko?.results || 0),
+        lastKnowledgeHits: Number(orchResult?.knowledge?.length || 0),
+        lastOutcome: orchResult.usedFallback ? "fallback" : "ok"
+      });
+    } catch (orchErr: any) {
+      console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
+      baseReply = "";
+    }
+
+    if (!baseReply) {
+      // Orchestrator returned empty — try direct Tokko or ask for missing criteria
+      const missing = getMissingCriteriaLabels(mergedStateForPrompt);
+
+      // Flag: once Tokko direct succeeds, block fallback completely
+      let tokkoDirectHandled = false;
+
+      if (missing.length === 0) {
+        try {
+          const q = buildTokkoQueryFromState(mergedStateForPrompt, text);
+          const tokko = await searchTokkoProperties({ q, limit: 4 });
+          const results = Array.isArray((tokko as any)?.results) ? (tokko as any).results : [];
+          const formatted = formatTokkoOptionsReply(results);
+          if (formatted) {
+            tokkoDirectHandled = true;
+            replyPlan = {
+              text: formatted,
+              decisionKey: "orchestrator_empty_tokko_direct",
+              decisionReason: "Orquestador vacío; búsqueda directa Tokko",
+              guardrailAction: "direct_tokko",
+              postActions: async () => {
+                await ticket.update({ lastMessage: formatted, updatedAt: new Date() } as any);
+                await saveAgentState(ticket.id, ticket.companyId, {
+                  ...statePatchFromInbound,
+                  salesStage: inferredStage,
+                  objections,
+                  lastOutcome: "tokko_direct_replied",
+                  lastTokkoResults: results.length,
+                  nextBestAction: "schedule_visit",
+                  lastInboundFingerprint: fp,
+                  lastAutoReplyAt: new Date().toISOString()
+                });
+              }
+            };
+          }
+        } catch {}
+      }
+
+      // Fallback: only if Tokko direct did NOT handle it (guard clause)
+      if (!replyPlan && !tokkoDirectHandled) {
+        const ask = missing.length > 0
+          ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
+          : "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+
+        replyPlan = {
+          text: ask,
+          decisionKey: "no_reply_orchestrator_empty",
+          decisionReason: "Orquestador sin respuesta",
+          guardrailAction: "clarify",
+          postActions: async () => {
+            await ticket.update({ lastMessage: ask, updatedAt: new Date() } as any);
+            await saveAgentState(ticket.id, ticket.companyId, {
+              ...statePatchFromInbound,
+              salesStage: inferredStage,
+              objections,
+              lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_no_results",
+              lastAgentQuestion: ask,
+              nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "relax_filters",
+              lastInboundFingerprint: fp,
+              lastAutoReplyAt: new Date().toISOString()
+            });
+          }
+        };
+      }
+    } else {
+      // Orchestrator returned a reply — apply playbook + guardrails
+      const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt);
+      const guardrail = await applyGuardrails({ text, reply: playbookReply, conversationType });
+
+      if (guardrail.handoff) {
+        const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";
+        replyPlan = {
+          text: txt,
+          decisionKey: "guardrail_handoff",
+          decisionReason: guardrail.reason,
+          guardrailAction: guardrail.action,
+          preActions: async () => {
+            await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+          },
+          postActions: async () => {
+            await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
+          }
+        };
+      } else {
+        const reply = guardrail.finalReply || baseReply;
+        replyPlan = {
+          text: reply,
+          decisionKey: "reply",
+          decisionReason: guardrail.reason,
+          guardrailAction: guardrail.action,
+          postActions: async () => {
+            await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
+            await saveAgentState(ticket.id, ticket.companyId, {
+              ...statePatchFromInbound,
+              salesStage: inferredStage,
+              objections,
+              lastOutcome: "replied",
+              lastAgentReply: reply.slice(0, 600),
+              nextBestAction: inferredStage === "visit" ? "schedule_visit" : inferredStage === "closing" ? "close_or_reserve" : "continue_qualification",
+              lastInboundFingerprint: fp,
+              lastAutoReplyAt: new Date().toISOString()
+            });
+            await autoSummaryAndScore(ticket.id, contact);
+          }
+        };
+      }
+    }
   }
 
-  const reply = guardrail.finalReply || baseReply;
-  await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "reply", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: reply.slice(0, 240) });
-  const out = await sendManagedReply({ ticket, contact, text: reply });
+  // ── Single send gate ─────────────────────────────────────────────────
+  // Exactly ONE sendManagedReply call per inbound, regardless of which
+  // branch won.  If replyPlan is null here, no branch decided to reply.
+  if (!replyPlan) return;
+
+  await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: replyPlan.decisionKey, reason: replyPlan.decisionReason, guardrailAction: replyPlan.guardrailAction, responsePreview: replyPlan.text.slice(0, 240) });
+
+  if (replyPlan.preActions) {
+    await replyPlan.preActions();
+  }
+
+  const out = await sendManagedReply({ ticket, contact, text: replyPlan.text });
   if (!out) return;
   touchTicketAutoReplyLock(ticket.id);
-  await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
-  await saveAgentState(ticket.id, ticket.companyId, {
-    ...statePatchFromInbound,
-    salesStage: inferredStage,
-    objections,
-    lastOutcome: "replied",
-    lastAgentReply: reply.slice(0, 600),
-    nextBestAction: inferredStage === "visit" ? "schedule_visit" : inferredStage === "closing" ? "close_or_reserve" : "continue_qualification",
-    lastInboundFingerprint: fp,
-    lastAutoReplyAt: new Date().toISOString()
-  });
-  await autoSummaryAndScore(ticket.id, contact);
+  await replyPlan.postActions();
   } finally {
     agentTurnInFlight.delete(ticket.id);
   }
