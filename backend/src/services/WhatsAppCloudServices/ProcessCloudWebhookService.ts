@@ -38,6 +38,7 @@ let decisionTableReady = false;
 let agentStateTableReady = false;
 let stageEventsTableReady = false;
 let outboundDedupeTableReady = false;
+const autoReplyTicketLock = new Map<number, number>();
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
 let inboundReplayLastPruneAt = 0;
@@ -1172,6 +1173,15 @@ const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map
 const inboundFingerprint = (text: string) =>
   crypto.createHash("sha1").update(String(text || "").trim().toLowerCase()).digest("hex");
 
+const isTicketAutoReplyLocked = (ticketId: number, windowMs = 45_000) => {
+  const at = autoReplyTicketLock.get(ticketId) || 0;
+  return at > 0 && (Date.now() - at) < windowMs;
+};
+
+const touchTicketAutoReplyLock = (ticketId: number) => {
+  autoReplyTicketLock.set(ticketId, Date.now());
+};
+
 const getMissingCriteriaLabels = (state: Record<string, any>): string[] => {
   const missing: string[] = [];
   if (!state?.location) missing.push("zona");
@@ -1488,6 +1498,10 @@ const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): P
 const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: any; contact: any; incomingText: string }) => {
   const text = String(incomingText || "").trim();
   if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
+  if (isTicketAutoReplyLocked(ticket.id)) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_locked", reason: "recent auto-reply lock", guardrailAction: "skip", responsePreview: "" });
+    return;
+  }
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
@@ -1498,6 +1512,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "manual_handoff", reason: "Cliente pidió humano", guardrailAction: "handoff", responsePreview: transferText });
     const out = await sendManagedReply({ ticket, contact, text: transferText });
     if (!out) return;
+    touchTicketAutoReplyLock(ticket.id);
     await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
     return;
   }
@@ -1518,6 +1533,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "auto_close", reason: "Cierre positivo detectado", guardrailAction: "close", responsePreview: closeText });
     const out = await sendManagedReply({ ticket, contact, text: closeText });
     if (!out) return;
+    touchTicketAutoReplyLock(ticket.id);
     await ticket.update({ status: "closed", unreadMessages: 0, lastMessage: closeText, updatedAt: new Date() } as any);
     await ensureArchivedTag(contact.id); await (contact as any).update({ leadStatus: "read", lastInteractionAt: new Date() } as any);
     return;
@@ -1589,6 +1605,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
           await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "orchestrator_empty_tokko_direct", reason: "Orquestador vacío; búsqueda directa Tokko", guardrailAction: "direct_tokko", responsePreview: formatted });
           const out = await sendManagedReply({ ticket, contact, text: formatted });
           if (!out) return;
+          touchTicketAutoReplyLock(ticket.id);
           await ticket.update({ lastMessage: formatted, updatedAt: new Date() } as any);
           await saveAgentState(ticket.id, ticket.companyId, {
             ...statePatchFromInbound,
@@ -1612,6 +1629,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
     const out = await sendManagedReply({ ticket, contact, text: ask });
     if (!out) return;
+    touchTicketAutoReplyLock(ticket.id);
     await ticket.update({ lastMessage: ask, updatedAt: new Date() } as any);
     await saveAgentState(ticket.id, ticket.companyId, {
       ...statePatchFromInbound,
@@ -1633,6 +1651,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "guardrail_handoff", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: txt });
     const out = await sendManagedReply({ ticket, contact, text: txt });
     if (!out) return;
+    touchTicketAutoReplyLock(ticket.id);
     await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
     return;
   }
@@ -1641,6 +1660,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "reply", reason: guardrail.reason, guardrailAction: guardrail.action, responsePreview: reply.slice(0, 240) });
   const out = await sendManagedReply({ ticket, contact, text: reply });
   if (!out) return;
+  touchTicketAutoReplyLock(ticket.id);
   await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
   await saveAgentState(ticket.id, ticket.companyId, {
     ...statePatchFromInbound,
