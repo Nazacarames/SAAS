@@ -34,6 +34,7 @@ const DEFAULT_MAX_INBOUND_REPLAY_BLOCKS_PER_PAYLOAD = 40;
 const ALLOWED_INBOUND_TYPES = new Set(["text", "image", "audio", "video", "document", "sticker", "interactive", "button"]);
 
 let decisionTableReady = false;
+let agentStateTableReady = false;
 let outboundDedupeTableReady = false;
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
@@ -133,6 +134,48 @@ const ensureDecisionTable = async () => {
   if (decisionTableReady) return;
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_decision_logs (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL, conversation_type VARCHAR(32) NOT NULL, decision_key VARCHAR(80) NOT NULL, reason TEXT, guardrail_action VARCHAR(80), response_preview TEXT, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   decisionTableReady = true;
+};
+
+const ensureAgentStateTable = async () => {
+  if (agentStateTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_ticket_state (ticket_id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, state_json TEXT NOT NULL DEFAULT '{}', updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_ticket_state_company ON ai_ticket_state(company_id)`);
+  agentStateTableReady = true;
+};
+
+const loadAgentState = async (ticketId: number): Promise<Record<string, any>> => {
+  try {
+    await ensureAgentStateTable();
+    const [row]: any = await sequelize.query(
+      `SELECT state_json FROM ai_ticket_state WHERE ticket_id = :ticketId LIMIT 1`,
+      { replacements: { ticketId }, type: QueryTypes.SELECT }
+    );
+    if (!row?.state_json) return {};
+    const parsed = JSON.parse(String(row.state_json));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveAgentState = async (ticketId: number, companyId: number, patch: Record<string, any>) => {
+  try {
+    await ensureAgentStateTable();
+    const current = await loadAgentState(ticketId);
+    const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await sequelize.query(
+      `INSERT INTO ai_ticket_state (ticket_id, company_id, state_json, updated_at)
+       VALUES (:ticketId, :companyId, :stateJson, NOW())
+       ON CONFLICT (ticket_id)
+       DO UPDATE SET state_json = :stateJson, updated_at = NOW()`,
+      {
+        replacements: { ticketId, companyId, stateJson: JSON.stringify(next).slice(0, 10000) },
+        type: QueryTypes.INSERT
+      }
+    );
+  } catch (error: any) {
+    console.warn("[wa-cloud][agent-state] save skipped", { ticketId, error: error?.message || String(error) });
+  }
 };
 
 const ensureOutboundDedupeTable = async () => {
@@ -1055,6 +1098,38 @@ const parseBudget = (text: string): number | null => {
   return Number(String(m[1]).replace(/\./g, "").replace(/,/g, "")) || null;
 };
 
+const extractAgentCriteriaPatch = (text: string) => {
+  const t = String(text || "").toLowerCase();
+  const patch: Record<string, any> = {};
+  const budget = parseBudget(t);
+  if (budget) patch.maxPriceUsd = budget;
+
+  const roomsMatch = t.match(/\b(1|2|3|4|5|6)\s*(amb|ambientes?|dorm|dormitorios?)\b|monoamb/i);
+  if (roomsMatch) patch.rooms = /monoamb/i.test(roomsMatch[0]) ? 1 : Number(roomsMatch[1] || 0) || undefined;
+
+  const typeMatch = t.match(/\b(departamento|depto|casa|ph|terreno|lote|local|oficina)\b/i);
+  if (typeMatch) {
+    const raw = String(typeMatch[1] || "").toLowerCase();
+    patch.propertyType = raw === "depto" ? "departamento" : raw;
+  }
+
+  const zoneMatch = t.match(/\b(rosario|funes|fisherton|centro|pichincha|echesortu|abasto|palermo|belgrano|caballito|tigre|san isidro|zona\s+norte|zona\s+sur|zona\s+oeste)\b/i);
+  if (zoneMatch) patch.location = String(zoneMatch[1] || "").trim();
+
+  return patch;
+};
+
+const buildAgentStateHint = (state: Record<string, any>) => {
+  if (!state || typeof state !== "object") return "";
+  const parts: string[] = [];
+  if (state.location) parts.push(`zona=${state.location}`);
+  if (state.propertyType) parts.push(`tipo=${state.propertyType}`);
+  if (state.maxPriceUsd) parts.push(`presupuesto<=${state.maxPriceUsd} USD`);
+  if (state.rooms) parts.push(`ambientes=${state.rooms}`);
+  if (!parts.length) return "";
+  return `Contexto acumulado del cliente: ${parts.join(", ")}.`;
+};
+
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
   const ts = Number(timestamp || 0);
   if (!ts) return { ok: false, reason: "missing", ageSec: null };
@@ -1269,13 +1344,20 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   const conversationType = classifyConversation(text);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
 
-  if (/humano|asesor|agente|persona/.test(low)) {
+  if (/\b(humano|asesor humano|agente humano|hablar con (una )?persona|pasar con (una )?persona|quiero.{0,20}persona real)\b/.test(low)) {
     await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
     const transferText = "Perfecto. Te paso con un asesor humano para continuar 🙌";
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "manual_handoff", reason: "Cliente pidió humano", guardrailAction: "handoff", responsePreview: transferText });
     const out = await sendManagedReply({ ticket, contact, text: transferText });
     if (!out) return;
     await ticket.update({ lastMessage: transferText, updatedAt: new Date() } as any);
+    return;
+  }
+
+  // Silence truly low-signal messages (pure emoji, "ok", "dale") BEFORE auto-close check —
+  // "ok" and "dale" are conversational filler, not conversation-ending signals.
+  if (isLowSignalMessage(low)) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
     return;
   }
 
@@ -1293,29 +1375,45 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     return;
   }
 
-  // Silence truly low-signal messages (pure emoji, "ok", "dale") before calling OpenAI
-  if (isLowSignalMessage(low)) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_low_signal", reason: "Mensaje de baja señal", guardrailAction: "silence", responsePreview: "" });
-    return;
-  }
-
   // Use the AI orchestrator: OpenAI with full multi-turn history, Tokko search, RAG
   let baseReply = "";
+  const stateBefore = await loadAgentState(ticket.id);
+  const statePatchFromInbound = extractAgentCriteriaPatch(text);
+  const stateHint = buildAgentStateHint({ ...stateBefore, ...statePatchFromInbound });
+  const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
+
   try {
     const orchResult = await generateConversationalReply({
       companyId: ticket.companyId,
-      text,
+      text: orchestratorInput,
       contactId: contact.id,
       ticketId: ticket.id
     });
     baseReply = String(orchResult.reply || "").trim();
+    await saveAgentState(ticket.id, ticket.companyId, {
+      ...statePatchFromInbound,
+      lastUserMessage: text.slice(0, 600),
+      lastAgentModel: orchResult.model,
+      lastToolCallCount: orchResult.toolCallCount,
+      lastTokkoResults: Number(orchResult?.tokko?.results || 0),
+      lastOutcome: orchResult.usedFallback ? "fallback" : "ok"
+    });
   } catch (orchErr: any) {
     console.error("[wa-cloud][agent] orchestrator error:", orchErr?.message || orchErr);
     baseReply = "";
   }
 
   if (!baseReply) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "silence", responsePreview: "" });
+    const ask = "Para ayudarte bien, decime por favor zona, tipo de propiedad, ambientes y presupuesto aproximado. Con eso te busco opciones concretas ahora mismo.";
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
+    const out = await sendManagedReply({ ticket, contact, text: ask });
+    if (!out) return;
+    await ticket.update({ lastMessage: ask, updatedAt: new Date() } as any);
+    await saveAgentState(ticket.id, ticket.companyId, {
+      ...statePatchFromInbound,
+      lastOutcome: "clarify_needed",
+      lastAgentQuestion: ask
+    });
     return;
   }
   const guardrail = await applyGuardrails({ text, reply: baseReply, conversationType });
@@ -1334,6 +1432,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   const out = await sendManagedReply({ ticket, contact, text: reply });
   if (!out) return;
   await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
+  await saveAgentState(ticket.id, ticket.companyId, {
+    ...statePatchFromInbound,
+    lastOutcome: "replied",
+    lastAgentReply: reply.slice(0, 600)
+  });
   await autoSummaryAndScore(ticket.id, contact);
 };
 
