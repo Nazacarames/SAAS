@@ -390,11 +390,26 @@ settingsRoutes.get("/agent/funnel-report", isAuth, isAdmin, async (req: any, res
   let qualification = 0;
   let visit = 0;
   let closing = 0;
+  let discoveryAndQualification = 0;
+  let qualificationAndVisit = 0;
+  let visitAndClosing = 0;
+  let discoveryAndClosing = 0;
+
   for (const stages of reachedByTicket.values()) {
-    if (stages.has("discovery")) discovery += 1;
-    if (stages.has("qualification")) qualification += 1;
-    if (stages.has("visit")) visit += 1;
-    if (stages.has("closing")) closing += 1;
+    const hasDiscovery = stages.has("discovery");
+    const hasQualification = stages.has("qualification");
+    const hasVisit = stages.has("visit");
+    const hasClosing = stages.has("closing");
+
+    if (hasDiscovery) discovery += 1;
+    if (hasQualification) qualification += 1;
+    if (hasVisit) visit += 1;
+    if (hasClosing) closing += 1;
+
+    if (hasDiscovery && hasQualification) discoveryAndQualification += 1;
+    if (hasQualification && hasVisit) qualificationAndVisit += 1;
+    if (hasVisit && hasClosing) visitAndClosing += 1;
+    if (hasDiscovery && hasClosing) discoveryAndClosing += 1;
   }
 
   const pct = (num: number, den: number) => (den > 0 ? Number(((num / den) * 100).toFixed(2)) : 0);
@@ -431,10 +446,10 @@ settingsRoutes.get("/agent/funnel-report", isAuth, isAdmin, async (req: any, res
       ticketsObserved: totalTickets,
       reached: { discovery, qualification, visit, closing },
       conversion: {
-        discoveryToQualificationPct: pct(qualification, Math.max(discovery, 1)),
-        qualificationToVisitPct: pct(visit, Math.max(qualification, 1)),
-        visitToClosingPct: pct(closing, Math.max(visit, 1)),
-        discoveryToClosingPct: pct(closing, Math.max(discovery, 1))
+        discoveryToQualificationPct: pct(discoveryAndQualification, discovery),
+        qualificationToVisitPct: pct(qualificationAndVisit, qualification),
+        visitToClosingPct: pct(visitAndClosing, visit),
+        discoveryToClosingPct: pct(discoveryAndClosing, discovery)
       }
     },
     topObjections
