@@ -16,18 +16,22 @@ const registerBuckets = new Map<string, { count: number; resetAt: number }>();
 const REGISTER_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const REGISTER_MAX_PER_WINDOW = 5;
 
+const isProduction = process.env.NODE_ENV === 'production';
+
+const getCookieOptions = () => ({
+    httpOnly: true,
+    secure: isProduction,
+    // Avoid login loops when frontend/backend are on different subdomains/domains
+    sameSite: isProduction ? 'none' as const : 'lax' as const,
+    path: '/',
+});
+
 authRoutes.post("/login", validateSchema(loginSchema), async (req, res) => {
     const { email, password } = req.body;
 
     const result = await LoginService({ email, password });
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    const cookieOptions = {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? 'strict' as const : 'lax' as const,
-        path: '/',
-    };
+    const cookieOptions = getCookieOptions();
 
     res.cookie('token', result.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
     res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
@@ -39,13 +43,7 @@ authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res)
 
     const result = await RefreshTokenService(refreshToken);
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    const cookieOptions = {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? 'strict' as const : 'lax' as const,
-        path: '/',
-    };
+    const cookieOptions = getCookieOptions();
     res.cookie('token', result.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
     if (result.refreshToken) {
         res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
@@ -54,8 +52,9 @@ authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res)
 });
 
 authRoutes.post("/logout", (req, res) => {
-    res.clearCookie('token', { path: '/' });
-    res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
+    const cookieOptions = getCookieOptions();
+    res.clearCookie('token', { ...cookieOptions, path: '/' });
+    res.clearCookie('refreshToken', { ...cookieOptions, path: '/api/auth/refresh' });
     return res.json({ ok: true });
 });
 
@@ -142,13 +141,7 @@ authRoutes.post("/register", validateSchema(registerSchema), async (req, res) =>
 
         const login = await LoginService({ email: safeEmail, password: safePassword });
 
-        const isProduction = process.env.NODE_ENV === 'production';
-        const cookieOptions = {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'strict' as const : 'lax' as const,
-            path: '/',
-        };
+        const cookieOptions = getCookieOptions();
 
         res.cookie('token', login.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
         res.cookie('refreshToken', login.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
