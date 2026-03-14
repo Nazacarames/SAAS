@@ -1207,12 +1207,17 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
 const stripAgentFiller = (reply: string): string => {
   const raw = String(reply || "").trim();
   if (!raw) return "";
+
   const cleaned = raw
-    .replace(/^(entendido|perfecto|genial|dale)[,\s]+ya te ayudo\.?\s*/i, "")
-    .replace(/^dame un segundo\.?\s*/i, "")
-    .replace(/^un momento\.?\s*/i, "")
-    .replace(/^ya te paso\.?\s*/i, "")
+    // remove common stalling fillers even if they appear mid-message
+    .replace(/\b(entendido|perfecto|genial|dale)[,\s]+ya te ayudo\.?/gi, "")
+    .replace(/\bdame un segundo\.?/gi, "")
+    .replace(/\bun momento\.?/gi, "")
+    .replace(/\bya te paso\.?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")
     .trim();
+
   return cleaned || raw;
 };
 
