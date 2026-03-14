@@ -1275,6 +1275,28 @@ const buildTokkoQueryFromState = (state: Record<string, any>, fallbackText: stri
   return String(parts.join(" ")).slice(0, 300);
 };
 
+const buildIntentAwareFallback = (text: string, missing: string[]) => {
+  const low = String(text || "").toLowerCase();
+
+  if (/zonas?|barrios?|d[oó]nde tienen/i.test(low)) {
+    return "Trabajamos varias zonas de Rosario y alrededores. Si querés, decime el barrio o zona que te interesa y te paso opciones concretas de ahí.";
+  }
+
+  if (/vender.*comprar|comprar.*vender|tasar|tasaci[oó]n/i.test(low)) {
+    return "Sí, te podemos asesorar en ambas: venta y compra. Si querés, empezamos por la parte que te urge hoy (vender o comprar) y te guío paso a paso.";
+  }
+
+  if (/informaci[oó]n|consulta|c[oó]mo funciona|explicame/i.test(low)) {
+    return "Claro, te ayudo. Contame qué querés resolver primero y te doy una respuesta concreta, sin vueltas.";
+  }
+
+  if (missing.length > 0) {
+    return `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`;
+  }
+
+  return "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+};
+
 const formatTokkoOptionsMessages = (results: any[]): string[] => {
   if (!Array.isArray(results) || results.length === 0) return [];
   const top = results.slice(0, 3);
@@ -1691,9 +1713,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
 
       // Fallback: only if Tokko direct did NOT handle it (guard clause)
       if (!replyPlan && !tokkoDirectHandled) {
-        const ask = missing.length > 0
-          ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
-          : "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+        const ask = buildIntentAwareFallback(text, missing);
 
         replyPlan = {
           text: ask,
