@@ -1801,6 +1801,20 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           }
           const contact = await getOrCreateContact(from, whatsapp.companyId);
           const ticket = await getOrCreateTicket(contact.id, whatsapp.id, whatsapp.companyId);
+          const duplicateByContent = await Message.findOne({
+            where: {
+              ticketId: ticket.id,
+              fromMe: false,
+              body,
+              createdAt: { [Op.gte]: new Date(Date.now() - 45_000) }
+            }
+          } as any);
+          if (duplicateByContent) {
+            bumpHardeningMetric("inbound.duplicate_content_recent_blocked");
+            ignored += 1;
+            continue;
+          }
+
           const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
           const message = await Message.create({ id: externalMsgId || crypto.randomUUID(), body, contactId: contact.id, ticketId: ticket.id, fromMe: false, read: false, ack: 0, mediaType: incoming.type || "chat", createdAt, updatedAt: createdAt } as any);
           await ticket.update({ lastMessage: body, unreadMessages: (ticket.unreadMessages || 0) + 1, updatedAt: new Date() } as any);
