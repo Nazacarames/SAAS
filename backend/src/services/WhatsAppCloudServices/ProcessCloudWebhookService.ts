@@ -1176,11 +1176,20 @@ const extractObjection = (text: string): string | null => {
 
 const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map((x) => String(x).trim().toLowerCase()))).slice(0, 8);
 
+const getMissingCriteriaLabels = (state: Record<string, any>): string[] => {
+  const missing: string[] = [];
+  if (!state?.location) missing.push("zona");
+  if (!state?.propertyType) missing.push("tipo");
+  if (!state?.rooms) missing.push("ambientes");
+  if (!state?.maxPriceUsd) missing.push("presupuesto");
+  return missing;
+};
+
 const buildSalesObjective = (state: Record<string, any>, incomingText: string): string => {
   const t = String(incomingText || "").toLowerCase();
   if (state?.salesStage === "closing") return "Objetivo de este turno: concretar siguiente paso claro (visita, reserva o llamada).";
   if (state?.salesStage === "visit") return "Objetivo de este turno: proponer/agendar visita con día y franja concreta.";
-  if (!state?.location || !state?.propertyType || !state?.maxPriceUsd || !state?.rooms) {
+  if (getMissingCriteriaLabels(state).length > 0) {
     return "Objetivo de este turno: calificar lead y completar faltantes (zona, tipo, ambientes, presupuesto) antes de cerrar.";
   }
   if (/mostrame|buscá|opciones|propiedades|departamentos|casas/.test(t)) {
@@ -1557,7 +1566,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   }
 
   if (!baseReply) {
-    const ask = "Para ayudarte bien, decime por favor zona, tipo de propiedad, ambientes y presupuesto aproximado. Con eso te busco opciones concretas ahora mismo.";
+    const missing = getMissingCriteriaLabels(mergedStateForPrompt);
+    const ask = missing.length > 0
+      ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
+      : "Perfecto, ya tengo tus criterios. Enseguida te paso opciones concretas y, si querés, coordinamos visita.";
+
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
     const out = await sendManagedReply({ ticket, contact, text: ask });
     if (!out) return;
@@ -1566,9 +1579,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       ...statePatchFromInbound,
       salesStage: inferredStage,
       objections,
-      lastOutcome: "clarify_needed",
+      lastOutcome: missing.length > 0 ? "clarify_needed" : "criteria_ready_waiting_results",
       lastAgentQuestion: ask,
-      nextBestAction: "qualify_missing_criteria"
+      nextBestAction: missing.length > 0 ? "qualify_missing_criteria" : "present_options"
     });
     return;
   }
