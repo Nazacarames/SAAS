@@ -14,9 +14,10 @@ interface Request {
   mediaUrl?: string;
   mediaType?: "image" | "video" | "audio" | "document";
   caption?: string;
+  idempotencyKey?: string;
 }
 
-const SendMessageToContactService = async ({ companyId, userId, contactId, body, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption }: Request) => {
+const SendMessageToContactService = async ({ companyId, userId, contactId, body, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption, idempotencyKey }: Request) => {
   const contact = await Contact.findOne({ where: { id: contactId, companyId } });
   if (!contact) {
     const err: any = new Error("Contact not found");
@@ -68,7 +69,8 @@ const SendMessageToContactService = async ({ companyId, userId, contactId, body,
     templateVariables,
     mediaUrl,
     mediaType,
-    caption
+    caption,
+    idempotencyKey
   });
 
   try {
