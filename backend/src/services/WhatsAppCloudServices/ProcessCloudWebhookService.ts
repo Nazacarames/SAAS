@@ -39,6 +39,7 @@ let agentStateTableReady = false;
 let stageEventsTableReady = false;
 let outboundDedupeTableReady = false;
 const autoReplyTicketLock = new Map<number, number>();
+const agentTurnInFlight = new Set<number>();
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
 let inboundReplayLastPruneAt = 0;
@@ -1498,10 +1499,16 @@ const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): P
 const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: any; contact: any; incomingText: string }) => {
   const text = String(incomingText || "").trim();
   if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
+  if (agentTurnInFlight.has(ticket.id)) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_inflight_skip", reason: "turn already in-flight", guardrailAction: "skip", responsePreview: "" });
+    return;
+  }
   if (isTicketAutoReplyLocked(ticket.id)) {
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_locked", reason: "recent auto-reply lock", guardrailAction: "skip", responsePreview: "" });
     return;
   }
+  agentTurnInFlight.add(ticket.id);
+  try {
   const recentBotMsg = await Message.findOne({
     where: {
       ticketId: ticket.id,
@@ -1686,6 +1693,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     lastAutoReplyAt: new Date().toISOString()
   });
   await autoSummaryAndScore(ticket.id, contact);
+  } finally {
+    agentTurnInFlight.delete(ticket.id);
+  }
 };
 
 export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) => {
