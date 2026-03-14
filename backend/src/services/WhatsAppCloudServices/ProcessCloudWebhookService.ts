@@ -1502,6 +1502,19 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_locked", reason: "recent auto-reply lock", guardrailAction: "skip", responsePreview: "" });
     return;
   }
+  const recentBotMsg = await Message.findOne({
+    where: {
+      ticketId: ticket.id,
+      fromMe: true,
+      createdAt: { [Op.gte]: new Date(Date.now() - 45_000) }
+    },
+    order: [["createdAt", "DESC"]]
+  } as any);
+  if (recentBotMsg) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_recent_bot_message_skip", reason: "bot already replied recently", guardrailAction: "skip", responsePreview: "" });
+    return;
+  }
+
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
