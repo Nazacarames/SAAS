@@ -181,7 +181,10 @@ const Conversations = () => {
     setLoadingMessages(true);
     try {
       // Backend /messages/:conversationId expects contactId (not ticketId).
-      const { data: msgs } = await api.get(`/messages/${contactId}`);
+      // Add cache-buster to avoid stale 304 browser cache responses on chat history.
+      const { data: msgs } = await api.get(`/messages/${contactId}`, {
+        params: { _t: Date.now() }
+      });
       const arr = Array.isArray(msgs) ? msgs : Array.isArray(msgs?.data) ? msgs.data : [];
 
       arr.sort((a: any, b: any) => {
@@ -192,6 +195,30 @@ const Conversations = () => {
       });
 
       if (seq !== messagesFetchSeq.current) return;
+
+      // Fallback UX: if there are no persisted message rows yet,
+      // show at least the latest ticket preview (e.g. "Template ... enviado")
+      // so the chat pane is not empty.
+      if (arr.length === 0) {
+        const latestTicket = tickets
+          .filter((t: any) => Number(t.contactId || t.contact?.id) === Number(contactId))
+          .sort((a: any, b: any) => toTs(b?.updatedAt || b?.createdAt) - toTs(a?.updatedAt || a?.createdAt))[0];
+
+        const fallbackBody = String(latestTicket?.lastMessage || '').trim();
+        if (fallbackBody) {
+          setMessages([
+            {
+              id: `fallback-${contactId}`,
+              body: fallbackBody,
+              fromMe: true,
+              mediaType: 'chat',
+              createdAt: latestTicket?.updatedAt || latestTicket?.createdAt || new Date().toISOString()
+            }
+          ] as any);
+          return;
+        }
+      }
+
       setMessages(arr);
     } catch (e) {
       if (seq !== messagesFetchSeq.current) return;

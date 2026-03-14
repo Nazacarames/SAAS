@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "crypto";
 import isAuth from "../middleware/isAuth";
 import ListContactsService from "../services/ContactServices/ListContactsService";
 import CreateContactService from "../services/ContactServices/CreateContactService";
@@ -22,6 +23,14 @@ contactRoutes.get("/", isAuth, async (req: any, res) => {
     page: page ? parseInt(page) : undefined,
     limit: limit ? parseInt(limit) : undefined
   });
+
+  // Backward compatibility: legacy frontends expect an array payload.
+  // If pagination params are not explicitly requested, return only rows.
+  const explicitPagination = page !== undefined || limit !== undefined;
+  if (!explicitPagination) {
+    return res.json(result.data || []);
+  }
+
   return res.json(result);
 });
 
@@ -84,7 +93,11 @@ contactRoutes.delete("/:contactId", isAuth, async (req: any, res) => {
 contactRoutes.post("/:contactId/message", isAuth, async (req: any, res) => {
   const { companyId, id: userId } = req.user;
   const { contactId } = req.params;
-  const { body, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption } = req.body;
+  const { body, templateName, languageCode, templateVariables, mediaUrl, mediaType, caption, idempotencyKey } = req.body;
+
+  const headerIdempotency = String(req.headers?.["x-idempotency-key"] || req.headers?.["idempotency-key"] || "").trim();
+  const bodyIdempotency = String(idempotencyKey || "").trim();
+  const effectiveIdempotencyKey = bodyIdempotency || headerIdempotency || `ui:${randomUUID()}`;
 
   const result = await SendMessageToContactService({
     companyId,
@@ -96,7 +109,8 @@ contactRoutes.post("/:contactId/message", isAuth, async (req: any, res) => {
     templateVariables,
     mediaUrl,
     mediaType,
-    caption
+    caption,
+    idempotencyKey: effectiveIdempotencyKey
   });
 
   return res.status(201).json(result);

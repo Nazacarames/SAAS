@@ -50,6 +50,13 @@ messageRoutes.get("/:conversationId", isAuth, async (req: any, res) => {
     page: page ? parseInt(page) : undefined,
     limit: limit ? parseInt(limit) : undefined
   });
+
+  // Backward compatibility: legacy chat UIs expect a plain array payload.
+  const explicitPagination = page !== undefined || limit !== undefined;
+  if (!explicitPagination) {
+    return res.json(messages?.data || []);
+  }
+
   return res.json(messages);
 });
 

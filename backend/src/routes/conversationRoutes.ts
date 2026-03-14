@@ -17,6 +17,13 @@ conversationRoutes.get("/", isAuth, async (req: any, res) => {
     page: page ? parseInt(page) : undefined,
     limit: limit ? parseInt(limit) : undefined
   });
+
+  // Backward compatibility: legacy frontends expect an array payload.
+  const explicitPagination = page !== undefined || limit !== undefined;
+  if (!explicitPagination) {
+    return res.json(conversations.data || []);
+  }
+
   return res.json(conversations);
 });
 
