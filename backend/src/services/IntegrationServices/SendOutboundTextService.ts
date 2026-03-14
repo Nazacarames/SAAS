@@ -238,7 +238,9 @@ const SendOutboundTextService = async ({ companyId, whatsappId, to, text, contac
 
 
     const io = getIO();
-    io.to(`conversation-${contact.id}`).emit("appMessage", { action: "create", message: msg, conversationId: contact.id, contact });
+    const companyRoom = `company-${companyId}`;
+    io.to(companyRoom).emit("newMessage", { action: "create", message: msg, contactId: contact.id, contact });
+    io.to(companyRoom).emit("ticketUpdate", { action: "update" });
 
     return { conversationId: contact.id, contact, message: msg, idempotencyKey: normalizedIdempotencyKey || null };
   });

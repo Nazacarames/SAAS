@@ -193,12 +193,15 @@ const CheckInactiveContactsService = async () => {
 
           try {
             const io = getIO();
-            io.to(`ticket-${ticket.id}`).emit("appMessage", {
+            const companyRoom = `company-${ticket.companyId}`;
+            io.to(companyRoom).emit("newMessage", {
               action: "create",
               message: msg,
               ticket,
-              contact: c
+              contact: c,
+              contactId: c.id
             });
+            io.to(companyRoom).emit("ticketUpdate", { action: "update", ticket });
           } catch {}
         }
 

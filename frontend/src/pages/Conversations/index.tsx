@@ -131,6 +131,11 @@ const Conversations = () => {
   const [decisionLogs, setDecisionLogs] = useState<any[]>([]);
   const messagesFetchSeq = useRef(0);
   const contactFetchSeq = useRef(0);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const selectedConvRef = useRef<ConversationItem | null>(null);
+
+  // Keep ref in sync so socket callbacks always see current selection
+  useEffect(() => { selectedConvRef.current = selectedConv; }, [selectedConv]);
 
   const toTs = (value?: string | number) => {
     if (value === null || value === undefined || value === '') return 0;
@@ -237,32 +242,59 @@ const Conversations = () => {
 
   useEffect(() => {
     const socket = socketConnection.connect();
+    if (!socket) return;
 
     const handleNewMessage = (data: any) => {
-        fetchTickets();
-        if (selectedConv && Number(data?.contactId) === selectedConv.contactId) {
-            fetchConversationMessages(selectedConv.contactId);
+      // Always refresh conversation list to update last message / ordering
+      fetchTickets();
+      // If viewing the same contact, append the message directly for instant UI
+      const current = selectedConvRef.current;
+      const incomingContactId = Number(
+        data?.contactId || data?.message?.contactId || data?.contact?.id || 0
+      );
+      if (current && incomingContactId === current.contactId) {
+        const msg = data?.message;
+        if (msg?.id) {
+          setMessages((prev) => {
+            // Avoid duplicates
+            if (prev.some((m: any) => m.id === msg.id)) return prev;
+            return [...prev, msg];
+          });
+        } else {
+          // Fallback: re-fetch if message payload is incomplete
+          fetchConversationMessages(current.contactId);
         }
+      }
     };
 
     const handleTicketUpdate = () => {
-        fetchTickets();
+      fetchTickets();
     };
 
-    if (socket) {
-        socket.on('newMessage', handleNewMessage);
-        socket.on('ticketUpdate', handleTicketUpdate);
-        socket.on('contactUpdate', handleTicketUpdate);
-    }
+    const handleReconnect = () => {
+      // After reconnection, refresh everything to ensure UI is up-to-date
+      fetchTickets();
+      const current = selectedConvRef.current;
+      if (current) fetchConversationMessages(current.contactId);
+    };
+
+    socket.on('newMessage', handleNewMessage);
+    socket.on('ticketUpdate', handleTicketUpdate);
+    socket.on('contactUpdate', handleTicketUpdate);
+    socket.on('connect', handleReconnect);
 
     return () => {
-        if (socket) {
-            socket.off('newMessage', handleNewMessage);
-            socket.off('ticketUpdate', handleTicketUpdate);
-            socket.off('contactUpdate', handleTicketUpdate);
-        }
+      socket.off('newMessage', handleNewMessage);
+      socket.off('ticketUpdate', handleTicketUpdate);
+      socket.off('contactUpdate', handleTicketUpdate);
+      socket.off('connect', handleReconnect);
     };
-  }, [selectedConv?.contactId]);
+  }, []);
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   useEffect(() => {
     const id = setInterval(() => { fetchTickets(); }, 30000);
@@ -673,7 +705,7 @@ const Conversations = () => {
                     No hay mensajes.
                   </Typography>
                 ) : (
-                  messages.map((m) => (
+                  messages.map((m: any) => (
                     <Box
                       key={m.id || `${m.createdAt}-${m.body}`}
                       sx={{ display: 'flex', justifyContent: m.fromMe ? 'flex-end' : 'flex-start' }}
@@ -741,6 +773,7 @@ const Conversations = () => {
                     </Box>
                   ))
                 )}
+                <div ref={messagesEndRef} />
               </Stack>
 
               <Box sx={{ p: 1.2, bgcolor: 'rgba(17,28,48,0.92)', borderTop: '1px solid #2a3942' }}>

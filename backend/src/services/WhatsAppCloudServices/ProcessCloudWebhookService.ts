@@ -911,7 +911,15 @@ const buildOutboundDedupeKey = (
   return `wa-out:${crypto.createHash("sha1").update(base).digest("hex")}`;
 };
 
-const emitOutgoing = (ticket: any, contact: any, message: any) => { try { const io = getIO(); io.to(`ticket-${ticket.id}`).emit("appMessage", { action: "create", message, ticket, contact }); } catch {} };
+const emitOutgoing = (ticket: any, contact: any, message: any) => {
+  try {
+    const io = getIO();
+    const companyRoom = `company-${ticket.companyId}`;
+    // Emit to company room so all connected dashboard users receive it
+    io.to(companyRoom).emit("newMessage", { action: "create", message, ticket, contact });
+    io.to(companyRoom).emit("ticketUpdate", { action: "update", ticket });
+  } catch {}
+};
 
 const sendManagedReply = async ({ ticket, contact, text }: { ticket: any; contact: any; text: string }) => {
   const cleanText = String(text || "")
@@ -1523,7 +1531,10 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           await ticket.update({ lastMessage: body, unreadMessages: (ticket.unreadMessages || 0) + 1, updatedAt: new Date() } as any);
           try { await (contact as any).update({ leadStatus: "unread", lastInteractionAt: new Date() } as any); } catch {}
           recordInboundMessage({ fromMe: false, createdAt });
-          const io = getIO(); io.to(`ticket-${ticket.id}`).emit("appMessage", { action: "create", message, ticket, contact }); io.to("notification").emit("notification", { type: "new-message", ticketId: ticket.id, contactName: contact.name });
+          const io = getIO();
+          const companyRoom = `company-${ticket.companyId || whatsapp.companyId}`;
+          io.to(companyRoom).emit("newMessage", { action: "create", message, ticket, contact, contactId: contact.id });
+          io.to(companyRoom).emit("ticketUpdate", { action: "update", ticket });
           try { await runAutonomousAgent({ ticket, contact, incomingText: body }); } catch (agentErr: any) { console.error("[wa-cloud][agent] error:", agentErr?.message || agentErr); }
           bumpHardeningMetric("inbound.processed_ok");
           processed += 1;
