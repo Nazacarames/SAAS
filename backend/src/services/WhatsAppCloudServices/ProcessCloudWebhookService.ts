@@ -1127,15 +1127,51 @@ const extractAgentCriteriaPatch = (text: string) => {
   return patch;
 };
 
-const buildAgentStateHint = (state: Record<string, any>) => {
+const detectSalesStage = (text: string, currentStage?: string): string => {
+  const t = String(text || "").toLowerCase();
+  if (/reservar|seña|senia|cerrar|quiero avanzar|quiero comprar|quiero alquilar|coordinemos visita|agendemos visita/.test(t)) return "closing";
+  if (/visita|agendar|coordinar|cuando puedo ver|quiero ver/.test(t)) return "visit";
+  if (/precio|presupuesto|usd|ambientes|zona|barrio|tipo/.test(t)) return "qualification";
+  return currentStage || "discovery";
+};
+
+const extractObjection = (text: string): string | null => {
+  const t = String(text || "").toLowerCase();
+  if (/caro|muy caro|se me va|fuera de presupuesto/.test(t)) return "price";
+  if (/lejos|no me gusta la zona|ubicaci[oó]n/.test(t)) return "location";
+  if (/chico|pocos ambientes|poco metraje/.test(t)) return "size";
+  if (/no estoy seguro|lo tengo que pensar/.test(t)) return "timing";
+  return null;
+};
+
+const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map((x) => String(x).trim().toLowerCase()))).slice(0, 8);
+
+const buildSalesObjective = (state: Record<string, any>, incomingText: string): string => {
+  const t = String(incomingText || "").toLowerCase();
+  if (state?.salesStage === "closing") return "Objetivo de este turno: concretar siguiente paso claro (visita, reserva o llamada).";
+  if (state?.salesStage === "visit") return "Objetivo de este turno: proponer/agendar visita con día y franja concreta.";
+  if (!state?.location || !state?.propertyType || !state?.maxPriceUsd || !state?.rooms) {
+    return "Objetivo de este turno: calificar lead y completar faltantes (zona, tipo, ambientes, presupuesto) antes de cerrar.";
+  }
+  if (/mostrame|buscá|opciones|propiedades|departamentos|casas/.test(t)) {
+    return "Objetivo de este turno: mostrar opciones concretas y cerrar con pregunta de avance (visita o ajuste de filtro).";
+  }
+  return "Objetivo de este turno: avanzar al lead un paso en el embudo sin repetir preguntas ya resueltas.";
+};
+
+const buildAgentStateHint = (state: Record<string, any>, incomingText: string) => {
   if (!state || typeof state !== "object") return "";
   const parts: string[] = [];
   if (state.location) parts.push(`zona=${state.location}`);
   if (state.propertyType) parts.push(`tipo=${state.propertyType}`);
   if (state.maxPriceUsd) parts.push(`presupuesto<=${state.maxPriceUsd} USD`);
   if (state.rooms) parts.push(`ambientes=${state.rooms}`);
+  if (state.salesStage) parts.push(`etapa=${state.salesStage}`);
+  if (Array.isArray(state.objections) && state.objections.length) parts.push(`objeciones=${state.objections.join(",")}`);
+  const objective = buildSalesObjective(state, incomingText);
+  if (objective) parts.push(objective);
   if (!parts.length) return "";
-  return `Contexto acumulado del cliente: ${parts.join(", ")}.`;
+  return `Contexto acumulado del cliente: ${parts.join(" | ")}.`;
 };
 
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
@@ -1388,7 +1424,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   let baseReply = "";
   const stateBefore = await loadAgentState(ticket.id);
   const statePatchFromInbound = extractAgentCriteriaPatch(text);
-  const stateHint = buildAgentStateHint({ ...stateBefore, ...statePatchFromInbound });
+  const inferredStage = detectSalesStage(text, String(stateBefore?.salesStage || ""));
+  const newObjection = extractObjection(text);
+  const objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
+  const mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
+  const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
   const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
 
   try {
@@ -1412,10 +1452,13 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     baseReply = String(orchResult.reply || "").trim();
     await saveAgentState(ticket.id, ticket.companyId, {
       ...statePatchFromInbound,
+      salesStage: inferredStage,
+      objections,
       lastUserMessage: text.slice(0, 600),
       lastAgentModel: orchResult.model,
       lastToolCallCount: orchResult.toolCallCount,
       lastTokkoResults: Number(orchResult?.tokko?.results || 0),
+      lastKnowledgeHits: Number(orchResult?.knowledge?.length || 0),
       lastOutcome: orchResult.usedFallback ? "fallback" : "ok"
     });
   } catch (orchErr: any) {
@@ -1437,8 +1480,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await ticket.update({ lastMessage: ask, updatedAt: new Date() } as any);
     await saveAgentState(ticket.id, ticket.companyId, {
       ...statePatchFromInbound,
+      salesStage: inferredStage,
+      objections,
       lastOutcome: "clarify_needed",
-      lastAgentQuestion: ask
+      lastAgentQuestion: ask,
+      nextBestAction: "qualify_missing_criteria"
     });
     return;
   }
@@ -1460,8 +1506,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   await ticket.update({ status: ticket.status === "pending" ? "open" : ticket.status, lastMessage: reply, updatedAt: new Date() } as any);
   await saveAgentState(ticket.id, ticket.companyId, {
     ...statePatchFromInbound,
+    salesStage: inferredStage,
+    objections,
     lastOutcome: "replied",
-    lastAgentReply: reply.slice(0, 600)
+    lastAgentReply: reply.slice(0, 600),
+    nextBestAction: inferredStage === "visit" ? "schedule_visit" : inferredStage === "closing" ? "close_or_reserve" : "continue_qualification"
   });
   await autoSummaryAndScore(ticket.id, contact);
 };
