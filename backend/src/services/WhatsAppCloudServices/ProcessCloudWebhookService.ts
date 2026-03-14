@@ -35,6 +35,7 @@ const ALLOWED_INBOUND_TYPES = new Set(["text", "image", "audio", "video", "docum
 
 let decisionTableReady = false;
 let agentStateTableReady = false;
+let stageEventsTableReady = false;
 let outboundDedupeTableReady = false;
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
@@ -175,6 +176,35 @@ const saveAgentState = async (ticketId: number, companyId: number, patch: Record
     );
   } catch (error: any) {
     console.warn("[wa-cloud][agent-state] save skipped", { ticketId, error: error?.message || String(error) });
+  }
+};
+
+const ensureStageEventsTable = async () => {
+  if (stageEventsTableReady) return;
+  await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_stage_events (id SERIAL PRIMARY KEY, ticket_id INTEGER NOT NULL, company_id INTEGER NOT NULL, from_stage VARCHAR(40), to_stage VARCHAR(40) NOT NULL, reason VARCHAR(120), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_stage_events_company_created ON ai_stage_events(company_id, created_at)`);
+  stageEventsTableReady = true;
+};
+
+const recordStageEvent = async (args: { ticketId: number; companyId: number; fromStage?: string; toStage: string; reason?: string }) => {
+  try {
+    await ensureStageEventsTable();
+    await sequelize.query(
+      `INSERT INTO ai_stage_events (ticket_id, company_id, from_stage, to_stage, reason, created_at)
+       VALUES (:ticketId, :companyId, :fromStage, :toStage, :reason, NOW())`,
+      {
+        replacements: {
+          ticketId: args.ticketId,
+          companyId: args.companyId,
+          fromStage: args.fromStage || null,
+          toStage: args.toStage,
+          reason: args.reason || null
+        },
+        type: QueryTypes.INSERT
+      }
+    );
+  } catch (error: any) {
+    console.warn("[wa-cloud][stage-event] insert skipped", { ticketId: args.ticketId, error: error?.message || String(error) });
   }
 };
 
@@ -1166,6 +1196,33 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
   return `Contexto acumulado del cliente: ${parts.join(" | ")}.`;
 };
 
+const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
+  const base = String(reply || "").trim();
+  if (!base) return base;
+  if (/\?$/.test(base) && base.length < 650) return base;
+
+  const stage = String(state?.salesStage || "discovery");
+  const objections = Array.isArray(state?.objections) ? state.objections : [];
+
+  if (stage === "closing") {
+    return `${base}\n\n¿Querés que avancemos con una visita esta semana o preferís que te reserve una opción y te llamo?`;
+  }
+
+  if (stage === "visit") {
+    return `${base}\n\nSi te sirve, coordinamos visita: decime día y franja horaria.`;
+  }
+
+  if (objections.includes("price")) {
+    return `${base}\n\nSi querés, te filtro opciones un poco más accesibles en la misma zona.`;
+  }
+
+  if (!state?.location || !state?.propertyType || !state?.maxPriceUsd || !state?.rooms) {
+    return `${base}\n\nPara afinarte bien la búsqueda: zona, tipo, ambientes y presupuesto aproximado.`;
+  }
+
+  return `${base}\n\nSi querés, te paso una selección más precisa y avanzamos con el próximo paso.`;
+};
+
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
   const ts = Number(timestamp || 0);
   if (!ts) return { ok: false, reason: "missing", ageSec: null };
@@ -1415,10 +1472,20 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   let baseReply = "";
   const stateBefore = await loadAgentState(ticket.id);
   const statePatchFromInbound = extractAgentCriteriaPatch(text);
-  const inferredStage = detectSalesStage(text, String(stateBefore?.salesStage || ""));
+  const previousStage = String(stateBefore?.salesStage || "").trim() || undefined;
+  const inferredStage = detectSalesStage(text, previousStage);
   const newObjection = extractObjection(text);
   const objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
   const mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
+  if (!previousStage || previousStage !== inferredStage) {
+    await recordStageEvent({
+      ticketId: ticket.id,
+      companyId: ticket.companyId,
+      fromStage: previousStage,
+      toStage: inferredStage,
+      reason: "inbound_intent"
+    });
+  }
   const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
   const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
 
@@ -1462,7 +1529,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     });
     return;
   }
-  const guardrail = await applyGuardrails({ text, reply: baseReply, conversationType });
+  const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt);
+  const guardrail = await applyGuardrails({ text, reply: playbookReply, conversationType });
   if (guardrail.handoff) {
     await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
     const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";
