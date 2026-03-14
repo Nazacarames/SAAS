@@ -1275,26 +1275,74 @@ const buildTokkoQueryFromState = (state: Record<string, any>, fallbackText: stri
   return String(parts.join(" ")).slice(0, 300);
 };
 
-const buildIntentAwareFallback = (text: string, missing: string[]) => {
+// ── Intent classification ──────────────────────────────────────────────
+// Classifies inbound text into a high-level intent BEFORE hitting the
+// criteria gate.  Only "property_search" goes through the orchestrator +
+// Tokko pipeline; the rest get purpose-built, non-repetitive replies.
+type InboundIntent = "zone_inquiry" | "sell_and_buy" | "general_question" | "property_search";
+
+const classifyInboundIntent = (text: string): InboundIntent => {
   const low = String(text || "").toLowerCase();
 
-  if (/zonas?|barrios?|d[oó]nde tienen/i.test(low)) {
-    return "Trabajamos varias zonas de Rosario y alrededores. Si querés, decime el barrio o zona que te interesa y te paso opciones concretas de ahí.";
+  // Zone inquiry: asking about available zones / neighborhoods
+  if (/qu[eé]\s+zonas|qu[eé]\s+barrios|zonas\s+tienen|barrios\s+tienen|d[oó]nde\s+tienen|en\s+qu[eé]\s+zonas|qu[eé]\s+zonas\s+(trabajan|manejan|cubren)|zonas\s+disponibles/i.test(low)) {
+    return "zone_inquiry";
   }
 
-  if (/vender.*comprar|comprar.*vender|tasar|tasaci[oó]n/i.test(low)) {
-    return "Sí, te podemos asesorar en ambas: venta y compra. Si querés, empezamos por la parte que te urge hoy (vender o comprar) y te guío paso a paso.";
+  // Sell-and-buy: wants to both sell AND buy, or asks about selling/appraisal
+  if (/vender\s*(y|e)\s*comprar|comprar\s*(y|e)\s*vender|quiero\s+vender|tasar|tasaci[oó]n|vendo\s+mi/i.test(low)) {
+    return "sell_and_buy";
   }
 
-  if (/informaci[oó]n|consulta|c[oó]mo funciona|explicame/i.test(low)) {
-    return "Claro, te ayudo. Contame qué querés resolver primero y te doy una respuesta concreta, sin vueltas.";
+  // Property search: explicit search signals or ≥2 concrete criteria
+  const hasPropertyKeyword = /mostrame|buscá|busc[aá]|opciones|propiedades|departamentos|casas|busco\s+(casa|depto|departamento|ph)/i.test(low);
+  const hasLocation = /(rosario|fisherton|funes|centro|pichincha|echesortu|abasto|palermo|belgrano|caballito|tigre|san isidro|zona\s+norte|zona\s+sur|zona\s+oeste)/i.test(low);
+  const hasBudget = /(\d{2,3}(?:[\.,]\d{3})+|\d{5,8})\s*(usd|u\$s|d[oó]lares?)/i.test(low);
+  const hasRooms = /\b(1|2|3|4|5|6)\s*(amb|ambientes?|dorm|dormitorios?)\b|monoamb/i.test(low);
+  const hasPropertyType = /\b(departamento|depto|casa|ph|terreno|lote|local|oficina)\b/i.test(low);
+  const criteriaCount = (hasLocation ? 1 : 0) + (hasBudget ? 1 : 0) + (hasRooms ? 1 : 0) + (hasPropertyType ? 1 : 0);
+
+  if (hasPropertyKeyword || criteriaCount >= 2) {
+    return "property_search";
   }
 
-  if (missing.length > 0) {
-    return `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`;
+  // General question: greetings, short messages, open-ended inquiries
+  return "general_question";
+};
+
+// ── Intent-specific reply builders ─────────────────────────────────────
+// Each returns a purpose-built reply that avoids the generic criteria
+// template.  These are ONLY used when the orchestrator is empty/failed.
+
+const buildZoneInquiryReply = (): string =>
+  "Trabajamos en Rosario y alrededores: Centro, Pichincha, Echesortu, Fisherton, Funes, zona norte y zona sur, entre otras. ¿Qué zona te interesa? Así te paso opciones concretas de ahí.";
+
+const buildSellAndBuyReply = (): string =>
+  "Sí, te podemos asesorar tanto en venta como en compra. ¿Querés que arranquemos por la tasación de tu propiedad actual o preferís empezar por buscar opciones nuevas?";
+
+const buildGeneralQuestionReply = (): string =>
+  "¡Hola! Soy el asistente de la inmobiliaria. Contame qué estás buscando o en qué te puedo ayudar, y te doy una mano.";
+
+const buildSmartCriteriaFallback = (text: string, missing: string[], state: Record<string, any>): string => {
+  // Only ask for criteria that are TRULY missing from state — never re-ask
+  // what the user already told us.
+  const trulyMissing = missing.filter(label => {
+    if (label === "zona" && state?.location) return false;
+    if (label === "tipo" && state?.propertyType) return false;
+    if (label === "ambientes" && state?.rooms) return false;
+    if (label === "presupuesto" && state?.maxPriceUsd) return false;
+    return true;
+  });
+
+  if (trulyMissing.length === 0) {
+    return "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
   }
 
-  return "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+  if (trulyMissing.length === 1) {
+    return `Para buscarte opciones concretas, solo me falta saber ${trulyMissing[0]}. ¿Me lo pasás?`;
+  }
+
+  return `Para buscarte opciones concretas, me falta saber: ${trulyMissing.join(" y ")}. Con eso te paso propiedades ahora mismo.`;
 };
 
 const formatTokkoOptionsMessages = (results: any[]): string[] => {
@@ -1616,11 +1664,18 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     }
   }
 
-  // ── Orchestrator + Tokko branches (only if no plan yet) ──────────────
+  // ── State + dedup (shared by intent router & orchestrator) ───────────
+  // Loaded early so the intent router can check known criteria.
+  let stateBefore: Record<string, any> = {};
+  let statePatchFromInbound: Record<string, any> = {};
+  let mergedStateForPrompt: Record<string, any> = {};
+  let inferredStage: string = "discovery";
+  let objections: string[] = [];
+  let fp = "";
+
   if (!replyPlan) {
-    let baseReply = "";
-    const stateBefore = await loadAgentState(ticket.id);
-    const fp = inboundFingerprint(text);
+    stateBefore = await loadAgentState(ticket.id);
+    fp = inboundFingerprint(text);
     const lastFp = String(stateBefore?.lastInboundFingerprint || "");
     const lastAutoReplyAt = Date.parse(String(stateBefore?.lastAutoReplyAt || ""));
     if (lastFp && lastFp === fp && Number.isFinite(lastAutoReplyAt) && (Date.now() - lastAutoReplyAt) < 45_000) {
@@ -1628,12 +1683,12 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       return;
     }
 
-    const statePatchFromInbound = extractAgentCriteriaPatch(text);
+    statePatchFromInbound = extractAgentCriteriaPatch(text);
     const previousStage = String(stateBefore?.salesStage || "").trim() || undefined;
-    const inferredStage = detectSalesStage(text, previousStage);
+    inferredStage = detectSalesStage(text, previousStage);
     const newObjection = extractObjection(text);
-    const objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
-    const mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
+    objections = dedupeList([...(Array.isArray(stateBefore?.objections) ? stateBefore.objections : []), ...(newObjection ? [newObjection] : [])]);
+    mergedStateForPrompt = { ...stateBefore, ...statePatchFromInbound, salesStage: inferredStage, objections };
     if (!previousStage || previousStage !== inferredStage) {
       await recordStageEvent({
         ticketId: ticket.id,
@@ -1643,6 +1698,84 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
         reason: "inbound_intent"
       });
     }
+  }
+
+  // ── Branch: intent router (BEFORE orchestrator) ──────────────────────
+  // Non-property-search intents get purpose-built replies without going
+  // through the orchestrator/Tokko pipeline.  This prevents the generic
+  // criteria template from firing on zone inquiries, sell+buy, or greetings.
+  if (!replyPlan) {
+    const intent = classifyInboundIntent(text);
+
+    if (intent === "zone_inquiry") {
+      const zoneReply = buildZoneInquiryReply();
+      replyPlan = {
+        text: zoneReply,
+        decisionKey: "intent_zone_inquiry",
+        decisionReason: "Cliente preguntó por zonas disponibles",
+        guardrailAction: "intent_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: zoneReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "intent_zone_inquiry",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    if (!replyPlan && intent === "sell_and_buy") {
+      const sbReply = buildSellAndBuyReply();
+      replyPlan = {
+        text: sbReply,
+        decisionKey: "intent_sell_and_buy",
+        decisionReason: "Cliente quiere vender y comprar",
+        guardrailAction: "intent_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: sbReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "intent_sell_and_buy",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    if (!replyPlan && intent === "general_question") {
+      const gqReply = buildGeneralQuestionReply();
+      replyPlan = {
+        text: gqReply,
+        decisionKey: "intent_general_question",
+        decisionReason: "Saludo o consulta general",
+        guardrailAction: "intent_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: gqReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "intent_general_question",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    // intent === "property_search" falls through to orchestrator below
+  }
+
+  // ── Orchestrator + Tokko branches (only if no plan yet) ──────────────
+  if (!replyPlan) {
+    let baseReply = "";
     const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
     const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
 
@@ -1671,7 +1804,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     }
 
     if (!baseReply) {
-      // Orchestrator returned empty — try direct Tokko or ask for missing criteria
+      // Orchestrator returned empty — try direct Tokko or smart criteria fallback
       const missing = getMissingCriteriaLabels(mergedStateForPrompt);
 
       // Flag: once Tokko direct succeeds, block fallback completely
@@ -1712,8 +1845,9 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       }
 
       // Fallback: only if Tokko direct did NOT handle it (guard clause)
+      // Uses smart criteria fallback that only asks for TRULY missing fields
       if (!replyPlan && !tokkoDirectHandled) {
-        const ask = buildIntentAwareFallback(text, missing);
+        const ask = buildSmartCriteriaFallback(text, missing, mergedStateForPrompt);
 
         replyPlan = {
           text: ask,
