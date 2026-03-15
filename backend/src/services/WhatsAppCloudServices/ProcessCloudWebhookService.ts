@@ -38,7 +38,6 @@ let decisionTableReady = false;
 let agentStateTableReady = false;
 let stageEventsTableReady = false;
 let outboundDedupeTableReady = false;
-const autoReplyTicketLock = new Map<number, number>();
 const agentTurnInFlight = new Set<number>();
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
@@ -1174,14 +1173,6 @@ const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map
 const inboundFingerprint = (text: string) =>
   crypto.createHash("sha1").update(String(text || "").trim().toLowerCase()).digest("hex");
 
-const isTicketAutoReplyLocked = (ticketId: number, windowMs = 45_000) => {
-  const at = autoReplyTicketLock.get(ticketId) || 0;
-  return at > 0 && (Date.now() - at) < windowMs;
-};
-
-const touchTicketAutoReplyLock = (ticketId: number) => {
-  autoReplyTicketLock.set(ticketId, Date.now());
-};
 
 const getMissingCriteriaLabels = (state: Record<string, any>): string[] => {
   const missing: string[] = [];
@@ -1652,25 +1643,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_inflight_skip", reason: "turn already in-flight", guardrailAction: "skip", responsePreview: "" });
     return;
   }
-  if (isTicketAutoReplyLocked(ticket.id)) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_locked", reason: "recent auto-reply lock", guardrailAction: "skip", responsePreview: "" });
-    return;
-  }
   agentTurnInFlight.add(ticket.id);
   try {
-  const recentBotMsg = await Message.findOne({
-    where: {
-      ticketId: ticket.id,
-      fromMe: true,
-      createdAt: { [Op.gte]: new Date(Date.now() - 45_000) }
-    },
-    order: [["createdAt", "DESC"]]
-  } as any);
-  if (recentBotMsg) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_recent_bot_message_skip", reason: "bot already replied recently", guardrailAction: "skip", responsePreview: "" });
-    return;
-  }
-
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
@@ -2079,7 +2053,6 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   for (const txt of outboundTexts) {
     const out = await sendManagedReply({ ticket, contact, text: txt });
     if (!out) return;
-    touchTicketAutoReplyLock(ticket.id);
   }
 
   await replyPlan.postActions();
