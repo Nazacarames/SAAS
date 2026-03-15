@@ -2106,6 +2106,15 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
   // handles serialisation; this is just a UX grace period.
   if (replyPlan.decisionKey === "no_reply_orchestrator_empty") {
     await new Promise((r) => setTimeout(r, 1500));
+
+    // If this very inbound already provided key criteria, never send
+    // a criteria-clarification reply for this turn.
+    const hasRoomsNow = Number(statePatchFromInbound?.rooms || 0) > 0;
+    const hasBudgetNow = Number(statePatchFromInbound?.maxPriceUsd || 0) > 0;
+    if (hasRoomsNow || hasBudgetNow) {
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "clarify_reply_blocked_current_criteria", reason: "current inbound already provides criteria", guardrailAction: "skip", responsePreview: "" });
+      return;
+    }
   }
 
   // Stale-turn guard: if a newer inbound exists for this ticket,
