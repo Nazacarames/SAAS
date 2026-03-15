@@ -1277,24 +1277,56 @@ const buildTokkoQueryFromState = (state: Record<string, any>, fallbackText: stri
 
 // ── Intent classification ──────────────────────────────────────────────
 // Classifies inbound text into a high-level intent BEFORE hitting the
-// criteria gate.  Only "property_search" goes through the orchestrator +
-// Tokko pipeline; the rest get purpose-built, non-repetitive replies.
-type InboundIntent = "zone_inquiry" | "sell_and_buy" | "general_question" | "property_search";
+// criteria gate.  Priority order is strict — higher-priority intents
+// are checked first so they never fall through to generic handlers.
+//
+// Priority (highest → lowest):
+//   1. legal_sensitive  → immediate handoff to human
+//   2. visit_intent     → schedule visit CTA
+//   3. angry_client     → empathy + concrete action
+//   4. zone_inquiry     → list zones
+//   5. sell_and_buy     → dual-flow guidance
+//   6. property_search  → orchestrator + Tokko
+//   7. general_question → greeting (ONLY if no context exists)
+type InboundIntent =
+  | "legal_sensitive"
+  | "visit_intent"
+  | "angry_client"
+  | "zone_inquiry"
+  | "sell_and_buy"
+  | "general_question"
+  | "property_search";
 
-const classifyInboundIntent = (text: string): InboundIntent => {
+const classifyInboundIntent = (text: string, state?: Record<string, any>): InboundIntent => {
   const low = String(text || "").toLowerCase();
 
-  // Zone inquiry: asking about available zones / neighborhoods
+  // 1. Legal sensitive — highest priority, always handoff
+  if (/\b(demanda|juicio|abogado|denuncia|defensa del consumidor|legal|ilegal|estafa|fraude|engaño|enga[nñ]o|mala praxis|garant[ií]a legal|incumplimiento|contrato\s+incumpl|escriban[oíi]a|sucesi[oó]n|embargo|inhibici[oó]n|mediaci[oó]n|ley\s+de|c[oó]digo\s+civil)\b/i.test(low)) {
+    return "legal_sensitive";
+  }
+
+  // 2. Visit intent — wants to schedule / coordinate a visit
+  if (/\b(visita|visitar|conocer\s+(el|la|los|las)|ver\s+(el|la|los|las)|quiero\s+ver|puedo\s+ver|ir\s+a\s+ver|recorrer|agendar|coordinar\s+visita|cuando\s+puedo\s+(ir|ver|visitar)|horarios?\s+de\s+visita|d[ií]a\s+y\s+(hora|franja)|agenda(me|mos)|coordinemos)\b/i.test(low)) {
+    return "visit_intent";
+  }
+
+  // 3. Angry client — frustration, complaint, strong negative emotion
+  if (/\b(harto|hart[oa]|cansad[oa]|indignado|molest[oa]|enojad[oa]|furioso|indignad[oa]|no me (ayudan|atienden|responden|contestan)|p[eé]simo|malísimo|terrible|desastre|vergüenza|me cans[eé]|siempre lo mismo|nunca (me |)(responden|contestan|ayudan)|no sirve|son unos?|queja|reclamo|denunciar)\b/i.test(low) ||
+      /\b(esto es una (porquer[ií]a|basura|vergüenza)|me tienen (hart[oa]|cansad[oa])|ya (van|son) \d+ veces)\b/i.test(low)) {
+    return "angry_client";
+  }
+
+  // 4. Zone inquiry: asking about available zones / neighborhoods
   if (/qu[eé]\s+zonas|qu[eé]\s+barrios|zonas\s+tienen|barrios\s+tienen|d[oó]nde\s+tienen|en\s+qu[eé]\s+zonas|qu[eé]\s+zonas\s+(trabajan|manejan|cubren)|zonas\s+disponibles/i.test(low)) {
     return "zone_inquiry";
   }
 
-  // Sell-and-buy: wants to both sell AND buy, or asks about selling/appraisal
+  // 5. Sell-and-buy: wants to both sell AND buy, or asks about selling/appraisal
   if (/vender\s*(y|e)\s*comprar|comprar\s*(y|e)\s*vender|quiero\s+vender|tasar|tasaci[oó]n|vendo\s+mi/i.test(low)) {
     return "sell_and_buy";
   }
 
-  // Property search: explicit search signals or ≥2 concrete criteria
+  // 6. Property search: explicit search signals or ≥2 concrete criteria
   const hasPropertyKeyword = /mostrame|buscá|busc[aá]|opciones|propiedades|departamentos|casas|busco\s+(casa|depto|departamento|ph)/i.test(low);
   const hasLocation = /(rosario|fisherton|funes|centro|pichincha|echesortu|abasto|palermo|belgrano|caballito|tigre|san isidro|zona\s+norte|zona\s+sur|zona\s+oeste)/i.test(low);
   const hasBudget = /(\d{2,3}(?:[\.,]\d{3})+|\d{5,8})\s*(usd|u\$s|d[oó]lares?)/i.test(low);
@@ -1306,7 +1338,20 @@ const classifyInboundIntent = (text: string): InboundIntent => {
     return "property_search";
   }
 
-  // General question: greetings, short messages, open-ended inquiries
+  // If the message has at least 1 criterion OR the state already has context,
+  // treat as property_search so we don't send a greeting when context exists.
+  if (criteriaCount >= 1) {
+    return "property_search";
+  }
+  const hasExistingContext = state && (state.location || state.propertyType || state.rooms || state.maxPriceUsd);
+  if (hasExistingContext && low.length > 3) {
+    // Message with existing conversation context → treat as context update,
+    // not a greeting.  Let the orchestrator handle it.
+    return "property_search";
+  }
+
+  // 7. General question: greetings, short messages, open-ended inquiries
+  //    ONLY when there is truly no context or criteria in the message.
   return "general_question";
 };
 
@@ -1322,6 +1367,30 @@ const buildSellAndBuyReply = (): string =>
 
 const buildGeneralQuestionReply = (): string =>
   "¡Hola! Soy el asistente de la inmobiliaria. Contame qué estás buscando o en qué te puedo ayudar, y te doy una mano.";
+
+const buildLegalSensitiveHandoffReply = (): string =>
+  "Entiendo tu consulta. Este tipo de temas requiere atención personalizada de un asesor. Te paso ahora con un humano para que te ayude directamente.";
+
+const buildVisitIntentReply = (state: Record<string, any>): string => {
+  const parts: string[] = [];
+  if (state?.location) parts.push(state.location);
+  if (state?.propertyType) parts.push(state.propertyType);
+  const context = parts.length > 0 ? ` para ver ${parts.join(" en ")}` : "";
+  return `Perfecto, coordinemos una visita${context}. ¿Qué día y franja horaria te quedan bien?`;
+};
+
+const buildAngryClientReply = (state: Record<string, any>): string => {
+  const hasContext = state?.location || state?.propertyType || state?.rooms || state?.maxPriceUsd;
+  if (hasContext) {
+    const contextParts: string[] = [];
+    if (state.propertyType) contextParts.push(state.propertyType);
+    if (state.location) contextParts.push(`en ${state.location}`);
+    if (state.rooms) contextParts.push(`${state.rooms} ambientes`);
+    const summary = contextParts.length > 0 ? contextParts.join(", ") : "lo que buscás";
+    return `Entiendo tu molestia y te pido disculpas. Voy a priorizarte ahora: ya tengo registrado que buscás ${summary}. Te paso opciones concretas o, si preferís, te conecto con un asesor humano directo.`;
+  }
+  return "Entiendo tu molestia y te pido disculpas. Quiero ayudarte bien: contame qué necesitás y te doy una solución concreta ahora mismo, o si preferís te paso con un asesor humano.";
+};
 
 const buildSmartCriteriaFallback = (text: string, missing: string[], state: Record<string, any>): string => {
   // Only ask for criteria that are TRULY missing from state — never re-ask
@@ -1702,12 +1771,88 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
 
   // ── Branch: intent router (BEFORE orchestrator) ──────────────────────
   // Non-property-search intents get purpose-built replies without going
-  // through the orchestrator/Tokko pipeline.  This prevents the generic
-  // criteria template from firing on zone inquiries, sell+buy, or greetings.
+  // through the orchestrator/Tokko pipeline.  Priority order is strict:
+  //   1. legal_sensitive → handoff
+  //   2. visit_intent → schedule CTA
+  //   3. angry_client → empathy + action
+  //   4. zone_inquiry / sell_and_buy → domain-specific
+  //   5. general_question → greeting (only if no context)
+  //   6. property_search → falls through to orchestrator
   if (!replyPlan) {
-    const intent = classifyInboundIntent(text);
+    const intent = classifyInboundIntent(text, mergedStateForPrompt);
 
-    if (intent === "zone_inquiry") {
+    // ── 1. Legal sensitive → immediate human handoff ───────────────────
+    if (intent === "legal_sensitive") {
+      const legalReply = buildLegalSensitiveHandoffReply();
+      replyPlan = {
+        text: legalReply,
+        decisionKey: "intent_legal_sensitive",
+        decisionReason: "Consulta legal/sensible detectada",
+        guardrailAction: "handoff",
+        preActions: async () => {
+          await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);
+        },
+        postActions: async () => {
+          await ticket.update({ lastMessage: legalReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "intent_legal_handoff",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    // ── 2. Visit intent → schedule CTA ─────────────────────────────────
+    if (!replyPlan && intent === "visit_intent") {
+      const visitReply = buildVisitIntentReply(mergedStateForPrompt);
+      replyPlan = {
+        text: visitReply,
+        decisionKey: "intent_visit",
+        decisionReason: "Cliente quiere coordinar visita",
+        guardrailAction: "intent_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: visitReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: "visit",
+            objections,
+            lastOutcome: "intent_visit",
+            nextBestAction: "schedule_visit",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    // ── 3. Angry client → empathy + concrete action ────────────────────
+    if (!replyPlan && intent === "angry_client") {
+      const angryReply = buildAngryClientReply(mergedStateForPrompt);
+      replyPlan = {
+        text: angryReply,
+        decisionKey: "intent_angry_client",
+        decisionReason: "Cliente frustrado/enojado",
+        guardrailAction: "intent_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: angryReply, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections: dedupeList([...objections, "frustration"]),
+            lastOutcome: "intent_angry_client",
+            lastInboundFingerprint: fp,
+            lastAutoReplyAt: new Date().toISOString()
+          });
+        }
+      };
+    }
+
+    // ── 4. Zone inquiry ────────────────────────────────────────────────
+    if (!replyPlan && intent === "zone_inquiry") {
       const zoneReply = buildZoneInquiryReply();
       replyPlan = {
         text: zoneReply,
@@ -1728,6 +1873,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       };
     }
 
+    // ── 5. Sell and buy ────────────────────────────────────────────────
     if (!replyPlan && intent === "sell_and_buy") {
       const sbReply = buildSellAndBuyReply();
       replyPlan = {
@@ -1749,6 +1895,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       };
     }
 
+    // ── 6. General question (only if NO existing context) ──────────────
     if (!replyPlan && intent === "general_question") {
       const gqReply = buildGeneralQuestionReply();
       replyPlan = {
