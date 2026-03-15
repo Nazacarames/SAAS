@@ -1404,7 +1404,7 @@ const buildSmartCriteriaFallback = (text: string, missing: string[], state: Reco
   });
 
   if (trulyMissing.length === 0) {
-    return "No encontré opciones exactas con esos criterios. Si querés, te muestro alternativas cercanas y ajustamos zona o presupuesto.";
+    return "No encontré opciones exactas con esos criterios. Si querés, podemos ajustar algún filtro y pruebo de nuevo.";
   }
 
   if (trulyMissing.length === 1) {

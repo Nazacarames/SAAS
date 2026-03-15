@@ -304,4 +304,32 @@ describe("critical/conversational-quality", () => {
     // Must NOT be generic greeting
     expect(reply).not.toContain(GENERIC_GREETING);
   });
+
+  // 6. switch_topic with inline criteria: must NOT re-ask for ambientes/presupuesto
+  it("switch_topic with inline criteria → does NOT re-ask ambientes or presupuesto", async () => {
+    setupCommonMocks({
+      existingState: {
+        location: "Fisherton",
+        propertyType: "casa",
+        salesStage: "qualification"
+      }
+    });
+
+    await processCloudWebhookPayload(
+      buildPayload("ok, 2 ambientes hasta 90000 usd")
+    );
+
+    const sent = getSentTexts();
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const reply = sent.join("\n");
+
+    // Must NOT re-ask for ambientes (provided in message)
+    expect(reply).not.toMatch(/ambientes/i);
+    // Must NOT re-ask for presupuesto (provided in message)
+    expect(reply).not.toMatch(/presupuesto/i);
+    // Must NOT be generic criteria template
+    expect(reply).not.toContain(CRITERIA_TEMPLATE);
+    // Must NOT be generic greeting
+    expect(reply).not.toContain(GENERIC_GREETING);
+  });
 });
