@@ -2124,6 +2124,20 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
     return;
   }
 
+  // Last-line guard: never send "me falta saber ambientes/presupuesto"
+  // when latest inbound already includes those criteria.
+  const allPlannedText = [replyPlan.text, ...(Array.isArray(replyPlan.messages) ? replyPlan.messages : [])].join(" \n ").toLowerCase();
+  if (allPlannedText.includes("me falta saber") && (allPlannedText.includes("ambientes") || allPlannedText.includes("presupuesto"))) {
+    const latestInbound = await Message.findOne({ where: { ticketId: ticket.id, fromMe: false }, order: [["createdAt", "DESC"]] } as any);
+    const latestPatch = extractAgentCriteriaPatch(String((latestInbound as any)?.body || ""));
+    const hasRoomsLatest = Number(latestPatch?.rooms || 0) > 0;
+    const hasBudgetLatest = Number(latestPatch?.maxPriceUsd || 0) > 0;
+    if (hasRoomsLatest || hasBudgetLatest) {
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "blocked_redundant_missing_criteria_reply", reason: "latest inbound already has rooms/budget", guardrailAction: "skip", responsePreview: "" });
+      return;
+    }
+  }
+
   await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: replyPlan.decisionKey, reason: replyPlan.decisionReason, guardrailAction: replyPlan.guardrailAction, responsePreview: replyPlan.text.slice(0, 240) });
 
   if (replyPlan.preActions) {
