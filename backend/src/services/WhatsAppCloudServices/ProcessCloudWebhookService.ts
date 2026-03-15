@@ -1187,8 +1187,9 @@ const buildSalesObjective = (state: Record<string, any>, incomingText: string): 
   const t = String(incomingText || "").toLowerCase();
   if (state?.salesStage === "closing") return "Objetivo de este turno: concretar siguiente paso claro (visita, reserva o llamada).";
   if (state?.salesStage === "visit") return "Objetivo de este turno: proponer/agendar visita con día y franja concreta.";
-  if (getMissingCriteriaLabels(state).length > 0) {
-    return "Objetivo de este turno: calificar lead y completar faltantes (zona, tipo, ambientes, presupuesto) antes de cerrar.";
+  const missingLabels = getMissingCriteriaLabels(state);
+  if (missingLabels.length > 0) {
+    return `Objetivo de este turno: calificar lead y completar faltantes (${missingLabels.join(", ")}) antes de cerrar. NO repitas ni preguntes criterios que el cliente ya informó.`;
   }
   if (/mostrame|buscá|opciones|propiedades|departamentos|casas/.test(t)) {
     return "Objetivo de este turno: mostrar opciones concretas y cerrar con pregunta de avance (visita o ajuste de filtro).";
@@ -1209,6 +1210,23 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
   if (objective) parts.push(objective);
   if (!parts.length) return "";
   return `Contexto acumulado del cliente: ${parts.join(" | ")}.`;
+};
+
+// Strip sentences that re-ask for criteria the current turn already provided.
+// E.g. if the user said "2 ambientes hasta 90000 usd", remove any sentence
+// in the reply that asks about ambientes or presupuesto.
+const stripRedundantCriteriaAsk = (reply: string, patch: Record<string, any>): string => {
+  if (!reply || !patch || typeof patch !== "object") return reply;
+  const labels: string[] = [];
+  if (patch.rooms) labels.push("ambientes?|dormitorios?");
+  if (patch.maxPriceUsd) labels.push("presupuesto|precio");
+  if (patch.location) labels.push("zona|barrio|ubicaci[oó]n");
+  if (patch.propertyType) labels.push("tipo\\s+de\\s+propiedad|tipo");
+  if (labels.length === 0) return reply;
+  // Remove sentences that ask for already-provided criteria
+  const askPattern = new RegExp(`[^.!?\\n]*\\b(falta|decime|necesito|pas[aá]me|indic[aá]me|cu[aá]ntos?)[^.!?\\n]*(${labels.join("|")})[^.!?\\n]*[.!?]?`, "gi");
+  const cleaned = reply.replace(askPattern, "").replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
+  return cleaned || reply;
 };
 
 const stripAgentFiller = (reply: string): string => {
@@ -1248,8 +1266,9 @@ const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
     return `${base}\n\nSi querés, te filtro opciones un poco más accesibles en la misma zona.`;
   }
 
-  if (!state?.location || !state?.propertyType || !state?.maxPriceUsd || !state?.rooms) {
-    return `${base}\n\nPara afinarte bien la búsqueda: zona, tipo, ambientes y presupuesto aproximado.`;
+  const playMissing = getMissingCriteriaLabels(state);
+  if (playMissing.length > 0) {
+    return `${base}\n\nPara afinarte bien la búsqueda, me falta: ${playMissing.join(" y ")}.`;
   }
 
   return `${base}\n\nSi querés, te paso una selección más precisa y avanzamos con el próximo paso.`;
@@ -1968,7 +1987,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       // Fallback: only if Tokko direct did NOT handle it (guard clause)
       // Uses smart criteria fallback that only asks for TRULY missing fields
       if (!replyPlan && !tokkoDirectHandled) {
-        const ask = buildSmartCriteriaFallback(text, missing, mergedStateForPrompt);
+        const rawAsk = buildSmartCriteriaFallback(text, missing, mergedStateForPrompt);
+        const ask = stripRedundantCriteriaAsk(rawAsk, statePatchFromInbound);
 
         replyPlan = {
           text: ask,
@@ -1991,9 +2011,10 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
         };
       }
     } else {
-      // Orchestrator returned a reply — apply playbook + guardrails
+      // Orchestrator returned a reply — apply playbook + strip redundant asks + guardrails
       const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt);
-      const guardrail = await applyGuardrails({ text, reply: playbookReply, conversationType });
+      const cleanedReply = stripRedundantCriteriaAsk(playbookReply, statePatchFromInbound);
+      const guardrail = await applyGuardrails({ text, reply: cleanedReply, conversationType });
 
       if (guardrail.handoff) {
         const txt = "Gracias por tu mensaje. Te paso con un asesor humano para tratar este tema con prioridad.";

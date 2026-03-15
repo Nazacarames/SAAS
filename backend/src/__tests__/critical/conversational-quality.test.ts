@@ -332,4 +332,75 @@ describe("critical/conversational-quality", () => {
     // Must NOT be generic greeting
     expect(reply).not.toContain(GENERIC_GREETING);
   });
+
+  // 7. 3-message switch_topic: zone_inquiry mid-flow, then criteria completion
+  //    Simulates: 1) "Busco depto en centro" (state set), 2) "que zonas manejan?"
+  //    (zone_inquiry), 3) "ok, 2 ambientes hasta 90000 usd" (completes criteria).
+  //    Step 3 must NOT re-ask for ambientes or presupuesto, must NOT send fallback.
+  it("3-step switch_topic: criteria in last turn → no re-ask, no conflicting fallback", async () => {
+    // After steps 1+2, accumulated state has location+propertyType from step 1
+    // and zone_inquiry outcome from step 2.  Step 3 provides rooms+budget.
+    setupCommonMocks({
+      existingState: {
+        location: "centro",
+        propertyType: "departamento",
+        salesStage: "qualification",
+        lastOutcome: "intent_zone_inquiry"
+      }
+    });
+
+    await processCloudWebhookPayload(
+      buildPayload("ok, 2 ambientes hasta 90000 usd")
+    );
+
+    const sent = getSentTexts();
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const reply = sent.join("\n");
+
+    // Must NOT mention "me falta saber" for criteria just provided
+    expect(reply).not.toMatch(/falta\s+saber.*ambientes/i);
+    expect(reply).not.toMatch(/falta\s+saber.*presupuesto/i);
+    // Must NOT re-ask any criteria already provided in this turn or prior
+    expect(reply).not.toMatch(/decime.*ambientes/i);
+    expect(reply).not.toMatch(/decime.*presupuesto/i);
+    // Must NOT be generic greeting
+    expect(reply).not.toContain(GENERIC_GREETING);
+    // Must NOT be criteria template
+    expect(reply).not.toContain(CRITERIA_TEMPLATE);
+    // Should get a coherent response (Tokko results, "no encontré" with adjust, or orchestrator reply)
+    expect(reply.length).toBeGreaterThan(10);
+  });
+
+  // 8. Orchestrator-generated criteria re-ask is stripped when current turn provides values
+  it("orchestrator reply asking for ambientes → stripped when user already provided them", async () => {
+    const { mockTicket } = setupCommonMocks({
+      existingState: {
+        location: "centro",
+        propertyType: "departamento",
+        salesStage: "qualification"
+      }
+    });
+
+    // Orchestrator returns a reply that incorrectly asks for ambientes/presupuesto
+    (generateConversationalReply as jest.Mock).mockResolvedValue({
+      reply: "Perfecto, necesito que me pases cuántos ambientes buscás y tu presupuesto. Así te filtro mejor.",
+      model: "gpt-4o-mini",
+      usedFallback: false,
+      toolCallCount: 0,
+      knowledge: [],
+      tokko: { used: false, results: 0 }
+    });
+
+    await processCloudWebhookPayload(
+      buildPayload("ok, 2 ambientes hasta 90000 usd")
+    );
+
+    const sent = getSentTexts();
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const reply = sent.join("\n");
+
+    // The redundant criteria ask should have been stripped
+    expect(reply).not.toMatch(/cu[aá]ntos?\s+ambientes/i);
+    expect(reply).not.toMatch(/presupuesto/i);
+  });
 });
