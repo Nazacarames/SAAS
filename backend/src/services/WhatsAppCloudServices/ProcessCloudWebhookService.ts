@@ -2074,9 +2074,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessag
   // branch won.  If replyPlan is null here, no branch decided to reply.
   if (!replyPlan) return;
 
-  // Stale-turn guard: if a newer inbound exists for this ticket,
-  // skip sending this turn's reply to avoid outdated/intermediate responses.
-  if (inboundMessageId) {
+  const hasNewerInboundThanCurrent = async () => {
+    if (!inboundMessageId) return false;
     const latestInbound = await Message.findOne({
       where: { ticketId: ticket.id, fromMe: false },
       order: [["createdAt", "DESC"]]
@@ -2084,12 +2083,19 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessag
     const latestId = String((latestInbound as any)?.id || "");
     const latestAt = new Date((latestInbound as any)?.createdAt || 0).getTime();
     const currentAt = new Date(inboundCreatedAt || 0).getTime();
+    return Boolean(latestId && latestId !== inboundMessageId && (!Number.isFinite(currentAt) || latestAt >= currentAt));
+  };
 
-    const hasNewerInbound = latestId && latestId !== inboundMessageId && (!Number.isFinite(currentAt) || latestAt >= currentAt);
-    if (hasNewerInbound) {
-      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "stale_turn_skipped", reason: "newer inbound message already exists", guardrailAction: "skip", responsePreview: "" });
-      return;
-    }
+  // Debounce criteria-clarification replies to reduce stale asks during rapid multi-turn typing.
+  if (replyPlan.decisionKey === "no_reply_orchestrator_empty") {
+    await new Promise((r) => setTimeout(r, 12000));
+  }
+
+  // Stale-turn guard: if a newer inbound exists for this ticket,
+  // skip sending this turn's reply to avoid outdated/intermediate responses.
+  if (await hasNewerInboundThanCurrent()) {
+    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "stale_turn_skipped", reason: "newer inbound message already exists", guardrailAction: "skip", responsePreview: "" });
+    return;
   }
 
   await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: replyPlan.decisionKey, reason: replyPlan.decisionReason, guardrailAction: replyPlan.guardrailAction, responsePreview: replyPlan.text.slice(0, 240) });
