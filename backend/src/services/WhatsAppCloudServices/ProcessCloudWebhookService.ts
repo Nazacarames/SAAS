@@ -2059,6 +2059,16 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     }
   }
 
+  // ── Hard guard: never send a "me falta" for criteria THIS turn provided ─
+  // Catch-all safety net regardless of which branch produced the plan.
+  if (replyPlan && statePatchFromInbound && Object.keys(statePatchFromInbound).length > 0) {
+    const sanitize = (t: string) => stripRedundantCriteriaAsk(t, statePatchFromInbound);
+    replyPlan.text = sanitize(replyPlan.text);
+    if (Array.isArray(replyPlan.messages)) {
+      replyPlan.messages = replyPlan.messages.map(sanitize);
+    }
+  }
+
   // ── Single send gate ─────────────────────────────────────────────────
   // Exactly ONE sendManagedReply call per inbound, regardless of which
   // branch won.  If replyPlan is null here, no branch decided to reply.

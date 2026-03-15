@@ -439,4 +439,45 @@ describe("critical/conversational-quality", () => {
     expect(reply).not.toMatch(/cu[aá]ntos?\s+ambientes/i);
     expect(reply).not.toMatch(/presupuesto/i);
   });
+
+  // 10. EXACT production bug (ticket 131): orchestrator returns "me falta saber:
+  //     ambientes y presupuesto" when user just provided both in "ok, 2 ambientes
+  //     hasta 90000 usd".  Hard guard must block this even if strip regex fails.
+  it("production bug: 'me falta saber: ambientes y presupuesto' blocked when turn has both", async () => {
+    setupCommonMocks({
+      existingState: {
+        location: "centro",
+        propertyType: "departamento",
+        salesStage: "qualification",
+        lastOutcome: "intent_zone_inquiry"
+      }
+    });
+
+    // Orchestrator returns the EXACT production-observed bad text
+    (generateConversationalReply as jest.Mock).mockResolvedValue({
+      reply: "Para buscarte opciones concretas, me falta saber: ambientes y presupuesto. Con eso te paso propiedades ahora mismo.",
+      model: "gpt-4o-mini",
+      usedFallback: false,
+      toolCallCount: 0,
+      knowledge: [],
+      tokko: { used: false, results: 0 }
+    });
+
+    await processCloudWebhookPayload(
+      buildPayload("ok, 2 ambientes hasta 90000 usd")
+    );
+
+    const sent = getSentTexts();
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const reply = sent.join("\n");
+
+    // The EXACT production bad text must be blocked
+    expect(reply).not.toMatch(/me falta saber.*ambientes/i);
+    expect(reply).not.toMatch(/me falta saber.*presupuesto/i);
+    expect(reply).not.toMatch(/falta saber: ambientes y presupuesto/i);
+    // Must NOT echo the bad text back verbatim
+    expect(reply).not.toContain("ambientes y presupuesto");
+    // Must get a safe response instead
+    expect(reply.length).toBeGreaterThan(10);
+  });
 });
