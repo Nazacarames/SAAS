@@ -38,7 +38,11 @@ let decisionTableReady = false;
 let agentStateTableReady = false;
 let stageEventsTableReady = false;
 let outboundDedupeTableReady = false;
-const agentTurnInFlight = new Set<number>();
+// Per-ticket turn queue: serialises inbound processing so concurrent
+// webhook deliveries for the same ticket execute in FIFO order instead
+// of skipping.  This guarantees that turn N+1 always sees the state
+// saved by turn N and prevents stale-state fallback bugs.
+const ticketTurnQueue = new Map<number, Promise<void>>();
 let outboundDedupeLastPruneAt = 0;
 let inboundReplayTableReady = false;
 let inboundReplayLastPruneAt = 0;
@@ -1658,14 +1662,25 @@ const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): P
   return "Entendido 👍 ¿Querés que te ayude con precios, agenda de cita, o soporte?";
 };
 
-const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; incomingText: string; inboundMessageId?: string; inboundCreatedAt?: Date }) => {
+const runAutonomousAgent = ({ ticket, contact, incomingText, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; incomingText: string; inboundMessageId?: string; inboundCreatedAt?: Date }): Promise<void> => {
   const text = String(incomingText || "").trim();
-  if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
-  if (agentTurnInFlight.has(ticket.id)) {
-    await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType: "sales", decisionKey: "agent_turn_inflight_skip", reason: "turn already in-flight", guardrailAction: "skip", responsePreview: "" });
-    return;
-  }
-  agentTurnInFlight.add(ticket.id);
+  if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return Promise.resolve();
+
+  // Queue: serialize turns per ticket (FIFO).  Previous skip-Set silently
+  // dropped concurrent turns — the queue ensures each inbound processes
+  // sequentially so turn N+1 always sees turn N's saved state.
+  const prev = ticketTurnQueue.get(ticket.id) ?? Promise.resolve();
+  const turn = prev.catch(() => {}).then(() =>
+    executeAgentTurn({ ticket, contact, text, inboundMessageId, inboundCreatedAt })
+  );
+  ticketTurnQueue.set(ticket.id, turn);
+  turn.catch(() => {}).finally(() => {
+    if (ticketTurnQueue.get(ticket.id) === turn) ticketTurnQueue.delete(ticket.id);
+  });
+  return turn;
+};
+
+const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; text: string; inboundMessageId?: string; inboundCreatedAt?: Date }) => {
   try {
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
@@ -2086,9 +2101,11 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessag
     return Boolean(latestId && latestId !== inboundMessageId && (!Number.isFinite(currentAt) || latestAt >= currentAt));
   };
 
-  // Debounce criteria-clarification replies to reduce stale asks during rapid multi-turn typing.
+  // Short debounce for criteria-clarification: gives user time to finish
+  // typing before we ask for missing fields.  The per-ticket turn queue
+  // handles serialisation; this is just a UX grace period.
   if (replyPlan.decisionKey === "no_reply_orchestrator_empty") {
-    await new Promise((r) => setTimeout(r, 12000));
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   // Stale-turn guard: if a newer inbound exists for this ticket,
@@ -2114,8 +2131,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessag
   }
 
   await replyPlan.postActions();
-  } finally {
-    agentTurnInFlight.delete(ticket.id);
+  } catch (err) {
+    console.error("[wa-cloud][agent] executeAgentTurn error:", (err as any)?.message || err);
   }
 };
 
