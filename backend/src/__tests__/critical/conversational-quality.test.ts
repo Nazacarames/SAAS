@@ -381,9 +381,9 @@ describe("critical/conversational-quality", () => {
       }
     });
 
-    // Orchestrator returns a reply that incorrectly asks for ambientes/presupuesto
+    // Orchestrator returns a reply that is ENTIRELY a criteria re-ask
     (generateConversationalReply as jest.Mock).mockResolvedValue({
-      reply: "Perfecto, necesito que me pases cuántos ambientes buscás y tu presupuesto. Así te filtro mejor.",
+      reply: "Decime cuántos ambientes necesitás y qué presupuesto tenés.",
       model: "gpt-4o-mini",
       usedFallback: false,
       toolCallCount: 0,
@@ -399,7 +399,43 @@ describe("critical/conversational-quality", () => {
     expect(sent.length).toBeGreaterThanOrEqual(1);
     const reply = sent.join("\n");
 
-    // The redundant criteria ask should have been stripped
+    // The redundant criteria ask should have been stripped — must NOT echo back the bad text
+    expect(reply).not.toMatch(/cu[aá]ntos?\s+ambientes/i);
+    expect(reply).not.toMatch(/presupuesto/i);
+    // Should get a safe generic acknowledgement instead
+    expect(reply.length).toBeGreaterThan(10);
+  });
+
+  // 9. Orchestrator reply with mixed content: useful part kept, criteria ask stripped
+  it("orchestrator reply with mixed useful + criteria re-ask → keeps useful part", async () => {
+    setupCommonMocks({
+      existingState: {
+        location: "centro",
+        propertyType: "departamento",
+        salesStage: "qualification"
+      }
+    });
+
+    (generateConversationalReply as jest.Mock).mockResolvedValue({
+      reply: "Tengo varias opciones en centro que te pueden interesar. Necesito que me pases cuántos ambientes buscás y tu presupuesto.",
+      model: "gpt-4o-mini",
+      usedFallback: false,
+      toolCallCount: 0,
+      knowledge: [],
+      tokko: { used: false, results: 0 }
+    });
+
+    await processCloudWebhookPayload(
+      buildPayload("ok, 2 ambientes hasta 90000 usd")
+    );
+
+    const sent = getSentTexts();
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const reply = sent.join("\n");
+
+    // Must keep the useful part
+    expect(reply).toMatch(/opciones en centro/i);
+    // Must strip the criteria re-ask
     expect(reply).not.toMatch(/cu[aá]ntos?\s+ambientes/i);
     expect(reply).not.toMatch(/presupuesto/i);
   });

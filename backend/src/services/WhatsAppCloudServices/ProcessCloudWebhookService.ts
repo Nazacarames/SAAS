@@ -1224,9 +1224,12 @@ const stripRedundantCriteriaAsk = (reply: string, patch: Record<string, any>): s
   if (patch.propertyType) labels.push("tipo\\s+de\\s+propiedad|tipo");
   if (labels.length === 0) return reply;
   // Remove sentences that ask for already-provided criteria
-  const askPattern = new RegExp(`[^.!?\\n]*\\b(falta|decime|necesito|pas[aá]me|indic[aá]me|cu[aá]ntos?)[^.!?\\n]*(${labels.join("|")})[^.!?\\n]*[.!?]?`, "gi");
+  const askPattern = new RegExp(`[^.!?\\n]*\\b(falta|me falta|decime|necesito|pas[aá]me|indic[aá]me|cu[aá]ntos?|afinarte)[^.!?\\n]*(${labels.join("|")})[^.!?\\n]*[.!?]?`, "gi");
   const cleaned = reply.replace(askPattern, "").replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
-  return cleaned || reply;
+  // If stripping removed everything, the entire reply was a redundant criteria
+  // ask.  Return a safe generic acknowledgement instead of the original text.
+  if (!cleaned) return "Perfecto, ya tengo esos datos. Dame un momento que te busco opciones.";
+  return cleaned;
 };
 
 const stripAgentFiller = (reply: string): string => {
