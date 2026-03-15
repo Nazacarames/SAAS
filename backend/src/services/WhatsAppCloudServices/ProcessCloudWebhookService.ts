@@ -1658,7 +1658,7 @@ const aiReplyFor = async (text: string, companyId: number, metaFormHint = ""): P
   return "Entendido 👍 ¿Querés que te ayude con precios, agenda de cita, o soporte?";
 };
 
-const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: any; contact: any; incomingText: string }) => {
+const runAutonomousAgent = async ({ ticket, contact, incomingText, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; incomingText: string; inboundMessageId?: string; inboundCreatedAt?: Date }) => {
   const text = String(incomingText || "").trim();
   if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
   if (agentTurnInFlight.has(ticket.id)) {
@@ -2074,6 +2074,24 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   // branch won.  If replyPlan is null here, no branch decided to reply.
   if (!replyPlan) return;
 
+  // Stale-turn guard: if a newer inbound exists for this ticket,
+  // skip sending this turn's reply to avoid outdated/intermediate responses.
+  if (inboundMessageId) {
+    const latestInbound = await Message.findOne({
+      where: { ticketId: ticket.id, fromMe: false },
+      order: [["createdAt", "DESC"]]
+    } as any);
+    const latestId = String((latestInbound as any)?.id || "");
+    const latestAt = new Date((latestInbound as any)?.createdAt || 0).getTime();
+    const currentAt = new Date(inboundCreatedAt || 0).getTime();
+
+    const hasNewerInbound = latestId && latestId !== inboundMessageId && (!Number.isFinite(currentAt) || latestAt >= currentAt);
+    if (hasNewerInbound) {
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "stale_turn_skipped", reason: "newer inbound message already exists", guardrailAction: "skip", responsePreview: "" });
+      return;
+    }
+  }
+
   await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: replyPlan.decisionKey, reason: replyPlan.decisionReason, guardrailAction: replyPlan.guardrailAction, responsePreview: replyPlan.text.slice(0, 240) });
 
   if (replyPlan.preActions) {
@@ -2278,7 +2296,7 @@ export const processCloudWebhookPayload = async (payload: MetaWebhookPayload) =>
           try { await (contact as any).update({ leadStatus: "unread", lastInteractionAt: new Date() } as any); } catch {}
           recordInboundMessage({ fromMe: false, createdAt });
           const io = getIO(); io.to(`ticket-${ticket.id}`).emit("appMessage", { action: "create", message, ticket, contact }); io.to("notification").emit("notification", { type: "new-message", ticketId: ticket.id, contactName: contact.name });
-          try { await runAutonomousAgent({ ticket, contact, incomingText: body }); } catch (agentErr: any) { console.error("[wa-cloud][agent] error:", agentErr?.message || agentErr); }
+          try { await runAutonomousAgent({ ticket, contact, incomingText: body, inboundMessageId: String(message.id), inboundCreatedAt: createdAt }); } catch (agentErr: any) { console.error("[wa-cloud][agent] error:", agentErr?.message || agentErr); }
           bumpHardeningMetric("inbound.processed_ok");
           processed += 1;
         } catch (error) {
