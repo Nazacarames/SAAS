@@ -2170,7 +2170,33 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
     ? replyPlan.messages
     : [replyPlan.text];
 
+  const filteredOutboundTexts: string[] = [];
   for (const txt of outboundTexts) {
+    const lowTxt = String(txt || "").toLowerCase();
+    const isRedundantMissingCriteriaMsg =
+      lowTxt.includes("me falta saber") &&
+      (lowTxt.includes("ambientes") || lowTxt.includes("presupuesto"));
+
+    if (isRedundantMissingCriteriaMsg) {
+      const latestInbound = await Message.findOne({
+        where: { ticketId: ticket.id, fromMe: false },
+        order: [["createdAt", "DESC"]]
+      } as any);
+      const latestPatch = extractAgentCriteriaPatch(String((latestInbound as any)?.body || ""));
+      const hasRoomsLatest = Number(latestPatch?.rooms || 0) > 0;
+      const hasBudgetLatest = Number(latestPatch?.maxPriceUsd || 0) > 0;
+      if (hasRoomsLatest || hasBudgetLatest) {
+        await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "skip_redundant_missing_criteria_text", reason: "latest inbound already includes rooms/budget", guardrailAction: "skip", responsePreview: "" });
+        continue;
+      }
+    }
+
+    filteredOutboundTexts.push(txt);
+  }
+
+  if (!filteredOutboundTexts.length) return;
+
+  for (const txt of filteredOutboundTexts) {
     const out = await sendManagedReply({ ticket, contact, text: txt });
     if (!out) return;
   }
