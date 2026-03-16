@@ -1791,6 +1791,23 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
   //   6. property_search → falls through to orchestrator
   if (!replyPlan) {
     const intent = classifyInboundIntent(text, mergedStateForPrompt);
+    const missing = getMissingCriteriaLabels(mergedStateForPrompt);
+
+    // ── Turn trace: structured log for debugging multi-turn issues ────
+    console.log("[wa-cloud][turn-trace]", JSON.stringify({
+      ticketId: ticket.id,
+      inboundMessageId: inboundMessageId || null,
+      intent,
+      statePatchFromInbound,
+      missing,
+      mergedCriteria: {
+        location: mergedStateForPrompt?.location || null,
+        propertyType: mergedStateForPrompt?.propertyType || null,
+        rooms: mergedStateForPrompt?.rooms || null,
+        maxPriceUsd: mergedStateForPrompt?.maxPriceUsd || null
+      },
+      ts: new Date().toISOString()
+    }));
 
     // ── 1. Legal sensitive → immediate human handoff ───────────────────
     if (intent === "legal_sensitive") {
@@ -2049,7 +2066,9 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
           }
         };
       } else {
-        const reply = guardrail.finalReply || baseReply;
+        // Use cleanedReply (stripped) as fallback — NEVER baseReply which
+        // may contain criteria re-asks that stripRedundantCriteriaAsk removed.
+        const reply = guardrail.finalReply || cleanedReply || baseReply;
         replyPlan = {
           text: reply,
           decisionKey: "reply",
@@ -2107,12 +2126,15 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
   if (replyPlan.decisionKey === "no_reply_orchestrator_empty") {
     await new Promise((r) => setTimeout(r, 1500));
 
-    // If this very inbound already provided key criteria, never send
-    // a criteria-clarification reply for this turn.
+    // Block only if the reply TEXT actually asks for criteria the user
+    // just provided.  "No encontré opciones" is a valid response and
+    // must NOT be blocked.
+    const replyLow = replyPlan.text.toLowerCase();
+    const asksForCriteria = /falta|decime|necesito|cu[aá]ntos?\s+ambientes|presupuesto/.test(replyLow);
     const hasRoomsNow = Number(statePatchFromInbound?.rooms || 0) > 0;
     const hasBudgetNow = Number(statePatchFromInbound?.maxPriceUsd || 0) > 0;
-    if (hasRoomsNow || hasBudgetNow) {
-      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "clarify_reply_blocked_current_criteria", reason: "current inbound already provides criteria", guardrailAction: "skip", responsePreview: "" });
+    if (asksForCriteria && (hasRoomsNow || hasBudgetNow)) {
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "clarify_reply_blocked_current_criteria", reason: "reply asks for criteria this inbound already provides", guardrailAction: "skip", responsePreview: replyPlan.text.slice(0, 200) });
       return;
     }
   }
