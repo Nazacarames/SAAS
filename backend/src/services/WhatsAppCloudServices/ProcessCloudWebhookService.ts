@@ -2174,21 +2174,13 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
   for (const txt of outboundTexts) {
     const lowTxt = String(txt || "").toLowerCase();
     const isRedundantMissingCriteriaMsg =
-      lowTxt.includes("me falta saber") &&
-      (lowTxt.includes("ambientes") || lowTxt.includes("presupuesto"));
+      (lowTxt.includes("me falta saber") &&
+      (lowTxt.includes("ambientes") || lowTxt.includes("presupuesto"))) ||
+      lowTxt.includes("para buscarte opciones concretas, me falta saber: ambientes y presupuesto");
 
     if (isRedundantMissingCriteriaMsg) {
-      const latestInbound = await Message.findOne({
-        where: { ticketId: ticket.id, fromMe: false },
-        order: [["createdAt", "DESC"]]
-      } as any);
-      const latestPatch = extractAgentCriteriaPatch(String((latestInbound as any)?.body || ""));
-      const hasRoomsLatest = Number(latestPatch?.rooms || 0) > 0;
-      const hasBudgetLatest = Number(latestPatch?.maxPriceUsd || 0) > 0;
-      if (hasRoomsLatest || hasBudgetLatest) {
-        await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "skip_redundant_missing_criteria_text", reason: "latest inbound already includes rooms/budget", guardrailAction: "skip", responsePreview: "" });
-        continue;
-      }
+      await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "skip_redundant_missing_criteria_text", reason: "blocked generic missing-criteria text", guardrailAction: "skip", responsePreview: "" });
+      continue;
     }
 
     filteredOutboundTexts.push(txt);
