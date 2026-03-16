@@ -1780,6 +1780,35 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
     }
   }
 
+  // ── Branch: price objection follow-up (avoid blasting repeated options) ─
+  if (!replyPlan && objections.includes("price")) {
+    const recentBot = await Message.findOne({
+      where: { ticketId: ticket.id, fromMe: true, createdAt: { [Op.gte]: new Date(Date.now() - 90_000) } },
+      order: [["createdAt", "DESC"]]
+    } as any);
+    const recentBody = String((recentBot as any)?.body || "").toLowerCase();
+    const recentlySentOptions = recentBody.includes("te paso opciones concretas") || recentBody.includes("https://ficha.info/p/");
+    if (recentlySentOptions) {
+      const txt = "Perfecto, entiendo. Te filtro opciones más accesibles en la misma zona y te paso una nueva selección.";
+      replyPlan = {
+        text: txt,
+        decisionKey: "price_objection_refine_instead_of_repeat",
+        decisionReason: "Price objection after recent options",
+        guardrailAction: "refine_filters",
+        postActions: async () => {
+          await ticket.update({ lastMessage: txt, updatedAt: new Date() } as any);
+          await saveAgentState(ticket.id, ticket.companyId, {
+            ...statePatchFromInbound,
+            salesStage: inferredStage,
+            objections,
+            lastOutcome: "price_objection_refine",
+            nextBestAction: "refine_budget_options"
+          });
+        }
+      };
+    }
+  }
+
   // ── Branch: intent router (BEFORE orchestrator) ──────────────────────
   // Non-property-search intents get purpose-built replies without going
   // through the orchestrator/Tokko pipeline.  Priority order is strict:
@@ -2105,8 +2134,24 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
 
   // ── Single send gate ─────────────────────────────────────────────────
   // Exactly ONE sendManagedReply call per inbound, regardless of which
-  // branch won.  If replyPlan is null here, no branch decided to reply.
-  if (!replyPlan) return;
+  // branch won. If no branch decided a reply, use a safe conversational fallback
+  // (except low-signal turns which intentionally stay silent).
+  if (!replyPlan) {
+    if (!isLowSignalMessage(text)) {
+      const fallback = buildGeneralQuestionReply();
+      replyPlan = {
+        text: fallback,
+        decisionKey: "fallback_no_plan",
+        decisionReason: "No branch selected a reply",
+        guardrailAction: "fallback_reply",
+        postActions: async () => {
+          await ticket.update({ lastMessage: fallback, updatedAt: new Date() } as any);
+        }
+      };
+    } else {
+      return;
+    }
+  }
 
   const hasNewerInboundThanCurrent = async () => {
     if (!inboundMessageId) return false;
