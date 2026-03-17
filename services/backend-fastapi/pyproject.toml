@@ -2,7 +2,7 @@
 name = "charlott-fastapi"
 version = "0.1.0"
 description = "Charlott CRM FastAPI backend"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.116.0",
   "uvicorn[standard]>=0.30.0",
