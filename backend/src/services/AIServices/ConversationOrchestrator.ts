@@ -74,63 +74,122 @@ const parseDomainProfile = (raw: any): DomainProfile => {
   }
 };
 
-// Infer profile from KB document
+// Infer profile from ANY KB document content - auto-detects niche
 const inferProfileFromKB = async (companyId: number): Promise<Partial<DomainProfile> | null> => {
   try {
-    const kbDoc = await sequelize.query(
-      `SELECT content FROM kb_documents
-       WHERE company_id = :companyId
-         AND (title ILIKE '%perfil%agente%' OR title ILIKE '%agent%profile%' OR title ILIKE '%config%agente%')
-         AND status = 'active'
+    // Get all active KB documents
+    const kbDocs = await sequelize.query(
+      `SELECT title, content FROM kb_documents
+       WHERE company_id = :companyId AND status = 'active'
        ORDER BY updated_at DESC
-       LIMIT 1`,
+       LIMIT 10`,
       { replacements: { companyId }, type: QueryTypes.SELECT }
     );
 
-    if (!kbDoc || !kbDoc[0]) return null;
+    if (!kbDocs || kbDocs.length === 0) return null;
 
-    const content = (kbDoc[0] as any)?.content || "";
+    // Combine all content to analyze
+    const allContent = kbDocs
+      .map((doc: any) => `${doc.title} ${doc.content}`)
+      .join("\n")
+      .toLowerCase();
+
     const profile: Partial<DomainProfile> = {};
 
-    // Extract domain label
-    const domainMatch = content.match(/rubro:?\s*([^\n]+)/i);
-    if (domainMatch) profile.domainLabel = domainMatch[1].trim();
+    // AUTO-DETECT NICHO from content keywords
+    const nichePatterns: Record<string, string> = {
+      "inmobiliarias": "inmobiliarias",
+      "propiedad": "inmobiliarias",
+      "departamento": "inmobiliarias",
+      "alquiler": "inmobiliarias",
+      "dentista": "clínica dental",
+      "odontólogo": "clínica dental",
+      "clínica dental": "clínica dental",
+      "turno": "servicios",
+      "curso": "educación",
+      "carrera": "educación",
+      "capacitación": "educación",
+      "auto": "automotor",
+      "vehículo": "automotor",
+      "0km": "automotor",
+      "plan de ahorro": "automotor",
+      "restaurante": "restaurantes",
+      "delivery": "restaurantes",
+      "menú": "restaurantes",
+      "gimnasio": "fitness",
+      "entrenamiento": "fitness",
+      "membresía": "fitness",
+    };
 
-    // Extract identity
-    const identityMatch = content.match(/(?:nombre|identidad|asistente):?\s*([^\n]+)/i);
-    if (identityMatch) profile.assistantIdentity = identityMatch[1].trim();
-
-    // Extract objective
-    const objMatch = content.match(/objetivo:?\s*([^\n]+)/i);
-    if (objMatch) profile.primaryObjective = objMatch[1].trim();
-
-    // Extract offering
-    const offerMatch = content.match(/(?:ofrece|producto|servicio):?\s*([^\n]+)/i);
-    if (offerMatch) profile.offeringLabel = offerMatch[1].trim();
-
-    // Extract criteria fields
-    const criteriaMatch = content.match(/criterios?:?\s*([^\n]+)/i);
-    if (criteriaMatch) {
-      profile.qualificationFields = criteriaMatch[1].split(/[,;|]/).map((x: string) => x.trim()).filter(Boolean);
+    for (const [keyword, niche] of Object.entries(nichePatterns)) {
+      if (allContent.includes(keyword)) {
+        profile.domainLabel = niche;
+        break;
+      }
     }
 
-    // Extract keywords
-    const kwMatch = content.match(/palabras?:?\s*([^\n]+)/i);
-    if (kwMatch) {
-      profile.criteriaKeywords = kwMatch[1].split(/[,;|]/).map((x: string) => x.trim().toLowerCase()).filter(Boolean);
+    // If no niche detected, set generic
+    if (!profile.domainLabel) {
+      profile.domainLabel = "servicios generales";
     }
 
-    // Extract objection responses
-    const objectionMatches = content.matchAll(/(PRECIO|TIEMPO|PRECIO|TIMING|COMPETIDOR):\s*([^\n]+)/gi);
+    // AUTO-DETECT identity from content
+    if (allContent.includes("asesor")) profile.assistantIdentity = "asesor comercial";
+    else if (allContent.includes("vendedor")) profile.assistantIdentity = "vendedor";
+    else if (allContent.includes("atención")) profile.assistantIdentity = "atención al cliente";
+    else profile.assistantIdentity = "asistente comercial";
+
+    // AUTO-DETECT objective
+    if (allContent.includes("venta") || allContent.includes("compr")) profile.primaryObjective = "entender necesidad y cerrar venta";
+    else if (allContent.includes("turno") || allContent.includes("cita")) profile.primaryObjective = "entender necesidad y coordinar turno";
+    else if (allContent.includes("curso") || allContent.includes("capacit")) profile.primaryObjective = "entender perfil y recomendar programa";
+    else profile.primaryObjective = "entender necesidad y ayudar al cliente";
+
+    // AUTO-DETECT offering based on niche
+    const offerings: Record<string, string> = {
+      "inmobiliarias": "propiedades",
+      "clínica dental": "turnos y tratamientos",
+      "educación": "cursos y programas",
+      "automotor": "vehículos",
+      "restaurantes": "menú y reservas",
+      "fitness": "membresías y planes",
+    };
+    profile.offeringLabel = offerings[profile.domainLabel as string] || "productos y servicios";
+    profile.offerCollectionLabel = profile.offeringLabel + " disponibles";
+
+    // AUTO-DETECT criteria from content
+    const criteriaPatterns = [
+      "presupuesto", "precio", "zona", "ubicación", "fecha", "hora",
+      "tamaño", "cantidad", "modelo", "marca", "año"
+    ];
+    const foundCriteria = criteriaPatterns.filter(c => allContent.includes(c));
+    profile.qualificationFields = foundCriteria.length > 0 ? foundCriteria : ["necesidad", "presupuesto"];
+
+    // AUTO-DETECT keywords from content
+    const keywordPatterns = [
+      "busco", "quiero", "necesito", "precio", "costo", "cuánto",
+      "dónde", "cómo", "cuándo", "disponible", "hay"
+    ];
+    profile.criteriaKeywords = keywordPatterns.filter(k => allContent.includes(k));
+    if (profile.criteriaKeywords.length < 3) {
+      profile.criteriaKeywords = [...profile.criteriaKeywords, "consulta", "información", "ver"];
+    }
+
+    // AUTO-DETECT objection responses from content
     const playbook: Record<string, string> = {};
-    for (const match of objectionMatches) {
-      const key = match[1].toLowerCase();
-      playbook[key] = match[2].trim();
+    if (allContent.includes("caro") || allContent.includes("precio")) {
+      playbook["price"] = "Te puedo mostrar alternativas más accesibles.";
     }
-    if (Object.keys(playbook).length > 0) profile.objectionPlaybook = playbook;
+    if (allContent.includes("tiempo") || allContent.includes("fecha") || allContent.includes("ahora")) {
+      playbook["timing"] = "Podemos adaptar las fechas a tu disponibilidad.";
+    }
+    profile.objectionPlaybook = playbook;
 
-    // Return only if we found something meaningful
-    return Object.keys(profile).length > 0 ? profile : null;
+    // Default CTAs
+    profile.closingCta = "Confirmamos el siguiente paso?";
+    profile.visitCta = "Cuándo te queda cómodo?";
+
+    return profile;
   } catch {
     return null;
   }
@@ -587,11 +646,12 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
   const rawProfile = (runtimeSettings as any)?.agentDomainProfileJson;
   let domainProfile = parseDomainProfile(rawProfile);
 
-  // If profile is default or empty, try to infer from KB
-  const isDefaultProfile = rawProfile === undefined || rawProfile === "" || rawProfile === "{}";
-  if (isDefaultProfile) {
-    const kbProfile = await inferProfileFromKB(args.companyId);
-    if (kbProfile) {
+  // ALWAYS try to enhance with KB content - merges with existing config
+  const kbProfile = await inferProfileFromKB(args.companyId);
+  if (kbProfile) {
+    // Merge: KB content overrides defaults but not explicit user config
+    const hasExplicitConfig = rawProfile && rawProfile !== "{}" && rawProfile.length > 10;
+    if (!hasExplicitConfig) {
       domainProfile = { ...domainProfile, ...kbProfile };
     }
   }
