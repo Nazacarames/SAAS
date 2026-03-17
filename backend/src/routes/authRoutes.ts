@@ -7,6 +7,7 @@ import User from "../models/User";
 import sequelize from "../database";
 import AppError from "../errors/AppError";
 import validateSchema from "../middleware/validateSchema";
+import isAuth from "../middleware/isAuth";
 import { loginSchema, refreshTokenSchema, registerSchema } from "../schemas/authSchemas";
 
 const authRoutes = Router();
@@ -35,7 +36,7 @@ authRoutes.post("/login", validateSchema(loginSchema), async (req, res) => {
 
     res.cookie('token', result.token, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
     res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
-    return res.json({ user: result.user });
+    return res.json({ user: result.user, token: result.token });
 });
 
 authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res) => {
@@ -48,7 +49,7 @@ authRoutes.post("/refresh", validateSchema(refreshTokenSchema), async (req, res)
     if (result.refreshToken) {
         res.cookie('refreshToken', result.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
     }
-    return res.json({ ok: true });
+    return res.json({ ok: true, token: result.token });
 });
 
 authRoutes.post("/logout", (req, res) => {
@@ -56,6 +57,18 @@ authRoutes.post("/logout", (req, res) => {
     res.clearCookie('token', { ...cookieOptions, path: '/' });
     res.clearCookie('refreshToken', { ...cookieOptions, path: '/api/auth/refresh' });
     return res.json({ ok: true });
+});
+
+authRoutes.get("/me", isAuth, async (req: any, res) => {
+    const authUser = req.user;
+    if (!authUser?.id) return res.status(401).json({ error: "Not authenticated" });
+
+    const user = await User.findByPk(authUser.id, {
+        attributes: ["id", "name", "email", "profile", "companyId"]
+    });
+
+    if (!user) return res.status(401).json({ error: "User not found" });
+    return res.json({ user });
 });
 
 authRoutes.post("/register", validateSchema(registerSchema), async (req, res) => {
@@ -147,6 +160,7 @@ authRoutes.post("/register", validateSchema(registerSchema), async (req, res) =>
         res.cookie('refreshToken', login.refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/api/auth/refresh' });
         return res.status(201).json({
             user: login.user,
+            token: login.token,
             onboarding: {
                 trialDays: 30,
                 companyId: company.id,

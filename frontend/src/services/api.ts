@@ -8,7 +8,15 @@ const api = axios.create({
     withCredentials: true,
 });
 
-// No need to add token in request interceptor - cookies are sent automatically
+// Primary auth uses HttpOnly cookies; fallback to bearer token for browsers blocking auth cookies.
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem('authToken');
+    if (token) {
+        config.headers = config.headers || {};
+        (config.headers as any).Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
 
 // Flag to prevent infinite refresh loops
 let isRefreshing = false;
@@ -26,9 +34,12 @@ const processQueue = (error: any) => {
 api.interceptors.response.use(
     (response) => response,
     async (error) => {
-        const originalRequest = error.config;
+        const originalRequest = error.config || {};
+        const reqUrl = String(originalRequest?.url || "");
+        const isAuthBootstrapCall = reqUrl.includes('/auth/me');
+        const isLoginOrRegister = reqUrl.includes('/auth/login') || reqUrl.includes('/auth/register');
 
-        if (error.response?.status === 401 && !originalRequest._retry) {
+        if (error.response?.status === 401 && !originalRequest._retry && !isLoginOrRegister) {
             if (isRefreshing) {
                 return new Promise((resolve, reject) => {
                     failedQueue.push({ resolve, reject });
@@ -41,17 +52,23 @@ api.interceptors.response.use(
             isRefreshing = true;
 
             try {
-                await axios.post(
+                const refreshResp = await axios.post(
                     `${api.defaults.baseURL}/auth/refresh`,
                     {},
                     { withCredentials: true }
                 );
+                const newToken = (refreshResp as any)?.data?.token;
+                if (newToken) {
+                    localStorage.setItem('authToken', newToken);
+                }
                 processQueue(null);
                 return api(originalRequest);
             } catch (refreshError) {
                 processQueue(refreshError);
-                localStorage.removeItem('user');
-                window.location.href = '/login';
+                // Never force redirect from interceptor; caller/auth context decides UX.
+                if (isAuthBootstrapCall) {
+                    localStorage.removeItem('authToken');
+                }
                 return Promise.reject(refreshError);
             } finally {
                 isRefreshing = false;
