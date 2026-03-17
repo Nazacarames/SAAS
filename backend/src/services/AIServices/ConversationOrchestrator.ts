@@ -74,6 +74,68 @@ const parseDomainProfile = (raw: any): DomainProfile => {
   }
 };
 
+// Infer profile from KB document
+const inferProfileFromKB = async (companyId: number): Promise<Partial<DomainProfile> | null> => {
+  try {
+    const kbDoc = await sequelize.query(
+      `SELECT content FROM kb_documents
+       WHERE company_id = :companyId
+         AND (title ILIKE '%perfil%agente%' OR title ILIKE '%agent%profile%' OR title ILIKE '%config%agente%')
+         AND status = 'active'
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+
+    if (!kbDoc || !kbDoc[0]) return null;
+
+    const content = (kbDoc[0] as any)?.content || "";
+    const profile: Partial<DomainProfile> = {};
+
+    // Extract domain label
+    const domainMatch = content.match(/rubro:?\s*([^\n]+)/i);
+    if (domainMatch) profile.domainLabel = domainMatch[1].trim();
+
+    // Extract identity
+    const identityMatch = content.match(/(?:nombre|identidad|asistente):?\s*([^\n]+)/i);
+    if (identityMatch) profile.assistantIdentity = identityMatch[1].trim();
+
+    // Extract objective
+    const objMatch = content.match(/objetivo:?\s*([^\n]+)/i);
+    if (objMatch) profile.primaryObjective = objMatch[1].trim();
+
+    // Extract offering
+    const offerMatch = content.match(/(?:ofrece|producto|servicio):?\s*([^\n]+)/i);
+    if (offerMatch) profile.offeringLabel = offerMatch[1].trim();
+
+    // Extract criteria fields
+    const criteriaMatch = content.match(/criterios?:?\s*([^\n]+)/i);
+    if (criteriaMatch) {
+      profile.qualificationFields = criteriaMatch[1].split(/[,;|]/).map((x: string) => x.trim()).filter(Boolean);
+    }
+
+    // Extract keywords
+    const kwMatch = content.match(/palabras?:?\s*([^\n]+)/i);
+    if (kwMatch) {
+      profile.criteriaKeywords = kwMatch[1].split(/[,;|]/).map((x: string) => x.trim().toLowerCase()).filter(Boolean);
+    }
+
+    // Extract objection responses
+    const objectionMatches = content.matchAll(/(PRECIO|TIEMPO|PRECIO|TIMING|COMPETIDOR):\s*([^\n]+)/gi);
+    const playbook: Record<string, string> = {};
+    for (const match of objectionMatches) {
+      const key = match[1].toLowerCase();
+      playbook[key] = match[2].trim();
+    }
+    if (Object.keys(playbook).length > 0) profile.objectionPlaybook = playbook;
+
+    // Return only if we found something meaningful
+    return Object.keys(profile).length > 0 ? profile : null;
+  } catch {
+    return null;
+  }
+};
+
 // Tool definitions — the model decides autonomously when and how to call these
 const buildAgentTools = (profile: DomainProfile) => [
   {
@@ -522,7 +584,17 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
     enrichContactContext(args.companyId, args.contactId),
     getRecentMessages(args.companyId, args.contactId, args.ticketId, 20)
   ]);
-  const domainProfile = parseDomainProfile((runtimeSettings as any)?.agentDomainProfileJson);
+  const rawProfile = (runtimeSettings as any)?.agentDomainProfileJson;
+  let domainProfile = parseDomainProfile(rawProfile);
+
+  // If profile is default or empty, try to infer from KB
+  const isDefaultProfile = rawProfile === undefined || rawProfile === "" || rawProfile === "{}";
+  if (isDefaultProfile) {
+    const kbProfile = await inferProfileFromKB(args.companyId);
+    if (kbProfile) {
+      domainProfile = { ...domainProfile, ...kbProfile };
+    }
+  }
 
   const model = String(agent?.model || "gpt-4o-mini");
   const temperature = Number(agent?.temperature || 0.7);
