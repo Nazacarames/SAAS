@@ -3,11 +3,6 @@ name = "charlott-fastapi"
 version = "0.1.0"
 description = "Charlott CRM FastAPI backend"
 requires-python = ">=3.11"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
-
 dependencies = [
   "fastapi>=0.116.0",
   "uvicorn[standard]>=0.30.0",
@@ -35,3 +30,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
