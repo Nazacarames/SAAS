@@ -16,6 +16,7 @@ export interface RuntimeSettings {
   waRecapInactivityMinutes: number;
   agentGuardrailsEnabled: boolean;
   agentConversationPoliciesJson: string;
+  agentDomainProfileJson: string;
   tokkoEnabled: boolean;
   tokkoApiKey: string;
   tokkoBaseUrl: string;
@@ -70,6 +71,21 @@ const defaultPoliciesJson = JSON.stringify({
 });
 const defaultFollowUpDaysJson = JSON.stringify([1, 3, 7]);
 const defaultRoutingRulesJson = JSON.stringify([]);
+const defaultAgentDomainProfileJson = JSON.stringify({
+  domainLabel: "negocio",
+  assistantIdentity: "asistente comercial",
+  offeringLabel: "opciones",
+  offerCollectionLabel: "catálogo",
+  primaryObjective: "entender necesidad, resolver dudas y guiar al siguiente paso",
+  qualificationFields: ["necesidad", "presupuesto", "preferencias clave", "plazo"],
+  objectionPlaybook: {
+    price: "Si querés, te muestro alternativas más accesibles o ajustamos alcance para mejorar relación precio/valor.",
+    timing: "Si te sirve, armamos una propuesta por etapas para avanzar a tu ritmo."
+  },
+  closingCta: "Si querés, avanzamos con el siguiente paso ahora.",
+  visitCta: "Si te sirve, coordinamos una demo/reunión en el horario que te quede cómodo.",
+  criteriaKeywords: ["busco", "quiero", "necesito", "presupuesto", "precio", "plan", "servicio", "opción", "cotización", "demo", "reunión"]
+});
 
 const readFileSettings = (): Partial<RuntimeSettings> => {
   try { if (!fs.existsSync(FILE_PATH)) return {}; return JSON.parse(fs.readFileSync(FILE_PATH, "utf-8") || "{}"); } catch { return {}; }
@@ -98,6 +114,7 @@ export const getRuntimeSettings = (): RuntimeSettings => {
     waRecapInactivityMinutes: Number(fromFile.waRecapInactivityMinutes || process.env.WA_RECAP_INACTIVITY_MINUTES || 4320),
     agentGuardrailsEnabled: parseBool(fromFile.agentGuardrailsEnabled, true),
     agentConversationPoliciesJson: String(fromFile.agentConversationPoliciesJson || "") || defaultPoliciesJson,
+    agentDomainProfileJson: String(fromFile.agentDomainProfileJson || "") || defaultAgentDomainProfileJson,
     tokkoEnabled: parseBool(fromFile.tokkoEnabled, false),
     tokkoApiKey: String(fromFile.tokkoApiKey || "") || process.env.TOKKO_API_KEY || "",
     tokkoBaseUrl: String(fromFile.tokkoBaseUrl || "") || process.env.TOKKO_BASE_URL || "https://www.tokkobroker.com/api/v1",
@@ -156,6 +173,7 @@ export const saveRuntimeSettings = (patch: Partial<RuntimeSettings>) => {
     waRecapInactivityMinutes: Number(patch.waRecapInactivityMinutes || current.waRecapInactivityMinutes || 4320),
     agentGuardrailsEnabled: typeof patch.agentGuardrailsEnabled === "boolean" ? patch.agentGuardrailsEnabled : current.agentGuardrailsEnabled,
     agentConversationPoliciesJson: String(patch.agentConversationPoliciesJson ?? current.agentConversationPoliciesJson ?? defaultPoliciesJson),
+    agentDomainProfileJson: String((patch as any).agentDomainProfileJson ?? (current as any).agentDomainProfileJson ?? defaultAgentDomainProfileJson),
     tokkoEnabled: typeof patch.tokkoEnabled === "boolean" ? patch.tokkoEnabled : current.tokkoEnabled,
     tokkoApiKey: String(patch.tokkoApiKey ?? current.tokkoApiKey ?? ""),
     tokkoBaseUrl: String(patch.tokkoBaseUrl ?? current.tokkoBaseUrl ?? "https://www.tokkobroker.com/api/v1"),

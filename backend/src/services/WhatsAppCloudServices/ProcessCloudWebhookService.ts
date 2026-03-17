@@ -11,7 +11,7 @@ import ContactTag from "../../models/ContactTag";
 import sequelize from "../../database";
 import { getIO } from "../../libs/socket";
 import { recordInboundDuplicate, recordInboundError, recordInboundMessage } from "../../utils/messageStats";
-import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
+import { getRuntimeSettings, getRuntimeSettingsForCompany } from "../SettingsServices/RuntimeSettingsService";
 import { normalizeWaPhone } from "../../utils/phoneNormalization";
 
 type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }> } }> }> };
@@ -381,10 +381,9 @@ const resolvePolicies = (): Record<ConversationType, Policy> => {
 };
 const classifyConversation = (text: string): ConversationType => {
   const t = String(text || "").toLowerCase();
-  if (/turno|agenda|cita|horario|fecha|mañana|lunes|martes/.test(t)) return "scheduling";
-  if (/error|soporte|no funciona|problema|incidente|ca[ií]do/.test(t)) return "support";
-  // Real estate intent also counts as sales
-  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote|zonas?/.test(t)) return "sales";
+  if (/turno|agenda|cita|horario|fecha|reuni[oó]n|llamada|demo|mañana|lunes|martes/.test(t)) return "scheduling";
+  if (/error|soporte|no funciona|problema|incidente|ca[ií]do|reclamo|bug/.test(t)) return "support";
+  if (/precio|plan|comprar|contratar|promo|descuento|cotiz|presupuesto|paquete|servicio|producto|opciones?|alternativas?|venta|alquiler/.test(t)) return "sales";
   return "general";
 };
 const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
@@ -1159,9 +1158,9 @@ const extractAgentCriteriaPatch = (text: string) => {
 
 const detectSalesStage = (text: string, currentStage?: string): string => {
   const t = String(text || "").toLowerCase();
-  if (/reservar|seña|senia|cerrar|quiero avanzar|quiero comprar|quiero alquilar|coordinemos visita|agendemos visita/.test(t)) return "closing";
-  if (/visita|agendar|coordinar|cuando puedo ver|quiero ver/.test(t)) return "visit";
-  if (/precio|presupuesto|usd|ambientes|zona|barrio|tipo/.test(t)) return "qualification";
+  if (/reservar|seña|senia|cerrar|quiero avanzar|confirmar|arrancar|quiero comprar|quiero alquilar|quiero contratar/.test(t)) return "closing";
+  if (/visita|agendar|coordinar|cuando puedo ver|quiero ver|demo|reuni[oó]n|llamada/.test(t)) return "visit";
+  if (/precio|presupuesto|usd|requisitos|plan|paquete|tipo|preferencia|necesito|busco/.test(t)) return "qualification";
   return currentStage || "discovery";
 };
 
@@ -1176,29 +1175,79 @@ const extractObjection = (text: string): string | null => {
 
 const dedupeList = (arr: string[]) => Array.from(new Set(arr.filter(Boolean).map((x) => String(x).trim().toLowerCase()))).slice(0, 8);
 
-const getMissingCriteriaLabels = (state: Record<string, any>): string[] => {
+type DomainProfileRuntime = {
+  domainLabel: string;
+  assistantIdentity: string;
+  qualificationFields: string[];
+  objectionPlaybook: Record<string, string>;
+  closingCta: string;
+  visitCta: string;
+};
+
+const defaultDomainProfileRuntime: DomainProfileRuntime = {
+  domainLabel: "negocio",
+  assistantIdentity: "asistente comercial",
+  qualificationFields: ["necesidad", "presupuesto", "preferencias clave", "plazo"],
+  objectionPlaybook: {
+    price: "Si querés, te muestro alternativas más accesibles o ajustamos alcance para mejorar relación precio/valor.",
+    timing: "Si te sirve, armamos una propuesta por etapas para avanzar a tu ritmo."
+  },
+  closingCta: "Si querés, avanzamos con el siguiente paso ahora.",
+  visitCta: "Si te sirve, coordinamos una demo/reunión en el horario que te quede cómodo."
+};
+
+const parseRuntimeDomainProfile = (raw: any): DomainProfileRuntime => {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {});
+    return {
+      ...defaultDomainProfileRuntime,
+      ...parsed,
+      qualificationFields: Array.isArray(parsed?.qualificationFields)
+        ? parsed.qualificationFields.map((x: any) => String(x || "").trim()).filter(Boolean)
+        : defaultDomainProfileRuntime.qualificationFields,
+      objectionPlaybook: parsed?.objectionPlaybook && typeof parsed.objectionPlaybook === "object"
+        ? parsed.objectionPlaybook
+        : defaultDomainProfileRuntime.objectionPlaybook
+    };
+  } catch {
+    return { ...defaultDomainProfileRuntime };
+  }
+};
+
+const getMissingCriteriaLabels = (state: Record<string, any>, profile: DomainProfileRuntime): string[] => {
   const missing: string[] = [];
-  if (!state?.location) missing.push("zona");
-  if (!state?.propertyType) missing.push("tipo");
-  if (!state?.rooms) missing.push("ambientes");
-  if (!state?.maxPriceUsd) missing.push("presupuesto");
-  return missing;
+  const labelMap: Record<string, boolean> = {
+    necesidad: Boolean(state?.needs || state?.query || state?.intent),
+    presupuesto: Boolean(state?.maxPriceUsd || state?.budget || state?.priceRange),
+    "preferencias clave": Boolean(state?.propertyType || state?.serviceType || state?.preferences),
+    plazo: Boolean(state?.timeline || state?.urgency),
+    zona: Boolean(state?.location),
+    tipo: Boolean(state?.propertyType || state?.serviceType),
+    ambientes: Boolean(state?.rooms)
+  };
+  for (const f of profile.qualificationFields || []) {
+    const key = String(f || "").trim().toLowerCase();
+    if (!key) continue;
+    if (!labelMap[key]) missing.push(f);
+  }
+  return missing.slice(0, 4);
 };
 
-const buildSalesObjective = (state: Record<string, any>, incomingText: string): string => {
+const buildSalesObjective = (state: Record<string, any>, incomingText: string, profile: DomainProfileRuntime): string => {
   const t = String(incomingText || "").toLowerCase();
-  if (state?.salesStage === "closing") return "Objetivo de este turno: concretar siguiente paso claro (visita, reserva o llamada).";
-  if (state?.salesStage === "visit") return "Objetivo de este turno: proponer/agendar visita con día y franja concreta.";
-  if (getMissingCriteriaLabels(state).length > 0) {
-    return "Objetivo de este turno: calificar lead y completar faltantes (zona, tipo, ambientes, presupuesto) antes de cerrar.";
+  if (state?.salesStage === "closing") return "Objetivo de este turno: concretar siguiente paso claro (cierre, confirmación o handoff).";
+  if (state?.salesStage === "visit") return "Objetivo de este turno: acordar una instancia concreta (demo/reunión/llamada/visita).";
+  const missing = getMissingCriteriaLabels(state, profile);
+  if (missing.length > 0) {
+    return `Objetivo de este turno: calificar lead y completar faltantes (${missing.join(", ")}) antes de cerrar.`;
   }
-  if (/mostrame|buscá|opciones|propiedades|departamentos|casas/.test(t)) {
-    return "Objetivo de este turno: mostrar opciones concretas y cerrar con pregunta de avance (visita o ajuste de filtro).";
+  if (/mostrame|busc[aá]|opciones|alternativas|cat[aá]logo|demo|plan/.test(t)) {
+    return "Objetivo de este turno: mostrar opciones concretas y cerrar con pregunta de avance.";
   }
-  return "Objetivo de este turno: avanzar al lead un paso en el embudo sin repetir preguntas ya resueltas.";
+  return "Objetivo de este turno: avanzar un paso en el embudo sin repetir preguntas ya resueltas.";
 };
 
-const buildAgentStateHint = (state: Record<string, any>, incomingText: string) => {
+const buildAgentStateHint = (state: Record<string, any>, incomingText: string, profile: DomainProfileRuntime) => {
   if (!state || typeof state !== "object") return "";
   const parts: string[] = [];
   if (state.location) parts.push(`zona=${state.location}`);
@@ -1207,7 +1256,7 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
   if (state.rooms) parts.push(`ambientes=${state.rooms}`);
   if (state.salesStage) parts.push(`etapa=${state.salesStage}`);
   if (Array.isArray(state.objections) && state.objections.length) parts.push(`objeciones=${state.objections.join(",")}`);
-  const objective = buildSalesObjective(state, incomingText);
+  const objective = buildSalesObjective(state, incomingText, profile);
   if (objective) parts.push(objective);
   if (!parts.length) return "";
   return `Contexto acumulado del cliente: ${parts.join(" | ")}.`;
@@ -1230,8 +1279,51 @@ const stripAgentFiller = (reply: string): string => {
   return cleaned || raw;
 };
 
-const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
-  const base = stripAgentFiller(String(reply || "").trim());
+const collapseDuplicateReplyLines = (reply: string): string => {
+  const lines = String(reply || "")
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l, i, arr) => !(l.trim() === "" && i > 0 && arr[i - 1].trim() === ""));
+
+  const out: string[] = [];
+  let lastNormalized = "";
+  for (const line of lines) {
+    const normalized = line.trim().toLowerCase();
+    if (normalized && normalized === lastNormalized) continue;
+    out.push(line);
+    lastNormalized = normalized;
+  }
+
+  // If the response repeats the same property list header, keep only the first one.
+  const firstHeaderIdx = out.findIndex((l) => /^te paso opciones concretas:?$/i.test(String(l || "").trim()));
+  if (firstHeaderIdx >= 0) {
+    const cleaned: string[] = [];
+    let seenHeader = false;
+    for (const line of out) {
+      const isHeader = /^te paso opciones concretas:?$/i.test(String(line || "").trim());
+      if (isHeader) {
+        if (seenHeader) continue;
+        seenHeader = true;
+      }
+      cleaned.push(line);
+    }
+    return cleaned.join("\n").trim();
+  }
+
+  return out.join("\n").trim();
+};
+
+const normalizeLegacyVerticalPhrases = (reply: string, profile: DomainProfileRuntime): string => {
+  const identity = String(profile.assistantIdentity || "asistente comercial").trim();
+  const domain = String(profile.domainLabel || "negocio").trim();
+  return String(reply || "")
+    .replace(/soy el asistente de la inmobiliaria/gi, `soy tu ${identity}`)
+    .replace(/inmobiliaria/gi, domain)
+    .replace(/propiedad(es)?/gi, "opción$1");
+};
+
+const applyCommercialPlaybook = (reply: string, state: Record<string, any>, profile: DomainProfileRuntime) => {
+  const base = collapseDuplicateReplyLines(stripAgentFiller(normalizeLegacyVerticalPhrases(String(reply || "").trim(), profile)));
   if (!base) return base;
   if (/\?$/.test(base) && base.length < 650) return base;
 
@@ -1239,22 +1331,23 @@ const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
   const objections = Array.isArray(state?.objections) ? state.objections : [];
 
   if (stage === "closing") {
-    return `${base}\n\n¿Querés que avancemos con una visita esta semana o preferís que te reserve una opción y te llamo?`;
+    return `${base}\n\n${profile.closingCta}`;
   }
 
   if (stage === "visit") {
-    return `${base}\n\nSi te sirve, coordinamos visita: decime día y franja horaria.`;
+    return `${base}\n\n${profile.visitCta}`;
   }
 
-  if (objections.includes("price")) {
-    return `${base}\n\nSi querés, te filtro opciones un poco más accesibles en la misma zona.`;
+  if (objections.includes("price") && profile.objectionPlaybook?.price) {
+    return `${base}\n\n${String(profile.objectionPlaybook.price).trim()}`;
   }
 
-  if (!state?.location || !state?.propertyType || !state?.maxPriceUsd || !state?.rooms) {
-    return `${base}\n\nPara afinarte bien la búsqueda: zona, tipo, ambientes y presupuesto aproximado.`;
+  const missing = getMissingCriteriaLabels(state, profile);
+  if (missing.length > 0) {
+    return `${base}\n\nPara afinar mejor, decime: ${missing.join(", ")}.`;
   }
 
-  return `${base}\n\nSi querés, te paso una selección más precisa y avanzamos con el próximo paso.`;
+  return `${base}\n\nSi querés, avanzamos con el próximo paso.`;
 };
 
 const getWebhookTimestampValidation = (timestamp?: string): { ok: boolean; reason: "missing" | "too_old" | "future_skew" | "ok"; ageSec: number | null } => {
@@ -1469,6 +1562,8 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return;
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
+  const runtimeSettings = await getRuntimeSettingsForCompany(Number(ticket.companyId || 0));
+  const domainProfile = parseRuntimeDomainProfile((runtimeSettings as any)?.agentDomainProfileJson);
   await sequelize.query(`INSERT INTO ai_turns (conversation_id, role, content, model, latency_ms, tokens_in, tokens_out, created_at, updated_at) VALUES (NULL, 'user', :content, 'wa-cloud', 0, 0, 0, NOW(), NOW())`, { replacements: { content: text }, type: QueryTypes.INSERT });
 
   if (/\b(humano|asesor humano|agente humano|hablar con (una )?persona|pasar con (una )?persona|quiero.{0,20}persona real)\b/.test(low)) {
@@ -1521,7 +1616,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
       reason: "inbound_intent"
     });
   }
-  const stateHint = buildAgentStateHint(mergedStateForPrompt, text);
+  const stateHint = buildAgentStateHint(mergedStateForPrompt, text, domainProfile);
   const orchestratorInput = stateHint ? `${stateHint}\n\nMensaje actual del cliente: ${text}` : text;
 
   try {
@@ -1566,10 +1661,10 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
   }
 
   if (!baseReply) {
-    const missing = getMissingCriteriaLabels(mergedStateForPrompt);
+    const missing = getMissingCriteriaLabels(mergedStateForPrompt, domainProfile);
     const ask = missing.length > 0
       ? `Para ayudarte bien, decime por favor ${missing.join(", ")}. Con eso te busco opciones concretas ahora mismo.`
-      : "Perfecto, ya tengo tus criterios. Enseguida te paso opciones concretas y, si querés, coordinamos visita.";
+      : "Perfecto, ya tengo tus criterios. Enseguida te paso opciones concretas y, si querés, avanzamos con el próximo paso.";
 
     await logDecision({ companyId: ticket.companyId, ticketId: ticket.id, conversationType, decisionKey: "no_reply_orchestrator_empty", reason: "Orquestador sin respuesta", guardrailAction: "clarify", responsePreview: ask });
     const out = await sendManagedReply({ ticket, contact, text: ask });
@@ -1585,7 +1680,7 @@ const runAutonomousAgent = async ({ ticket, contact, incomingText }: { ticket: a
     });
     return;
   }
-  const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt);
+  const playbookReply = applyCommercialPlaybook(baseReply, mergedStateForPrompt, domainProfile);
   const guardrail = await applyGuardrails({ text, reply: playbookReply, conversationType });
   if (guardrail.handoff) {
     await ticket.update({ human_override: true, bot_enabled: false, updatedAt: new Date() } as any);

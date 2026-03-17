@@ -28,6 +28,7 @@ const Settings = () => {
   const [metaOauthLoading, setMetaOauthLoading] = useState(false);
   const [routingRules, setRoutingRules] = useState<any[]>([]);
   const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [agentDomainProfileJson, setAgentDomainProfileJson] = useState('{"domainLabel":"inmobiliarias","assistantIdentity":"asesor inmobiliario","offeringLabel":"propiedades","offerCollectionLabel":"catálogo de propiedades","primaryObjective":"entender necesidad del cliente, mostrar propiedades relevantes y coordinar visitas","qualificationFields":["zona","presupuesto","tipo de propiedad","cantidad de ambientes","plazo"],"objectionPlaybook":{"price":"Te muestro opciones más accesibles en la misma zona.","timing":"Armamos una propuesta por etapas."},"closingCta":"Si te parece, coordinamos la visita para esta semana.","visitCta":"Decime qué día y horario te queda cómodo para visitar.","criteriaKeywords":["busco","quiero","necesito","presupuesto","precio","zona","barrio","departamento","casa","alquiler","compra"]}');
 
   const tokkoConfigValid = (() => {
     const cooldown = Number(tokkoCooldownSeconds);
@@ -77,6 +78,10 @@ const Settings = () => {
         ]);
         setRoutingRules(Array.isArray(routing?.rules) ? routing.rules : []);
         setDuplicates(Array.isArray(dups) ? dups : []);
+
+        if (s.agentDomainProfileJson) {
+          setAgentDomainProfileJson(s.agentDomainProfileJson);
+        }
       } catch {
         setRoutingRules([]);
         setDuplicates([]);
@@ -120,6 +125,7 @@ const Settings = () => {
       if (tokkoApiKey && tokkoApiKey.trim()) payload.tokkoApiKey = tokkoApiKey.trim();
       if (metaLeadAdsWebhookVerifyToken && metaLeadAdsWebhookVerifyToken.trim()) payload.metaLeadAdsWebhookVerifyToken = metaLeadAdsWebhookVerifyToken.trim();
       if (metaLeadAdsAppSecret && metaLeadAdsAppSecret.trim()) payload.metaLeadAdsAppSecret = metaLeadAdsAppSecret.trim();
+      if (agentDomainProfileJson) payload.agentDomainProfileJson = agentDomainProfileJson;
 
       await Promise.all([
         api.put('/settings/whatsapp-cloud', payload),
@@ -188,6 +194,7 @@ const Settings = () => {
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant='scrollable' scrollButtons='auto'>
           <Tab label='Tokko' />
           <Tab label='Configuración Meta' />
+          <Tab label='Agente IA' />
           <Tab label='Templates' />
           <Tab label='Enrutamiento & Score' />
           <Tab label='Duplicados & Merge' />
@@ -270,13 +277,69 @@ const Settings = () => {
         )}
 
         {tab === 2 && (
+          <Stack spacing={2}>
+            <Typography variant='h6'>Configuración del Agente IA (Multinicho)</Typography>
+            <Alert severity='info'>
+              <Typography variant='body2'>
+                <b>Guía rápida:</b> Completá el JSON abajo según tu nicho. El agente usará estos datos para responder de forma especializada.
+              </Typography>
+            </Alert>
+
+            <Paper variant='outlined' sx={{ p: 2, bgcolor: '#f8f9fa' }}>
+              <Typography variant='subtitle2' gutterBottom>Ejemplo para Inmobiliarias:</Typography>
+              <Box component='pre' sx={{ fontSize: '0.75rem', overflowX: 'auto', whiteSpace: 'pre-wrap', bgcolor: '#fff', p: 1, borderRadius: 1 }}>
+{`{
+  "domainLabel": "inmobiliarias",
+  "assistantIdentity": "asesor inmobiliario",
+  "offeringLabel": "propiedades",
+  "offerCollectionLabel": "catálogo de propiedades",
+  "qualificationFields": ["zona", "presupuesto", "tipo", "ambientes", "plazo"],
+  "objectionPlaybook": {
+    "price": "Te muestro opciones más accesibles en la misma zona.",
+    "timing": "Armamos una propuesta por etapas."
+  },
+  "closingCta": "Coordinamos la visita.",
+  "visitCta": "Qué día y horario te queda?",
+  "criteriaKeywords": ["busco", "quiero", "zona", "departamento", "casa"]
+}`}
+              </Box>
+            </Paper>
+
+            <TextField
+              label='Configuración JSON del Agente'
+              multiline
+              rows={12}
+              value={agentDomainProfileJson}
+              onChange={(e) => setAgentDomainProfileJson(e.target.value)}
+              helperText='JSON con la configuración del agente. Mantené la estructura correcta.'
+              sx={{ fontFamily: 'monospace' }}
+            />
+
+            <Stack direction='row' spacing={1}>
+              <Button variant='outlined' size='small' onClick={() => setAgentDomainProfileJson('{"domainLabel":"inmobiliarias","assistantIdentity":"asesor inmobiliario","offeringLabel":"propiedades","offerCollectionLabel":"catálogo","qualificationFields":["zona","presupuesto","tipo","ambientes","plazo"],"objectionPlaybook":{"price":"Te muestro opciones más accesibles.","timing":"Armamos propuesta por etapas."},"closingCta":"Coordinamos visita.","visitCta":"Qué día te sirve?","criteriaKeywords":["busco","quiero","zona","casa","departamento"]}')}>
+                Inmobiliario
+              </Button>
+              <Button variant='outlined' size='small' onClick={() => setAgentDomainProfileJson('{"domainLabel":"clínicas dentales","assistantIdentity":"asistente de admisión","offeringLabel":"turnos y tratamientos","offerCollectionLabel":"disponibilidades","qualificationFields":["motivo","urgencia","obra social","horario"],"objectionPlaybook":{"price":"Tenemos planes de pago.","timing":"Primera consulta breve."},"closingCta":"Confirmamos turno.","visitCta":"Qué horario te queda?","criteriaKeywords":["turno","consulta","tratamiento","dolor","obra social"]}')}>
+                Clínica Dental
+              </Button>
+              <Button variant='outlined' size='small' onClick={() => setAgentDomainProfileJson('{"domainLabel":"educación","assistantIdentity":"asesor académico","offeringLabel":"cursos y programas","offerCollectionLabel":"planes de estudio","qualificationFields":["objetivo","nivel","disponibilidad","presupuesto"],"objectionPlaybook":{"price":"Hay becas y planes de pago.","timing":"Ruta flexible por módulos."},"closingCta":"Avanzamos con inscripción.","visitCta":"Coordinamos llamada.","criteriaKeywords":["curso","carrera","beca","inscripción","horarios"]}')}>
+                Educación
+              </Button>
+              <Button variant='outlined' size='small' onClick={() => setAgentDomainProfileJson('{"domainLabel":"automotor","assistantIdentity":"asesor de autos","offeringLabel":"vehículos","offerCollectionLabel":"stock","qualificationFields":["marca","modelo","presupuesto","año","financiación"],"objectionPlaybook":{"price":"Tenemos financiación y planes.","timing":"Entrega progresiva."},"closingCta":"Reservamos unidad.","visitCta":"Cuándo podés visitar?","criteriaKeywords":["auto","camioneta","0km","usado","plan de ahorro","financiación"]}')}>
+                Automotor
+              </Button>
+            </Stack>
+          </Stack>
+        )}
+
+        {tab === 3 && (
           <Stack spacing={1.2}>
             <Typography variant='h6'>Templates (scaffold)</Typography>
             <Typography variant='body2' color='text.secondary'>La gestión CRUD está disponible en /templates (nuevo módulo inicial).</Typography>
           </Stack>
         )}
 
-        {tab === 3 && (
+        {tab === 4 && (
           <Stack spacing={1.2}>
             <Typography variant='h6'>Reglas de enrutamiento y score</Typography>
             <Alert severity='info'>Persistencia backend activa. Se evalúa por fuente + tags y asignación por usuario o cola.</Alert>
@@ -297,7 +360,7 @@ const Settings = () => {
           </Stack>
         )}
 
-        {tab === 4 && (
+        {tab === 5 && (
           <Stack spacing={1.2}>
             <Typography variant='h6'>Detección de duplicados y merge asistido</Typography>
             <Typography variant='body2' color='text.secondary'>Fuente backend: /ai/dedupe/candidates. El merge conserva el principal y re-asigna tickets/mensajes.</Typography>

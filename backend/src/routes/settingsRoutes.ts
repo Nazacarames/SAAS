@@ -3,7 +3,7 @@ import { QueryTypes } from "sequelize";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
 import sequelize from "../database";
-import { getRuntimeSettings, saveRuntimeSettings } from "../services/SettingsServices/RuntimeSettingsService";
+import { getRuntimeSettings, getRuntimeSettingsForCompany, saveRuntimeSettings, saveRuntimeSettingsForCompany } from "../services/SettingsServices/RuntimeSettingsService";
 const parseBoolWithDefault = (value: unknown, fallback: boolean): boolean => {
   if (value === undefined || value === null || String(value).trim() === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
@@ -108,8 +108,9 @@ settingsRoutes.get("/integrations/api-key", isAuth, isAdmin, async (_req, res) =
   return res.json({ configured: Boolean(apiKey), apiKeyMasked: apiKey ? maskKey(apiKey) : "" });
 });
 
-settingsRoutes.get("/whatsapp-cloud", isAuth, isAdmin, async (_req, res) => {
-  const settings = getRuntimeSettings();
+settingsRoutes.get("/whatsapp-cloud", isAuth, isAdmin, async (req: any, res) => {
+  const companyId = Number(req.user?.companyId || 0);
+  const settings = companyId ? await getRuntimeSettingsForCompany(companyId) : getRuntimeSettings();
   const {
     waCloudVerifyToken,
     waCloudAccessToken,
@@ -456,9 +457,10 @@ settingsRoutes.get("/agent/funnel-report", isAuth, isAdmin, async (req: any, res
   });
 });
 
-settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
+settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req: any, res) => {
   const body = req.body || {};
-  const next = saveRuntimeSettings({
+  const companyId = Number(req.user?.companyId || 0);
+  const patch = {
     waCloudVerifyToken: String(body.waCloudVerifyToken ?? ""),
     waCloudPhoneNumberId: String(body.waCloudPhoneNumberId ?? ""),
     waCloudAccessToken: String(body.waCloudAccessToken ?? ""),
@@ -470,6 +472,7 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waRecapInactivityMinutes: Number(body.waRecapInactivityMinutes || 4320),
     agentGuardrailsEnabled: typeof body.agentGuardrailsEnabled === "boolean" ? body.agentGuardrailsEnabled : true,
     agentConversationPoliciesJson: String(body.agentConversationPoliciesJson ?? ""),
+    agentDomainProfileJson: String(body.agentDomainProfileJson ?? ""),
     tokkoEnabled: typeof body.tokkoEnabled === "boolean" ? body.tokkoEnabled : false,
     tokkoApiKey: String(body.tokkoApiKey ?? ""),
     tokkoBaseUrl: String(body.tokkoBaseUrl ?? "https://www.tokkobroker.com/api/v1"),
@@ -524,7 +527,8 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waWebhookPayloadReplayKeyReuseWindowSeconds: parseNumberWithClamp(body.waWebhookPayloadReplayKeyReuseWindowSeconds, 600, 30, 3600),
     waWebhookPayloadReplayKeyReuseThreshold: parseNumberWithClamp(body.waWebhookPayloadReplayKeyReuseThreshold, 3, 1, 20),
     waOutboundDedupeMemoryMaxEntries: Number(body.waOutboundDedupeMemoryMaxEntries || 5000)
-  });
+  } as any;
+  const next = companyId ? await saveRuntimeSettingsForCompany(companyId, patch) : saveRuntimeSettings(patch);
   const {
     waCloudVerifyToken: _vt,
     waCloudAccessToken: _at,
