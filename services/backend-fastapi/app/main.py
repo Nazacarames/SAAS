@@ -4,7 +4,7 @@ from app.api.v1.endpoints import (
     ai_routes, auth, billing_routes, contacts, conversations, health, 
     messages, saved_replies_routes, settings_routes, users, 
     webhook_whatsapp, whatsapp_routes, tags_routes, 
-    integration_routes, meta_webhook_routes
+    integration_routes, meta_webhook_routes, webhooks_routes
 )
 from app.core.config import settings
 
@@ -22,6 +22,7 @@ app.include_router(contacts.router, prefix=settings.api_prefix)
 app.include_router(conversations.router, prefix=settings.api_prefix)
 app.include_router(messages.router, prefix=settings.api_prefix)
 app.include_router(tags_routes.router, prefix=settings.api_prefix)
+app.include_router(webhooks_routes.router, prefix=settings.api_prefix)
 
 # WhatsApp
 app.include_router(webhook_whatsapp.router)
