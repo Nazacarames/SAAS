@@ -74,6 +74,22 @@ def get_contact(db: Session, *, company_id: int, contact_id: int):
     return dict(row) if row else None
 
 
+def get_contact_by_phone(db: Session, phone: str):
+    """Find contact by phone number (normalized to digits only)"""
+    # Normalize: keep only digits
+    normalized = re.sub(r"\D", "", phone)
+    
+    row = db.execute(
+        text(
+            f"SELECT {_CONTACT_COLS} FROM contacts "
+            "WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), '(', '') LIKE :phone "
+            "LIMIT 1"
+        ),
+        {"phone": f"%{normalized}%"},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
 def update_contact(db: Session, *, company_id: int, contact_id: int, payload: dict):
     existing = get_contact(db, company_id=company_id, contact_id=contact_id)
     if not existing:

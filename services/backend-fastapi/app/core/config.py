@@ -11,9 +11,10 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
     db_host: str = "localhost"
     db_port: int = 5432
-    db_user: str = "postgres"
-    db_pass: str = "postgres"
+    db_user: str = "atendechat_user"
+    db_pass: str = "Atendechat2026!"
     db_name: str = "atendechat"
+    openai_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

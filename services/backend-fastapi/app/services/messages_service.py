@@ -96,3 +96,16 @@ def create_outbound_message(
     ).mappings().first()
     db.commit()
     return dict(row)
+
+
+def get_conversation_messages(db: Session, contact_id: int, limit: int = 20):
+    """Get recent messages for a contact (for AI context)"""
+    rows = db.execute(
+        text(
+            'SELECT body, "fromMe", "createdAt" FROM messages '
+            'WHERE "contactId" = :contact_id '
+            'ORDER BY "createdAt" DESC LIMIT :limit'
+        ),
+        {"contact_id": contact_id, "limit": limit},
+    ).mappings().all()
+    return [{"body": r["body"], "fromMe": r["fromMe"], "createdAt": str(r["createdAt"])} for r in rows]
