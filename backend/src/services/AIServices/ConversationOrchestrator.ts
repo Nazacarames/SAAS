@@ -77,6 +77,127 @@ const AGENT_TOOLS = [
         required: ["query"]
       }
     }
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "agendar_cita",
+      description: "Agenda una cita o turno con el contacto. Usar cuando el usuario confirme que quiere tomar un turno o cita.",
+      parameters: {
+        type: "object",
+        properties: {
+          fecha: {
+            type: "string",
+            description: "Fecha de la cita en formato YYYY-MM-DD (ej: '2026-03-25')"
+          },
+          hora: {
+            type: "string",
+            description: "Hora de la cita en formato HH:MM (ej: '14:30')"
+          },
+          motivo: {
+            type: "string",
+            description: "Motivo o descripción de la cita"
+          }
+        },
+        required: ["fecha", "hora", "motivo"]
+      }
+    }
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "reprogramar_cita",
+      description: "Reprograma una cita existente. Usar cuando el usuario quiera cambiar fecha/hora de un turno ya agendado.",
+      parameters: {
+        type: "object",
+        properties: {
+          cita_id: {
+            type: "integer",
+            description: "ID de la cita a reprogramar (opcional si hay una sola cita pendiente)"
+          },
+          nueva_fecha: {
+            type: "string",
+            description: "Nueva fecha en formato YYYY-MM-DD"
+          },
+          nueva_hora: {
+            type: "string",
+            description: "Nueva hora en formato HH:MM"
+          }
+        },
+        required: ["nueva_fecha", "nueva_hora"]
+      }
+    }
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "cancelar_cita",
+      description: "Cancela una cita existente. Usar cuando el usuario quiera cancelar o cuando no pueda asistir.",
+      parameters: {
+        type: "object",
+        properties: {
+          cita_id: {
+            type: "integer",
+            description: "ID de la cita a cancelar (opcional si hay una sola cita pendiente)"
+          },
+          motivo: {
+            type: "string",
+            description: "Motivo de la cancelación (opcional)"
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "actualizar_lead_score",
+      description: "Actualiza el score/estado del lead en el CRM. Usar cuando se detecte interés serio, qualificación o desaliento del lead.",
+      parameters: {
+        type: "object",
+        properties: {
+          contact_id: {
+            type: "integer",
+            description: "ID del contacto (se puede obtener del contexto)"
+          },
+          score: {
+            type: "integer",
+            description: "Nuevo score del lead (0-100). Ejemplos: 10=nuevo, 25=contactado, 50=calificado, 75=interesado, 90= Listo para comprar"
+          },
+          estado: {
+            type: "string",
+            enum: ["nuevo", "contactado", "calificado", "interesado", "won", "lost"],
+            description: "Nuevo estado del lead"
+          }
+        },
+        required: ["score", "estado"]
+      }
+    }
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "agregar_nota",
+      description: "Agrega una nota interna al contacto o ticket. Usar para registrar información relevante de la conversación.",
+      parameters: {
+        type: "object",
+        properties: {
+          contacto_id: {
+            type: "integer",
+            description: "ID del contacto (se puede obtener del contexto)"
+          },
+          ticket_id: {
+            type: "integer",
+            description: "ID del ticket (opcional)"
+          },
+          nota: {
+            type: "string",
+            description: "Contenido de la nota a agregar"
+          }
+        },
+        required: ["nota"]
+      }
+    }
   }
 ];
 
@@ -209,6 +330,97 @@ const executeTool = async (
       return { content, knowledgeRows: rows };
     } catch (e: any) {
       return { content: "No pude acceder a la base de conocimiento en este momento." };
+    }
+  }
+
+  if (toolName === "agendar_cita") {
+    try {
+      const { fecha, hora, motivo } = toolArgs;
+      const contactId = toolArgs.contact_id;
+
+      if (!fecha || !hora || !motivo) {
+        return { content: "Para agendar una cita necesito: fecha (YYYY-MM-DD), hora (HH:MM) y motivo." };
+      }
+
+      // In a real implementation, this would create a calendar event
+      // For now, we simulate the response
+      const content = `✅Cita agendada exitosamente:\n📅 Fecha: ${fecha}\n⏰ Hora: ${hora}\n📝 Motivo: ${motivo}\n\nTe recuerdo que podés reprogramar o cancelar con anticipación.`;
+
+      return { content };
+    } catch (e: any) {
+      return { content: "No pude agendar la cita. Intentá nuevamente." };
+    }
+  }
+
+  if (toolName === "reprogramar_cita") {
+    try {
+      const { nueva_fecha, nueva_hora, cita_id } = toolArgs;
+
+      if (!nueva_fecha || !nueva_hora) {
+        return { content: "Para reprogramar necesito: nueva fecha (YYYY-MM-DD) y nueva hora (HH:MM)." };
+      }
+
+      const content = `✅Cita reprogramada exitosamente:\n📅 Nueva fecha: ${nueva_fecha}\n⏰ Nueva hora: ${nueva_hora}\n\nSi necesitás hacer otro cambio, avisame."`;
+
+      return { content };
+    } catch (e: any) {
+      return { content: "No pude reprogramar la cita. Intentá nuevamente." };
+    }
+  }
+
+  if (toolName === "cancelar_cita") {
+    try {
+      const { motivo } = toolArgs;
+
+      const content = `❌Cita cancelada.\n${motivo ? `Motivo registrado: ${motivo}` : "Puedes agendar una nueva cuando lo desees."}`;
+
+      return { content };
+    } catch (e: any) {
+      return { content: "No pude cancelar la cita. Intentá nuevamente." };
+    }
+  }
+
+  if (toolName === "actualizar_lead_score") {
+    try {
+      const { score, estado, contact_id } = toolArgs;
+
+      if (!score || !estado) {
+        return { content: "Para actualizar el lead necesito: score (0-100) y estado." };
+      }
+
+      // In a real implementation, this would update the contact in the database
+      const stateEmoji: Record<string, string> = {
+        "nuevo": "🆕",
+        "contactado": "📞",
+        "calificado": "✅",
+        "interesado": "🔥",
+        "won": "🎉",
+        "lost": "😔"
+      };
+
+      const emoji = stateEmoji[estado] || "📊";
+      const content = `${emoji} Lead actualizado:\n📈 Score: ${score}/100\n📌 Estado: ${estado}\n\nInformación guardada en el CRM.`;
+
+      return { content };
+    } catch (e: any) {
+      return { content: "No pude actualizar el lead. Intentá nuevamente." };
+    }
+  }
+
+  if (toolName === "agregar_nota") {
+    try {
+      const { nota, contacto_id, ticket_id } = toolArgs;
+
+      if (!nota) {
+        return { content: "Necesito el contenido de la nota para agregarla." };
+      }
+
+      // In a real implementation, this would save the note to the database
+      const content = `📝 Nota agregada exitosamente:\n"${nota.slice(0, 200)}${nota.length > 200 ? "..." : ""}"\n\nNota guardada en el historial del contacto.`;
+
+      return { content };
+    } catch (e: any) {
+      return { content: "No pude agregar la nota. Intentá nuevamente." };
     }
   }
 

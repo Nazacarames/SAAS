@@ -92,6 +92,7 @@ const CheckInactiveContactsService = async () => {
   const now = Date.now();
   const runtime = getRuntimeSettings();
 
+  // OPTIMIZATION: Fetch all inactive contacts at once
   const contacts = await Contact.findAll({
     where: {
       number: { [Op.ne]: null },
@@ -101,6 +102,8 @@ const CheckInactiveContactsService = async () => {
     order: [["lastInteractionAt", "ASC"]]
   });
 
+  if (contacts.length === 0) return;
+
   let defaultWa: any = null;
   if (runtime.waCloudDefaultWhatsappId) {
     defaultWa = await Whatsapp.findByPk(runtime.waCloudDefaultWhatsappId);
@@ -108,43 +111,88 @@ const CheckInactiveContactsService = async () => {
   if (!defaultWa) defaultWa = await Whatsapp.findOne({ where: { isDefault: true } });
   if (!defaultWa) defaultWa = await Whatsapp.findOne();
 
+  // OPTIMIZATION: Batch fetch all active tickets for all contacts at once
+  const contactIds = contacts.map(c => c.id);
+  const companyIds = [...new Set(contacts.map(c => (c as any).companyId))];
+
+  const [ticketsResult]: any = await sequelize.query(`
+    SELECT DISTINCT ON (t."contactId") t.*
+    FROM tickets t
+    WHERE t."contactId" IN (:contactIds)
+      AND t.status IN ('open', 'pending')
+      AND t."companyId" IN (:companyIds)
+    ORDER BY t."contactId", t."updatedAt" DESC
+  `, { replacements: { contactIds, companyIds }, type: QueryTypes.SELECT });
+
+  const ticketsByContactId = new Map<number, any>();
+  for (const t of ticketsResult || []) {
+    if (!ticketsByContactId.has(t.contactId)) {
+      ticketsByContactId.set(t.contactId, t);
+    }
+  }
+
+  // OPTIMIZATION: Batch fetch all webhook IDs needed
+  const webhookIds = [...new Set(contacts.map(c => (c as any).inactivityWebhookId).filter(Boolean))];
+  const webhooksMap = new Map<number, any>();
+  if (webhookIds.length > 0) {
+    const webhooks = await Webhook.findAll({ where: { id: { [Op.in]: webhookIds } } });
+    for (const wh of webhooks) {
+      webhooksMap.set(wh.id, wh);
+    }
+  }
+
+  // OPTIMIZATION: Batch fetch all last messages and inbound counts for all tickets
+  const ticketIds = [...ticketsByContactId.values()].map(t => t.id).filter(Boolean);
+  let lastMessagesByTicketId = new Map<number, any>();
+  let inboundCountsByTicketId = new Map<number, number>();
+
+  if (ticketIds.length > 0) {
+    // Batch fetch last message per ticket
+    const [lastMessages]: any = await sequelize.query(`
+      SELECT DISTINCT ON (m."ticketId") m.*
+      FROM messages m
+      WHERE m."ticketId" IN (:ticketIds)
+      ORDER BY m."ticketId", m."createdAt" DESC
+    `, { replacements: { ticketIds }, type: QueryTypes.SELECT });
+
+    for (const msg of lastMessages || []) {
+      lastMessagesByTicketId.set(msg.ticketId, msg);
+    }
+
+    // Batch fetch inbound counts per ticket
+    const [inboundCounts]: any = await sequelize.query(`
+      SELECT "ticketId", COUNT(*) as count
+      FROM messages
+      WHERE "ticketId" IN (:ticketIds) AND "fromMe" = false
+      GROUP BY "ticketId"
+    `, { replacements: { ticketIds }, type: QueryTypes.SELECT });
+
+    for (const row of inboundCounts || []) {
+      inboundCountsByTicketId.set(row.ticketId, parseInt(row.count, 10));
+    }
+  }
+
+  // Process contacts with pre-fetched data (no N+1)
   for (const c of contacts) {
     const number = String((c as any).number || "").replace(/\D/g, "");
     if (!number) continue;
 
-    // Solo recaptar leads abiertos con conversación activa
-    const activeTicket = await Ticket.findOne({
-      where: {
-        contactId: c.id,
-        companyId: (c as any).companyId,
-        status: { [Op.in]: ["open", "pending"] }
-      },
-      order: [["updatedAt", "DESC"]]
-    } as any);
-
-    if (!activeTicket) continue;
-
-    // Si el lead está marcado como leído/cerrado, no recaptar
     const leadStatus = String((c as any).leadStatus || "").toLowerCase();
     if (["read", "closed", "won", "lost"].includes(leadStatus)) continue;
 
-    // Debe existir conversación y el último mensaje debe ser nuestro (lead no respondió)
-    const lastMsg: any = await Message.findOne({
-      where: { ticketId: (activeTicket as any).id },
-      order: [["createdAt", "DESC"]]
-    } as any);
+    // OPTIMIZATION: Use pre-fetched ticket data
+    const activeTicket = ticketsByContactId.get(c.id);
+    if (!activeTicket) continue;
 
-    if (!lastMsg) continue;
-    if (!(lastMsg as any).fromMe) continue;
+    // OPTIMIZATION: Use pre-fetched message data
+    const lastMsg = lastMessagesByTicketId.get(activeTicket.id);
+    if (!lastMsg || !(lastMsg as any).fromMe) continue;
 
-    // Debe existir al menos 1 mensaje entrante del lead; evita recaptar leads recién creados sin respuesta
-    const inboundCount = await Message.count({
-      where: { ticketId: (activeTicket as any).id, fromMe: false }
-    } as any);
-    if (!inboundCount || Number(inboundCount) <= 0) continue;
+    // OPTIMIZATION: Use pre-fetched count
+    const inboundCount = inboundCountsByTicketId.get(activeTicket.id) || 0;
+    if (inboundCount <= 0) continue;
 
     const inactivityMinutesContact = Number((c as any).inactivityMinutes || 0);
-    // contacts.inactivityMinutes tiene default histórico 30; si queda ese default, usar setting global.
     const useContactOverride = Number.isFinite(inactivityMinutesContact) && inactivityMinutesContact > 0 && inactivityMinutesContact !== 30;
     const inactivityMinutes = useContactOverride
       ? inactivityMinutesContact
@@ -209,9 +257,10 @@ const CheckInactiveContactsService = async () => {
       }
     }
 
+    // OPTIMIZATION: Use pre-fetched webhook data
     const webhookId = (c as any).inactivityWebhookId;
     if (webhookId) {
-      const webhook = await Webhook.findByPk(webhookId);
+      const webhook = webhooksMap.get(webhookId);
       if (webhook && (webhook as any).active) {
         const payload = {
           event: "contact.inactive",

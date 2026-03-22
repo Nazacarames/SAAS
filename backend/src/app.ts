@@ -10,8 +10,23 @@ import { requestContext } from "./middleware/requestContext";
 
 const app: Application = express();
 
-// Security headers via helmet
-app.use(helmet({ contentSecurityPolicy: false }));
+// Security headers via helmet - CSP enabled for XSS protection
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdn.jsdelivr.net"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      connectSrc: ["'self'", "https://api.openai.com", "https://api.tokkobroker.com"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
 
 // Cookie parser
 app.use(cookieParser());

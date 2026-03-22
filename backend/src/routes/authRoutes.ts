@@ -8,13 +8,13 @@ import sequelize from "../database";
 import AppError from "../errors/AppError";
 import validateSchema from "../middleware/validateSchema";
 import { loginSchema, refreshTokenSchema, registerSchema } from "../schemas/authSchemas";
+import { rateLimitRedis } from "../services/RedisService";
 
 const authRoutes = Router();
 
-// Rate limiter for registration
-const registerBuckets = new Map<string, { count: number; resetAt: number }>();
-const REGISTER_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+// Rate limit configuration
 const REGISTER_MAX_PER_WINDOW = 5;
+const REGISTER_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
 authRoutes.post("/login", validateSchema(loginSchema), async (req, res) => {
     const { email, password } = req.body;
@@ -60,18 +60,26 @@ authRoutes.post("/logout", (req, res) => {
 });
 
 authRoutes.post("/register", validateSchema(registerSchema), async (req, res) => {
-    // Rate limit check
+    // Distributed rate limit check using Redis
     const ip = String(req.ip || "unknown");
-    const now = Date.now();
-    const bucket = registerBuckets.get(ip);
-    if (bucket && bucket.resetAt > now && bucket.count >= REGISTER_MAX_PER_WINDOW) {
-        return res.status(429).json({ error: "Demasiados intentos de registro. Intente más tarde." });
+    const { allowed, remaining, resetAt } = await rateLimitRedis({
+        key: `register:${ip}`,
+        maxRequests: REGISTER_MAX_PER_WINDOW,
+        windowMs: REGISTER_WINDOW_MS,
+    });
+
+    if (!allowed) {
+        res.setHeader("X-RateLimit-Remaining", "0");
+        res.setHeader("X-RateLimit-Reset", String(Math.ceil(resetAt / 1000)));
+        return res.status(429).json({
+            error: "Demasiados intentos de registro. Intente más tarde.",
+            retryAfter: Math.ceil((resetAt - Date.now()) / 1000)
+        });
     }
-    if (!bucket || bucket.resetAt <= now) {
-        registerBuckets.set(ip, { count: 1, resetAt: now + REGISTER_WINDOW_MS });
-    } else {
-        bucket.count += 1;
-    }
+
+    res.setHeader("X-RateLimit-Remaining", String(remaining));
+    res.setHeader("X-RateLimit-Reset", String(Math.ceil(resetAt / 1000)));
+
     const { companyName, name, email, password } = req.body || {};
 
     const safeCompanyName = String(companyName || "").trim();

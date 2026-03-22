@@ -5,8 +5,9 @@ import sequelize from "./database";
 import http from "http";
 import path from "path";
 import { initIO } from "./libs/socket";
-import CheckInactiveContactsService from "./services/ContactServices/CheckInactiveContactsService";
 import { syncTokkoLocationsToKnowledge } from "./services/TokkoServices/TokkoService";
+import { addRecurringJob, closeAllQueues, QUEUE_NAMES } from "./services/QueueService";
+import { startInactivityCheckWorker, stopInactivityCheckWorker } from "./workers";
 
 dotenv.config();
 
@@ -51,6 +52,35 @@ const server = http.createServer(app);
 // Socket.io setup (shared via libs/socket -> getIO())
 initIO(server);
 
+// Graceful shutdown handler
+const gracefulShutdown = async (signal: string) => {
+  console.log(`\n[Server] Received ${signal}. Starting graceful shutdown...`);
+
+  try {
+    // Stop accepting new connections
+    server.close(() => {
+      console.log("[Server] HTTP server closed");
+    });
+
+    // Close queue workers
+    await stopInactivityCheckWorker();
+    await closeAllQueues();
+    console.log("[Server] Queue workers closed");
+
+    // Close database connection
+    await sequelize.close();
+    console.log("[Server] Database connection closed");
+
+    process.exit(0);
+  } catch (error: any) {
+    console.error("[Server] Error during shutdown:", error?.message || error);
+    process.exit(1);
+  }
+};
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
 // Database connection and server start
 const startServer = async () => {
   try {
@@ -60,12 +90,14 @@ const startServer = async () => {
 
     console.log("✓ Database ready (run 'npm run db:migrate' for schema changes)");
 
+    // Start BullMQ worker for inactivity checks
+    await startInactivityCheckWorker();
+
+    // Schedule recurring inactivity check job (every minute)
+    await addRecurringJob(QUEUE_NAMES.INACTIVITY_CHECK, "inactivity-scan", {}, "* * * * *");
+
     server.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
-
-      setInterval(() => {
-        CheckInactiveContactsService().catch((e: any) => console.error("inactivity scan error:", e?.message || e));
-      }, 60_000);
 
       // Keep Tokko locations knowledge document refreshed automatically (default: every 24h)
       setTimeout(() => { runTokkoKnowledgeSync(); }, 15_000);
