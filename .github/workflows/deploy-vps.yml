@@ -15,16 +15,11 @@ jobs:
           fetch-depth: 0
 
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v0.1.10
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_SSH_PORT || '22' }}
-          script: |
-            cd /opt/charlott-fastapi
-            git fetch origin main
-            git reset --hard origin/main
-            pip install -e . --quiet
-            systemctl restart charlott-fastapi
-            echo "Deployment successful"
+        run: |
+          echo "${{ secrets.VPS_SSH_KEY }}" > /tmp/vps_key
+          chmod 600 /tmp/vps_key
+          scp -i /tmp/vps_key -o StrictHostKeyChecking=no -r services/backend-fastapi/app/* root@${{ secrets.VPS_HOST }}:/opt/backend-fastapi/app/
+          ssh -i /tmp/vps_key -o StrictHostKeyChecking=no root@${{ secrets.VPS_HOST }} "systemctl restart charlott-fastapi"
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
