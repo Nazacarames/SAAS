@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
+import threading
+import time
 
 from app.api.deps import get_current_user_payload
 from app.core.config import settings
@@ -11,14 +13,18 @@ from app.schemas.auth import (
     MeResponse,
     RefreshRequest,
     RefreshResponse,
+    RegisterRequest,
+    RegisterResponse,
 )
 from app.services.auth_service import (
     create_access_token,
     create_refresh_token,
+    create_user_with_company,
     get_user_by_email,
     get_user_by_id,
     revoke_user_refresh_tokens,
     store_refresh_token,
+    user_exists,
     validate_refresh_token,
     verify_password,
 )
@@ -143,3 +149,89 @@ def logout(
     response.delete_cookie(key="refreshToken", path="/api/auth/refresh", **opts)
 
     return {"ok": True}
+
+
+# ── POST /api/auth/register ──────────────────────────────────────
+# Rate limiter: 5 attempts per 15 minutes per IP (thread-safe)
+_register_buckets: dict[str, dict] = {}
+_register_buckets_lock = threading.Lock()
+_REGISTER_WINDOW_MS = 15 * 60 * 1000
+_REGISTER_MAX_PER_WINDOW = 5
+
+
+def _check_register_rate_limit(ip: str) -> bool:
+    """Returns True if request should be allowed, False if rate limited (thread-safe)."""
+    now = int(time.time() * 1000)
+    with _register_buckets_lock:
+        bucket = _register_buckets.get(ip)
+        if bucket and bucket["resetAt"] > now and bucket["count"] >= _REGISTER_MAX_PER_WINDOW:
+            return False
+        if not bucket or bucket["resetAt"] <= now:
+            _register_buckets[ip] = {"count": 1, "resetAt": now + _REGISTER_WINDOW_MS}
+        else:
+            bucket["count"] += 1
+        return True
+
+
+@router.post("/register", response_model=RegisterResponse, status_code=201)
+def register(
+    body: RegisterRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    request: Request | None = None,
+):
+    # Rate limiting
+    ip = "unknown"
+    if request:
+        ip = request.client.host if request.client else "unknown"
+
+    if not _check_register_rate_limit(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiados intentos de registro. Intente más tarde.",
+        )
+
+    # Validation
+    email = body.email.strip().lower()
+    name = body.name.strip()
+    password = body.password
+    company_name = body.companyName.strip()
+
+    if not company_name or not name or not email or not password:
+        raise HTTPException(status_code=400, detail="Faltan datos requeridos")
+
+    import re
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise HTTPException(status_code=400, detail="Email inválido")
+
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="La contraseña debe tener al menos 8 caracteres",
+        )
+
+    # Check existing user
+    if user_exists(db, email):
+        raise HTTPException(status_code=409, detail="El email ya está registrado")
+
+    # Create user and company
+    user = create_user_with_company(db, name, email, password, company_name)
+
+    # Generate tokens
+    access = create_access_token(user)
+    refresh = create_refresh_token(user)
+    store_refresh_token(db, refresh, user["id"])
+
+    _set_auth_cookies(response, access, refresh)
+
+    return {
+        "ok": True,
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "profile": user["profile"],
+            "companyId": user["companyId"],
+        },
+        "token": access,
+    }

@@ -14,7 +14,7 @@ from app.services.knowledge_base import (
     COMPANY_PROFILE,
     SOCIAL_MEDIA,
 )
-import requests
+import httpx
 
 
 # ==================== AGENT GUARDRAILS ====================
@@ -76,7 +76,7 @@ def _recent_options_sent(conversation_history: list) -> bool:
 
 # ==================== TOOLS (Function Calling) ====================
 
-def search_properties(location: str = None, price_max: int = None, 
+async def search_properties(location: str = None, price_max: int = None,
                      property_type: str = None, rooms: int = None) -> List[Dict]:
     """
     Buscar propiedades en Tokko API.
@@ -89,7 +89,8 @@ def search_properties(location: str = None, price_max: int = None,
             "limit": 20,  # Get more properties, let AI filter
         }
 
-        response = requests.get(f"{tokko_url}/property/", params=params, timeout=15)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{tokko_url}/property/", params=params, timeout=15)
         if response.status_code == 200:
             data = response.json()
             properties = data.get("objects", [])[:20]
@@ -100,7 +101,7 @@ def search_properties(location: str = None, price_max: int = None,
                     photo = ""
                     if p.get("photos") and len(p["photos"]) > 0:
                         photo = p["photos"][0].get("image", "")
-                    
+
                     # Get price from operations array
                     price = "Consultar"
                     if p.get("operations"):
@@ -109,18 +110,18 @@ def search_properties(location: str = None, price_max: int = None,
                                 price_val = price_info.get('price', 0)
                                 price = f"USD {price_val:,}" if price_val else "Consultar"
                                 break
-                    
+
                     # Get location
                     location = "Argentina"
                     if p.get("location"):
                         location = p["location"].get("full_location", "Argentina")
-                    
+
                     # Get property type
                     prop_type = p.get("type", "property")
-                    
+
                     # Get bedroom amount
                     bedrooms = p.get("bedroom_amount", p.get("rooms", ""))
-                    
+
                     results.append({
                         "id": p.get("id", 0),
                         "title": p.get("address", "Propiedad"),
@@ -346,7 +347,7 @@ REGLAS DE USO DE HERRAMIENTAS (OBLIGATORIAS):
                 function_args = json.loads(tool_call.function.arguments)
                 
                 if function_name == "search_properties":
-                    results = search_properties(**function_args)
+                    results = await search_properties(**function_args)
                     tokko_results = results
                     tool_results.append({
                         "tool": "search_properties",

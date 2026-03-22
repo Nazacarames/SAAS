@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import time
 import os
+import threading
 from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Response, Depends
 from pydantic import BaseModel
@@ -14,38 +15,47 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user_payload
 from app.core.db import get_db
+from app.core.config import settings
 
-router = APIRouter(prefix="/api/ai", tags=["meta-webhook"])
+router = APIRouter(prefix="", tags=["meta-webhook"])
 
-# In-memory replay cache
-replay_cache: dict[str, float] = {}
+# Thread-safe in-memory replay cache with TTL
+_replay_cache: dict[str, float] = {}
+_replay_cache_lock = threading.Lock()
 META_REPLAY_TTL_MS = 10 * 60 * 1000  # 10 min
-META_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "atendechat_verify_token")
+META_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "")  # Empty = accept any
 
 
 def check_meta_replay(body: bytes) -> bool:
-    """Check if this request is a replay"""
+    """Check if this request is a replay (thread-safe)"""
     key = hashlib.sha256(body).hexdigest()[:64]
     now = time.time() * 1000
-    
-    # Clean old entries
-    global replay_cache
-    replay_cache = {k: v for k, v in replay_cache.items() if now - v < META_REPLAY_TTL_MS}
-    
-    if key in replay_cache:
-        return False
-    
-    replay_cache[key] = now
-    return True
+
+    with _replay_cache_lock:
+        # Remove expired entries (TTL-based eviction)
+        for k in list(_replay_cache.keys()):
+            if now - _replay_cache[k] >= META_REPLAY_TTL_MS:
+                del _replay_cache[k]
+
+        if key in _replay_cache:
+            return False
+
+        _replay_cache[key] = now
+        return True
 
 
 def verify_meta_signature(body: bytes, signature: str) -> bool:
     """Verify Meta webhook signature"""
     if not signature:
+        if settings.environment == "production":
+            return False
         return True  # Skip in dev
-    
+
     app_secret = os.getenv("META_APP_SECRET", "")
     if not app_secret:
+        if settings.environment == "production":
+            print("WARNING: META_APP_SECRET not configured - rejecting webhook in production")
+            return False
         return True
     
     expected = hmac.new(
@@ -68,10 +78,16 @@ async def leadgen_verify(req: Request):
     mode = req.query_params.get("hub.mode")
     token = req.query_params.get("hub.verify_token")
     challenge = req.query_params.get("hub.challenge")
-    
+
+    if not META_VERIFY_TOKEN:
+        if settings.environment == "production":
+            raise HTTPException(status_code=500, detail="META_WEBHOOK_VERIFY_TOKEN not configured")
+        # In dev, skip verification (accept any token)
+        return challenge
+
     if token != META_VERIFY_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid verify token")
-    
+
     return challenge
 
 
@@ -148,10 +164,16 @@ async def meta_leads_verify(req: Request):
     mode = req.query_params.get("hub.mode")
     token = req.query_params.get("hub.verify_token")
     challenge = req.query_params.get("hub.challenge")
-    
+
+    if not META_VERIFY_TOKEN:
+        if settings.environment == "production":
+            raise HTTPException(status_code=500, detail="META_WEBHOOK_VERIFY_TOKEN not configured")
+        # In dev, skip verification (accept any token)
+        return challenge
+
     if token != META_VERIFY_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid verify token")
-    
+
     return challenge
 
 

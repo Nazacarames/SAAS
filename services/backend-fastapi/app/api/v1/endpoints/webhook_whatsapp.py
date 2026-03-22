@@ -3,7 +3,7 @@ WhatsApp Cloud Webhook - Handle incoming messages and process with AI Agent
 Migrated from Node.js ProcessCloudWebhookService
 """
 import os
-import requests
+import httpx
 from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Response, Depends
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import time
 import json
+import threading
 
 from app.core.db import get_db
 from app.core.config import settings
@@ -22,8 +23,10 @@ from app.services.messages_service import get_conversation_messages
 
 router = APIRouter(prefix="/whatsapp-cloud", tags=["whatsapp-webhook"])
 
-# In-memory replay cache
-replay_cache: dict[str, float] = {}
+# Thread-safe in-memory replay cache with TTL
+_replay_cache: dict[str, float] = {}
+_replay_cache_lock = threading.Lock()
+_REPLAY_TTL_SECONDS = 3600  # 1 hour TTL
 
 
 def get_app_secret() -> str:
@@ -34,8 +37,15 @@ def get_app_secret() -> str:
 def verify_signature(req: Request, body: bytes, signature: str | None) -> bool:
     """Verify webhook signature"""
     app_secret = get_app_secret()
-    if not app_secret or not signature:
+    if not app_secret:
+        if settings.environment == "production":
+            print("WARNING: WHATSAPP_APP_SECRET not configured - rejecting webhook in production")
+            return False
         return True  # Skip in dev
+    if not signature:
+        if settings.environment == "production":
+            return False
+        return True
 
     expected = hmac.new(
         app_secret.encode(),
@@ -46,18 +56,21 @@ def verify_signature(req: Request, body: bytes, signature: str | None) -> bool:
 
 
 def check_replay(body: bytes) -> bool:
-    """Check for replay attacks"""
+    """Check for replay attacks (thread-safe)"""
     key = hashlib.sha256(body).hexdigest()[:64]
     now = time.time()
 
-    global replay_cache
-    replay_cache = {k: v for k, v in replay_cache.items() if now - v < 3600}
+    with _replay_cache_lock:
+        # Remove expired entries (TTL-based eviction)
+        for k in list(_replay_cache.keys()):
+            if now - _replay_cache[k] >= _REPLAY_TTL_SECONDS:
+                del _replay_cache[k]
 
-    if key in replay_cache:
-        return False
+        if key in _replay_cache:
+            return False
 
-    replay_cache[key] = now
-    return True
+        _replay_cache[key] = now
+        return True
 
 
 class WebhookResponse(BaseModel):
@@ -133,34 +146,35 @@ def get_whatsapp_config(db: Session, company_id: int) -> Optional[dict]:
     }
 
 
-def send_whatsapp_message(phone: str, text: str, config: dict) -> dict:
+async def send_whatsapp_message(phone: str, text: str, config: dict) -> dict:
     """Send WhatsApp message via Cloud API"""
     phone_id = config.get("phoneId")
     access_token = config.get("token")
-    
+
     if not phone_id or not access_token:
         return {"ok": False, "reason": "whatsapp_not_configured"}
-    
+
     # Add country code if not present (54 for Argentina)
     phone = phone.strip().replace("+", "")
     if not phone.startswith("54"):
         phone = "54" + phone
-    
+
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "messaging_product": "whatsapp",
         "to": phone,
         "type": "text",
         "text": {"body": text}
     }
-    
+
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=30)
         if response.status_code in [200, 201]:
             data = response.json()
             return {
@@ -266,7 +280,7 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
             # Get WhatsApp config and send reply
             wa_config = get_whatsapp_config(db, company_id)
             if wa_config:
-                send_result = send_whatsapp_message(from_number, ai_reply, wa_config)
+                send_result = await send_whatsapp_message(from_number, ai_reply, wa_config)
                 print(f"WhatsApp send result: {send_result}")
         
         return {
@@ -293,7 +307,11 @@ async def whatsapp_webhook_verify(req: Request):
     challenge = req.query_params.get("hub.challenge")
     
     # Verify token (should match WhatsApp webhook verify token)
-    verify_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "atendechat")
+    verify_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
+    if not verify_token:
+        if settings.environment == "production":
+            raise HTTPException(status_code=500, detail="WHATSAPP_WEBHOOK_VERIFY_TOKEN not configured")
+        verify_token = "atendechat"  # Fallback for development only
     if token != verify_token:
         raise HTTPException(status_code=403, detail="Invalid verify token")
     
