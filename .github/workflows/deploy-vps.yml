@@ -19,8 +19,8 @@ jobs:
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "PWD=$PWD"
           ls -la $GITHUB_WORKSPACE/
-          ls -la $GITHUB_WORKSPACE/SAAS/ 2>/dev/null || echo "no SAAS dir"
-          ls services/backend-fastapi/app/ 2>/dev/null | head -5
+          find $GITHUB_WORKSPACE -name "webhook_whatsapp.py" -type f 2>/dev/null | head -5
+          find $GITHUB_WORKSPACE -type d -name "app" 2>/dev/null | head -5
 
       - name: Deploy to VPS
         run: |
