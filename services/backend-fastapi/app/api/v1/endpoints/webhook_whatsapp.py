@@ -15,6 +15,7 @@ import time
 import json
 
 from app.core.db import get_db
+from app.core.config import settings
 from app.services.ai_agent_service import generate_reply
 from app.services.contacts_service import get_contact_by_phone
 from app.services.messages_service import get_conversation_messages
@@ -74,30 +75,62 @@ def extract_message_from_payload(payload: dict) -> tuple[str, str, str]:
             changes = entry.get("changes", [])
             for change in changes:
                 value = change.get("value", {})
+                
+                # First check for status updates (delivery receipts, etc.) - ignore these
+                statuses = value.get("statuses", [])
+                if statuses:
+                    return "", "", ""
+                
+                # Then check for messages
                 messages = value.get("messages", [])
                 for msg in messages:
                     msg_id = msg.get("id", "")
                     from_num = msg.get("from", "")
                     
-                    if msg.get("type") == "text":
-                        text = msg.get("text", {}).get("body", "")
-                        return msg_id, from_num, text
+                    # Always try to get text.body first (works for text and some other types)
+                    text_body = msg.get("text", {}).get("body", "")
+                    if text_body:
+                        return msg_id, from_num, text_body
                     
-                    # Handle other types
-                    return msg_id, from_num, f"[{msg.get('type', 'unknown')} message]"
+                    # If no text.body, check type
+                    msg_type = msg.get("type", "unknown")
+                    if msg_type == "text":
+                        # This shouldn't be reached since text_body would be set above
+                        return msg_id, from_num, text_body
+                    
+                    # Handle other types (image, document, etc.)
+                    return msg_id, from_num, f"[{msg_type} message]"
         
         return "", "", ""
-    except:
+    except Exception as e:
+        print(f"extract_message_from_payload error: {e}")
         return "", "", ""
 
 
 def get_whatsapp_config(db: Session, company_id: int) -> Optional[dict]:
-    """Get active WhatsApp configuration for company"""
+    """Get active WhatsApp configuration for company from company_runtime_settings"""
     row = db.execute(
-        text('SELECT * FROM "whatsappConfigs" WHERE "companyId" = :company_id AND status = :status LIMIT 1'),
-        {"company_id": company_id, "status": "CONNECTED"}
+        text('SELECT settings_json FROM company_runtime_settings WHERE company_id = :company_id LIMIT 1'),
+        {"company_id": company_id}
     ).mappings().first()
-    return dict(row) if row else None
+    
+    if not row:
+        return None
+    
+    import json
+    settings = json.loads(row["settings_json"])
+    
+    # Extract WhatsApp Cloud API credentials
+    phone_id = settings.get("waCloudPhoneNumberId")
+    access_token = settings.get("waCloudAccessToken")
+    
+    if not phone_id or not access_token:
+        return None
+    
+    return {
+        "phoneId": phone_id,
+        "token": access_token
+    }
 
 
 def send_whatsapp_message(phone: str, text: str, config: dict) -> dict:
@@ -107,6 +140,11 @@ def send_whatsapp_message(phone: str, text: str, config: dict) -> dict:
     
     if not phone_id or not access_token:
         return {"ok": False, "reason": "whatsapp_not_configured"}
+    
+    # Add country code if not present (54 for Argentina)
+    phone = phone.strip().replace("+", "")
+    if not phone.startswith("54"):
+        phone = "54" + phone
     
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {
@@ -139,11 +177,11 @@ def save_message(db: Session, contact_id: int, body: str, from_me: bool, company
     """Save message to database"""
     row = db.execute(
         text(
-            'INSERT INTO messages (body, "fromMe", "contactId", "userId", "createdAt", "updatedAt") '
-            'VALUES (:body, :from_me, :contact_id, :user_id, NOW(), NOW()) '
+            'INSERT INTO messages (body, "fromMe", "contactId", "createdAt", "updatedAt") '
+            'VALUES (:body, :from_me, :contact_id, NOW(), NOW()) '
             'RETURNING id, body, "fromMe", "contactId"'
         ),
-        {"body": body, "from_me": from_me, "contact_id": contact_id, "user_id": company_id}  # Use company as user for AI
+        {"body": body, "from_me": from_me, "contact_id": contact_id}
     ).mappings().first()
     db.commit()
     return dict(row)
@@ -188,9 +226,25 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
         save_message(db, contact["id"], message_text, False, company_id)
     except Exception as e:
         print(f"Error saving incoming message: {e}")
+        db.rollback()
 
-    # Get conversation history for context
-    conversation_history = get_conversation_messages(db, contact["id"])
+    # Get conversation history for context - only USER messages, not AI messages
+    try:
+        db.rollback()  # Clear any aborted transaction state
+        all_messages = get_conversation_messages(db, contact["id"])
+    except Exception as e:
+        print(f"Error getting conversation history: {e}")
+        db.rollback()
+        all_messages = []
+    # Filter: only user messages (fromMe=False), exclude "[unknown message]" and empty
+    conversation_history = [
+        m for m in all_messages
+        if not m.get("fromMe", True)  # User messages have fromMe=False
+        and m.get("body")
+        and not m["body"].startswith("[")  # Exclude "[xxx message]" types
+    ]
+    # Reverse to chronological order (oldest first)
+    conversation_history = list(reversed(conversation_history))
     
     # Process through AI agent
     try:
