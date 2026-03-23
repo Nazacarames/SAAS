@@ -336,14 +336,38 @@ const executeTool = async (
   if (toolName === "agendar_cita") {
     try {
       const { fecha, hora, motivo } = toolArgs;
-      const contactId = toolArgs.contact_id;
+      const contactId = Number(toolArgs.contact_id || 0);
 
       if (!fecha || !hora || !motivo) {
         return { content: "Para agendar una cita necesito: fecha (YYYY-MM-DD), hora (HH:MM) y motivo." };
       }
 
-      // In a real implementation, this would create a calendar event
-      // For now, we simulate the response
+      // Validate contact belongs to company
+      if (!contactId) {
+        return { content: "No tengo información del contacto para agendar la cita." };
+      }
+      const [contact]: any = await sequelize.query(
+        `SELECT id FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`,
+        { replacements: { contactId, companyId }, type: QueryTypes.SELECT }
+      );
+      if (!contact) {
+        return { content: "No encontré el contacto para agendar la cita." };
+      }
+
+      const startsAt = `${fecha} ${hora}:00`;
+      const durationMin = 60;
+      const endsAt = new Date(new Date(startsAt).getTime() + durationMin * 60_000).toISOString().slice(0, 19).replace('T', ' ');
+
+      const [appt]: any = await sequelize.query(
+        `INSERT INTO appointments (company_id, contact_id, starts_at, ends_at, service_type, status, notes, created_at, updated_at)
+         VALUES (:companyId, :contactId, :startsAt, :endsAt, 'general', 'scheduled', :notes, NOW(), NOW())
+         RETURNING id`,
+        {
+          replacements: { companyId, contactId, startsAt, endsAt, notes: motivo },
+          type: QueryTypes.INSERT
+        }
+      );
+
       const content = `✅Cita agendada exitosamente:\n📅 Fecha: ${fecha}\n⏰ Hora: ${hora}\n📝 Motivo: ${motivo}\n\nTe recuerdo que podés reprogramar o cancelar con anticipación.`;
 
       return { content };
@@ -355,12 +379,32 @@ const executeTool = async (
   if (toolName === "reprogramar_cita") {
     try {
       const { nueva_fecha, nueva_hora, cita_id } = toolArgs;
+      const appointmentId = Number(cita_id || toolArgs.appointment_id || 0);
 
       if (!nueva_fecha || !nueva_hora) {
         return { content: "Para reprogramar necesito: nueva fecha (YYYY-MM-DD) y nueva hora (HH:MM)." };
       }
 
-      const content = `✅Cita reprogramada exitosamente:\n📅 Nueva fecha: ${nueva_fecha}\n⏰ Nueva hora: ${nueva_hora}\n\nSi necesitás hacer otro cambio, avisame."`;
+      if (!appointmentId) {
+        return { content: "No tengo información de la cita a reprogramar." };
+      }
+
+      const startsAt = `${nueva_fecha} ${nueva_hora}:00`;
+      const durationMin = 60;
+      const endsAt = new Date(new Date(startsAt).getTime() + durationMin * 60_000).toISOString().slice(0, 19).replace('T', ' ');
+
+      const [result]: any = await sequelize.query(
+        `UPDATE appointments SET starts_at = :startsAt, ends_at = :endsAt, status = 'rescheduled', updated_at = NOW()
+         WHERE id = :appointmentId AND company_id = :companyId
+         RETURNING id`,
+        { replacements: { appointmentId, companyId, startsAt, endsAt }, type: QueryTypes.UPDATE }
+      );
+
+      if (!result || !result.id) {
+        return { content: "No encontré la cita para reprogramar." };
+      }
+
+      const content = `✅Cita reprogramada exitosamente:\n📅 Nueva fecha: ${nueva_fecha}\n⏰ Nueva hora: ${nueva_hora}\n\nSi necesitás hacer otro cambio, avisame.`;
 
       return { content };
     } catch (e: any) {
@@ -370,7 +414,23 @@ const executeTool = async (
 
   if (toolName === "cancelar_cita") {
     try {
-      const { motivo } = toolArgs;
+      const { motivo, cita_id } = toolArgs;
+      const appointmentId = Number(cita_id || toolArgs.appointment_id || 0);
+
+      if (!appointmentId) {
+        return { content: "No tengo información de la cita a cancelar." };
+      }
+
+      const [result]: any = await sequelize.query(
+        `UPDATE appointments SET status = 'cancelled', updated_at = NOW()
+         WHERE id = :appointmentId AND company_id = :companyId
+         RETURNING id`,
+        { replacements: { appointmentId, companyId }, type: QueryTypes.UPDATE }
+      );
+
+      if (!result || !result.id) {
+        return { content: "No encontré la cita para cancelar." };
+      }
 
       const content = `❌Cita cancelada.\n${motivo ? `Motivo registrado: ${motivo}` : "Puedes agendar una nueva cuando lo desees."}`;
 
@@ -382,13 +442,49 @@ const executeTool = async (
 
   if (toolName === "actualizar_lead_score") {
     try {
-      const { score, estado, contact_id } = toolArgs;
+      const { score, estado } = toolArgs;
+      const contactId = Number(toolArgs.contact_id || 0);
 
       if (!score || !estado) {
         return { content: "Para actualizar el lead necesito: score (0-100) y estado." };
       }
 
-      // In a real implementation, this would update the contact in the database
+      // Validate contact belongs to company
+      if (!contactId) {
+        return { content: "No tengo información del contacto para actualizar el lead." };
+      }
+      const [contact]: any = await sequelize.query(
+        `SELECT id, lead_score, "leadStatus" AS lead_status FROM contacts WHERE id = :contactId AND "companyId" = :companyId LIMIT 1`,
+        { replacements: { contactId, companyId }, type: QueryTypes.SELECT }
+      );
+      if (!contact) {
+        return { content: "No encontré el contacto para actualizar el lead." };
+      }
+
+      const previousScore = Number(contact.lead_score || 0);
+      const previousStatus = String(contact.lead_status || 'nuevo');
+
+      await sequelize.query(
+        `UPDATE contacts SET lead_score = :score, "leadStatus" = :status, "updatedAt" = NOW() WHERE id = :contactId AND "companyId" = :companyId`,
+        { replacements: { contactId, companyId, score, status: estado }, type: QueryTypes.UPDATE }
+      );
+
+      await sequelize.query(
+        `INSERT INTO lead_score_events (company_id, contact_id, previous_score, new_score, previous_status, new_status, reason, payload_json, created_at)
+         VALUES (:companyId, :contactId, :prevScore, :newScore, :prevStatus, :newStatus, 'ai_agent_update', '{}', NOW())`,
+        {
+          replacements: {
+            companyId,
+            contactId,
+            prevScore: previousScore,
+            newScore: score,
+            prevStatus: previousStatus,
+            newStatus: estado
+          },
+          type: QueryTypes.INSERT
+        }
+      );
+
       const stateEmoji: Record<string, string> = {
         "nuevo": "🆕",
         "contactado": "📞",
@@ -415,8 +511,48 @@ const executeTool = async (
         return { content: "Necesito el contenido de la nota para agregarla." };
       }
 
-      // In a real implementation, this would save the note to the database
-      const content = `📝 Nota agregada exitosamente:\n"${nota.slice(0, 200)}${nota.length > 200 ? "..." : ""}"\n\nNota guardada en el historial del contacto.`;
+      const contactId = Number(contacto_id || 0);
+      const ticketId = Number(ticket_id || 0);
+
+      // Determine entity type and id - prefer ticket if available, otherwise contact
+      let entityType: string;
+      let entityId: number;
+      if (ticketId > 0) {
+        entityType = 'ticket';
+        entityId = ticketId;
+      } else if (contactId > 0) {
+        entityType = 'contact';
+        entityId = contactId;
+      } else {
+        return { content: "Necesito un ticket o contacto válido para agregar la nota." };
+      }
+
+      // Ensure internal_notes table exists (created by ensureCrmFeatureTables in aiRoutes)
+      await sequelize.query(
+        `CREATE TABLE IF NOT EXISTS internal_notes (
+          id SERIAL PRIMARY KEY,
+          company_id INTEGER NOT NULL,
+          entity_type VARCHAR(20) NOT NULL,
+          entity_id INTEGER NOT NULL,
+          content TEXT,
+          mentions_json TEXT,
+          created_by INTEGER,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )`
+      );
+
+      const [row]: any = await sequelize.query(
+        `INSERT INTO internal_notes (company_id, entity_type, entity_id, content, mentions_json, created_at, updated_at)
+         VALUES (:companyId, :entityType, :entityId, :content, '[]', NOW(), NOW())
+         RETURNING id`,
+        {
+          replacements: { companyId, entityType, entityId, content: nota },
+          type: QueryTypes.INSERT
+        }
+      );
+
+      const content = `📝 Nota agregada exitosamente:\n"${nota.slice(0, 200)}${nota.length > 200 ? "..." : ""}"\n\nNota guardada en el historial.`;
 
       return { content };
     } catch (e: any) {
