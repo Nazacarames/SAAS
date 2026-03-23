@@ -3,9 +3,12 @@ import math
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+# Frontend expects: contactId, name, number, lastMessage, updatedAt, ticketCount, status(es)
 _CONV_COLS = (
-    'c.id, c.name AS "contactName", c.number AS "contactNumber", '
-    'c."leadStatus", c."assignedUserId", c."updatedAt"'
+    'c.id AS "contactId", c.name, c.number, c."leadStatus" AS status, '
+    'c."assignedUserId", c."updatedAt", '
+    '(SELECT COUNT(*) FROM messages m WHERE m."contactId" = c.id) AS "ticketCount", '
+    '(SELECT body FROM messages m WHERE m."contactId" = c.id ORDER BY m."createdAt" DESC LIMIT 1) AS "lastMessage"'
 )
 
 

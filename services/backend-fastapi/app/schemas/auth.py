@@ -34,3 +34,16 @@ class RefreshResponse(BaseModel):
 
 class LogoutResponse(BaseModel):
     ok: bool = True
+
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    companyName: str
+
+
+class RegisterResponse(BaseModel):
+    ok: bool = True
+    user: UserOut
+    token: str

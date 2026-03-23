@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from datetime import datetime
 
 
 class ContactCreateRequest(BaseModel):
@@ -36,3 +37,5 @@ class ContactOut(BaseModel):
     companyId: int
     inactivityMinutes: int | None = None
     inactivityWebhookId: int | None = None
+    createdAt: datetime | None = None
+    updatedAt: datetime | None = None

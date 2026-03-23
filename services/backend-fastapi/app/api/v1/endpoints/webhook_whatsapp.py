@@ -260,12 +260,25 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
     # Reverse to chronological order (oldest first)
     conversation_history = list(reversed(conversation_history))
     
-    # Process through AI agent
+    # Process through AI agent (use company's name from database for proper multi-tenant support)
     try:
+        # Get company name from database for proper multi-tenant AI configuration
+        company_name = "Default"
+        try:
+            company_row = db.execute(
+                text('SELECT name FROM companies WHERE id = :company_id LIMIT 1'),
+                {"company_id": company_id}
+            ).mappings().first()
+            if company_row:
+                company_name = company_row["name"]
+        except Exception:
+            pass
+
         ai_result = await generate_reply(
             text=message_text,
             conversation_history=conversation_history,
-            company_name="Charlott"
+            company_name=company_name,
+            company_id=company_id
         )
         
         ai_reply = ai_result.get("reply", "")

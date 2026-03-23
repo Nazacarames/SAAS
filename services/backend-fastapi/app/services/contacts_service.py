@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 
 _CONTACT_COLS = (
     'id, name, number, email, "whatsappId", source, "leadStatus", '
-    '"assignedUserId", "companyId", "inactivityMinutes", "inactivityWebhookId"'
+    '"assignedUserId", "companyId", "inactivityMinutes", "inactivityWebhookId", '
+    '"createdAt", "updatedAt"'
 )
 
 
