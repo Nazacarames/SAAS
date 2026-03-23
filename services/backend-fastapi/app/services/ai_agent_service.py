@@ -1,6 +1,9 @@
 """
 AI Agent Service - OpenAI Autonomous Agent
-Uses GPT-4o with Function Calling for tool use
+Uses GPT-4o with Function Calling for tool use.
+
+Now delegates to ConversationOrchestrator for new conversations while
+maintaining full backwards compatibility with generate_reply().
 """
 import os
 import re
@@ -244,14 +247,28 @@ async def generate_reply(
     text: str,
     conversation_history: list = None,
     company_name: str = None,
-    company_id: int = 1
+    company_id: int = 1,
+    use_orchestrator: bool = False,
 ) -> dict:
     """
     Autonomous AI Agent using OpenAI GPT-4o with Function Calling.
     All instructions come from AI Agent prompt (DB) + Knowledge Base (DB).
     Tools are REQUIRED when real data is needed.
+
+    Set use_orchestrator=True to enable the new ConversationOrchestrator
+    pipeline (intent detection, slot extraction, hybrid RAG, state machine,
+    guardrails, and full trace persistence).
     """
     conversation_history = conversation_history or []
+
+    # Delegate to orchestrator when enabled
+    if use_orchestrator:
+        from app.services.conversation_orchestrator import orchestrate_reply
+        return await orchestrate_reply(
+            text=text,
+            conversation_history=conversation_history,
+            company_id=company_id,
+        )
     
     openai_client = get_openai_client()
     if not openai_client or not settings.openai_api_key:

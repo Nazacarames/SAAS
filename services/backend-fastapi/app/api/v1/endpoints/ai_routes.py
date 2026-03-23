@@ -823,6 +823,44 @@ def rag_search(
     return [dict(row) for row in rows]
 
 
+# ── Schemas for Orchestrator ─────────────────────────────────────────
+
+class OrchestrateRequest(BaseModel):
+    message: str
+    conversation_history: list[dict[str, Any]] = []
+    conversation_id: Optional[int] = None
+    contact_id: Optional[int] = None
+    conversation_state: str = "new"
+    use_orchestrator: bool = True
+
+
+# ── POST /api/ai/orchestrate ─────────────────────────────────────────
+@router.post("/orchestrate")
+async def orchestrate(
+    body: OrchestrateRequest,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """
+    Full orchestrator pipeline: intent detection, slot extraction,
+    hybrid RAG, tool calling, guardrails, state machine, trace persistence.
+    """
+    company_id = payload.get("companyId")
+    
+    from app.services.conversation_orchestrator import orchestrate_reply
+
+    result = await orchestrate_reply(
+        text=body.message,
+        conversation_history=body.conversation_history,
+        company_id=company_id,
+        conversation_id=body.conversation_id,
+        contact_id=body.contact_id,
+        conversation_state=body.conversation_state,
+    )
+
+    return result
+
+
 # ── GET /api/ai/funnel/stats ─────────────────────────────────────────
 @router.get("/funnel/stats")
 def get_funnel_stats(
