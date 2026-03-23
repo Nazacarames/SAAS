@@ -11,11 +11,13 @@ import { requestContext } from "./middleware/requestContext";
 const app: Application = express();
 
 // Security headers via helmet - CSP enabled for XSS protection
+// Note: styleSrc keeps 'unsafe-inline' because MUI and CSS-in-JS libraries require it.
+// scriptSrc removes 'unsafe-inline' since Vite-built React apps don't need inline scripts.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+      scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdn.jsdelivr.net"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:", "blob:"],

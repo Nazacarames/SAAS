@@ -26,24 +26,20 @@ const Dashboard = () => {
   const funnelData = funnel || { nuevo: 0, contactado: 0, calificado: 0, interesado: 0 };
 
   useEffect(() => {
-    const socket = socketConnection.connect();
-
     const handleUpdate = () => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
       queryClient.invalidateQueries({ queryKey: ['funnel-stats'] });
     };
 
-    if (socket) {
-      socket.on('newMessage', handleUpdate);
-      socket.on('ticketUpdate', handleUpdate);
-    }
+    // Connect and register listeners - socketConnection manages listener registry
+    socketConnection.connect();
+    socketConnection.on('newMessage', handleUpdate);
+    socketConnection.on('ticketUpdate', handleUpdate);
 
     return () => {
-      if (socket) {
-        socket.off('newMessage', handleUpdate);
-        socket.off('ticketUpdate', handleUpdate);
-      }
+      socketConnection.off('newMessage', handleUpdate);
+      socketConnection.off('ticketUpdate', handleUpdate);
     };
   }, [queryClient]);
 

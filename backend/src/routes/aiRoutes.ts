@@ -1218,6 +1218,19 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
 
   const fail = (error: string, status = 400) => res.status(status).json({ ok: false, error });
 
+  // Validate tool exists in manifest
+  const manifestEntry = TOOL_MANIFEST.find(t => t.name === tool);
+  if (!manifestEntry) {
+    return fail(`Herramienta desconocida: ${tool}. Use /tools/manifest para ver herramientas disponibles.`);
+  }
+
+  // Validate required args
+  for (const required of manifestEntry.requiredArgs) {
+    if (args[required] === undefined || args[required] === null || args[required] === '') {
+      return fail(`Argumento requerido faltante: ${required}`);
+    }
+  }
+
   try {
     if (tool === "upsert_contact") {
       const number = String(args.number || "").replace(/\D/g, "");

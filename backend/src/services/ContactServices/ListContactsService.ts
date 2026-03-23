@@ -26,7 +26,15 @@ const ListContactsService = async ({
     include: [
       { association: "tags", through: { attributes: [] }, required: false },
       { association: "assignedUser", required: false },
-      { association: "tickets", required: false, attributes: ["id", "status", "unreadMessages", "updatedAt"] }
+      // Limit tickets to 1 most recent per contact to avoid N+1 explosion
+      {
+        association: "tickets",
+        required: false,
+        attributes: ["id", "status", "unreadMessages", "updatedAt"],
+        limit: 1,
+        order: [["updatedAt", "DESC"]],
+        separate: true
+      }
     ],
     order: [["updatedAt", "DESC"]],
     limit: safeLimit,

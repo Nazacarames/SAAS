@@ -1,8 +1,15 @@
-import { Table, Column, Model, ForeignKey, CreatedAt, UpdatedAt } from "sequelize-typescript";
+import { Table, Column, Model, ForeignKey, CreatedAt, UpdatedAt, Index } from "sequelize-typescript";
 import Contact from "./Contact";
 import Tag from "./Tag";
 
-@Table({ tableName: "contact_tags" })
+@Table({
+  tableName: "contact_tags",
+  indexes: [
+    { fields: ["contactId"] },
+    { fields: ["tagId"] },
+    { unique: true, fields: ["contactId", "tagId"] }
+  ]
+})
 class ContactTag extends Model {
   @ForeignKey(() => Contact)
   @Column
