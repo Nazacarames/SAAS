@@ -1,6 +1,6 @@
-import { Queue, Worker, Job, QueueEvents, JobOptions } from "bullmq";
+import { Queue, Worker, Job, QueueEvents, JobsOptions } from "bullmq";
 import { getRedisClient } from "./RedisService";
-import { AppError } from "../errors/AppError";
+import AppError from "../errors/AppError";
 
 // Queue names
 export const QUEUE_NAMES = {
@@ -17,10 +17,10 @@ const queues = new Map<string, Queue>();
 const workers = new Map<string, Worker>();
 const queueEvents = new Map<string, QueueEvents>();
 
-const getConnection = async () => {
-  const client = await getRedisClient();
-  return client;
-};
+const getConnectionParams = () => ({
+  url: process.env.REDIS_URL || "redis://localhost:6379",
+  maxRetriesPerRequest: 3,
+});
 
 // Get or create a queue
 export const getQueue = async (name: string): Promise<Queue> => {
@@ -28,17 +28,8 @@ export const getQueue = async (name: string): Promise<Queue> => {
     return queues.get(name)!;
   }
 
-  const connection = await getConnection();
-
-  // Convert redis client to bullmq compatible format
   const queue = new Queue(name, {
-    connection: {
-      type: "redis" as const,
-      options: {
-        url: process.env.REDIS_URL || "redis://localhost:6379",
-        maxRetriesPerRequest: 3,
-      },
-    },
+    connection: getConnectionParams(),
     defaultJobOptions: {
       attempts: 3,
       backoff: {
@@ -64,7 +55,7 @@ export const getQueue = async (name: string): Promise<Queue> => {
 export interface QueueJob<T = any> {
   name: string;
   data: T;
-  opts?: JobOptions;
+  opts?: JobsOptions;
 }
 
 export const addJob = async <T = any>(queueName: string, job: QueueJob<T>): Promise<Job<T>> => {
@@ -169,8 +160,8 @@ export const checkQueuesHealth = async (): Promise<{ healthy: boolean; details: 
   let healthy = true;
 
   try {
-    const connection = await getConnection();
-    await connection.ping();
+    const client = await getRedisClient();
+    await client.ping();
   } catch {
     healthy = false;
     details.redis = { connected: false };

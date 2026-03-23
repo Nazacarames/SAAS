@@ -1,5 +1,4 @@
 import { Worker, Job } from "bullmq";
-import { getRedisClient } from "../services/RedisService";
 import CheckInactiveContactsService from "../services/ContactServices/CheckInactiveContactsService";
 import { QUEUE_NAMES, InactivityCheckJob } from "../services/QueueService";
 
@@ -9,8 +8,6 @@ export const startInactivityCheckWorker = async (): Promise<Worker> => {
   if (worker) {
     return worker;
   }
-
-  const connection = await getRedisClient();
 
   worker = new Worker<InactivityCheckJob>(
     QUEUE_NAMES.INACTIVITY_CHECK,
@@ -28,11 +25,8 @@ export const startInactivityCheckWorker = async (): Promise<Worker> => {
     },
     {
       connection: {
-        type: "redis" as const,
-        options: {
-          url: process.env.REDIS_URL || "redis://localhost:6379",
-          maxRetriesPerRequest: 3,
-        },
+        url: process.env.REDIS_URL || "redis://localhost:6379",
+        maxRetriesPerRequest: 3,
       },
       concurrency: 1, // Only one inactivity check at a time
       limiter: {

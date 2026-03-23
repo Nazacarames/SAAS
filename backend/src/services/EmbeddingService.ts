@@ -1,5 +1,5 @@
 import { QueryTypes } from "sequelize";
-import sequelize from "../../database";
+import sequelize from "../database";
 
 const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIMENSIONS = 1536;
@@ -32,7 +32,7 @@ export const generateEmbedding = async (text: string): Promise<EmbeddingResult> 
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: { message: "Unknown error" } }));
+    const error = await response.json().catch(() => null) as { error?: { message?: string } } | null;
     throw new Error(`OpenAI API error: ${error?.error?.message || response.statusText}`);
   }
 

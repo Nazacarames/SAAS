@@ -1,5 +1,5 @@
 import { createClient, RedisClientType } from "redis";
-import { AppError } from "../errors/AppError";
+import AppError from "../errors/AppError";
 
 let redisClient: RedisClientType | null = null;
 
@@ -69,7 +69,7 @@ export const rateLimitRedis = async (options: RateLimiterOptions): Promise<{ all
     // Set expiry on the key
     multi.expire(redisKey, Math.ceil(windowMs / 1000));
 
-    const results = await multi.execAsPromise();
+    const results = await multi.exec();
 
     // Second result is the count before adding current request
     const currentCount = (results?.[1] as number) || 0;
