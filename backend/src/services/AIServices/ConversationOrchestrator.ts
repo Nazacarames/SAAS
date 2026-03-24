@@ -367,7 +367,7 @@ export const generateEmbeddingsForChunks = async (chunkIds?: number[]) => {
 
   const whereClause = chunkIds?.length
     ? `AND c.id = ANY(:chunkIds)`
-    : `AND c.embedding_json IS NULL AND c.chunk_text IS NOT NULL AND LENGTH(c.chunk_text) > 10`;
+    : `AND (c.embedding_json IS NULL OR c.embedding_json = '[]'::jsonb) AND c.chunk_text IS NOT NULL AND LENGTH(c.chunk_text) > 10`;
   const replacements: any = { chunkIds: chunkIds || null };
 
   const chunks: any[] = await sequelize.query(
