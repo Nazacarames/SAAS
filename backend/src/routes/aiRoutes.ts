@@ -1248,7 +1248,7 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
                email = COALESCE(:email, email),
                business_type = COALESCE(:businessType, business_type),
                needs = COALESCE(:needs, needs),
-               updatedAt = NOW()
+               "updatedAt" = NOW()
            WHERE id = :id`,
           {
             replacements: {
@@ -1263,7 +1263,7 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
         );
       } else {
         await sequelize.query(
-          `INSERT INTO contacts (name, number, email, isGroup, "companyId", business_type, needs, lead_score, createdAt, updatedAt)
+          `INSERT INTO contacts (name, number, email, "isGroup", "companyId", business_type, needs, lead_score, "createdAt", "updatedAt")
            VALUES (:name, :number, :email, false, :companyId, :businessType, :needs, :leadScore, NOW(), NOW())`,
           {
             replacements: {
@@ -1332,7 +1332,7 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
       const [appt]: any = await sequelize.query(
         `INSERT INTO appointments (company_id, contact_id, ticket_id, starts_at, ends_at, service_type, status, notes, created_at, updated_at)
          VALUES (:companyId, :contactId, :ticketId, :startsAt, :endsAt, :serviceType, 'scheduled', :notes, NOW(), NOW())
-         RETURNING *`,
+         RETURNING id`,
         {
           replacements: {
             companyId,
@@ -1347,13 +1347,16 @@ aiRoutes.post("/tools/execute", isAuth, async (req: any, res) => {
         }
       );
 
-      await sequelize.query(
-        `INSERT INTO appointment_events (appointment_id, event_type, reason, created_by, created_at, updated_at)
-         VALUES (:appointmentId, 'create', '', :createdBy, NOW(), NOW())`,
-        { replacements: { appointmentId: appt.id, createdBy: userId }, type: QueryTypes.INSERT }
-      );
+      const appointmentId = Array.isArray(appt) ? appt[0]?.id : appt?.id;
+      if (appointmentId) {
+        await sequelize.query(
+          `INSERT INTO appointment_events (appointment_id, event_type, reason, created_by, created_at, updated_at)
+           VALUES (:appointmentId, 'create', '', :createdBy, NOW(), NOW())`,
+          { replacements: { appointmentId, createdBy: userId }, type: QueryTypes.INSERT }
+        );
+      }
 
-      return res.json({ ok: true, tool, result: appt });
+      return res.json({ ok: true, tool, result: { id: appointmentId, contactId, startsAt, status: 'scheduled' } });
     }
 
     if (tool === "reprogramar_cita") {
