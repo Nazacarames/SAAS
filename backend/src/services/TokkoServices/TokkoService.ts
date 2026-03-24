@@ -1,6 +1,7 @@
 import { QueryTypes } from "sequelize";
 import sequelize from "../../database";
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
+import { cacheSet, cacheGet } from "../RedisService";
 
 const safeJson = async (res: Response) => {
   try { return await res.json(); } catch { return null; }
@@ -52,10 +53,24 @@ export const fetchTokkoLocations = async () => {
   const s = getRuntimeSettings();
   if (!s.tokkoEnabled || !s.tokkoApiKey) return { ok: false, skipped: true };
 
+  const cacheKey = "tokko:locations";
+  const cached = await cacheGet(cacheKey);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      return { ok: true, status: 200, objects: parsed, raw: parsed, cached: true };
+    } catch { /* ignore bad cache */ }
+  }
+
   const url = buildUrl(s.tokkoBaseUrl, "/location/", s.tokkoApiKey, { lang: "es" });
   const res = await withRetry429(() => fetch(url, { method: "GET" }));
   const data: any = await safeJson(res);
   const objects = Array.isArray(data?.objects) ? data.objects : [];
+
+  if (objects.length) {
+    await cacheSet(cacheKey, JSON.stringify(objects), 600);
+  }
+
   return { ok: res.ok, status: res.status, objects, raw: data };
 };
 
@@ -133,6 +148,28 @@ export const searchTokkoProperties = async (args: { q?: string; operationType?: 
     offset
   };
 
+  // Build cache key from canonical search params
+  const cacheKeyArgs = {
+    q: args.q || "",
+    operationType: args.operationType || "",
+    propertyType: args.propertyType || "",
+    location: args.location || "",
+    minPrice: Number(args.minPrice || 0),
+    maxPrice: Number(args.maxPrice || 999999999),
+    minBedrooms: Number(args.minBedrooms || 0),
+    limit,
+    offset,
+    currency: args.currency || "ANY"
+  };
+  const cacheKey = `tokko:search:${Buffer.from(JSON.stringify(cacheKeyArgs)).toString("base64")}`;
+  const cached = await cacheGet(cacheKey);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      return { ...parsed, cached: true };
+    } catch { /* ignore bad cache */ }
+  }
+
   const postUrl = buildUrl(s.tokkoBaseUrl, "/property/search/", s.tokkoApiKey);
   let res = await withRetry429(() => fetch(postUrl, {
     method: "POST",
@@ -163,7 +200,7 @@ export const searchTokkoProperties = async (args: { q?: string; operationType?: 
       imageUrl: String(p?.photos?.[0]?.image || p?.photos?.[0]?.url || p?.cover?.url || "")
     }));
 
-  return {
+  const result = {
     ok: res.ok,
     status: res.status,
     total: Number(parsed?.meta?.total_count || mapped.length),
@@ -172,6 +209,10 @@ export const searchTokkoProperties = async (args: { q?: string; operationType?: 
     results: mapped,
     raw: parsed
   };
+
+  await cacheSet(cacheKey, JSON.stringify(result), 300);
+
+  return result;
 };
 
 const chunkText = (text: string, maxLen = 900) => {

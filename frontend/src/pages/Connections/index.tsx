@@ -36,7 +36,7 @@ const Connections = () => {
   const [connections, setConnections] = useState<WhatsAppConnection[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [openNewConnection, setOpenNewConnection] = useState(false);
+  const [openCloudSettings, setOpenCloudSettings] = useState(false);
   const [waCloudVerifyToken, setWaCloudVerifyToken] = useState('');
   const [waCloudPhoneNumberId, setWaCloudPhoneNumberId] = useState('');
   const [waCloudAccessToken, setWaCloudAccessToken] = useState('');
@@ -49,7 +49,7 @@ const Connections = () => {
   const [waRecapTemplateLang, setWaRecapTemplateLang] = useState('es_AR');
   const [waRecapInactivityMinutes, setWaRecapInactivityMinutes] = useState('4320');
   const [agentGuardrailsEnabled, setAgentGuardrailsEnabled] = useState(true);
-  const [agentConversationPoliciesJson, setAgentConversationPoliciesJson] = useState('{"sales":{"maxReplyChars":280},"support":{"maxReplyChars":320,"autoHandoffOnSensitive":true},"scheduling":{"maxReplyChars":220},"general":{"maxReplyChars":260}}');
+  const [agentConversationPoliciesJson] = useState('{"sales":{"maxReplyChars":280},"support":{"maxReplyChars":320,"autoHandoffOnSensitive":true},"scheduling":{"maxReplyChars":220},"general":{"maxReplyChars":260}}');
 
   useEffect(() => {
     fetchConnections();
@@ -83,7 +83,6 @@ const Connections = () => {
       setWaRecapTemplateLang(s.waRecapTemplateLang || 'es_AR');
       setWaRecapInactivityMinutes(String(s.waRecapInactivityMinutes || 4320));
       setAgentGuardrailsEnabled(Boolean(s.agentGuardrailsEnabled ?? true));
-      setAgentConversationPoliciesJson(String(s.agentConversationPoliciesJson || agentConversationPoliciesJson));
     } catch {
       // ignore
     }
@@ -110,7 +109,7 @@ const Connections = () => {
 
       await api.put('/settings/whatsapp-cloud', payload);
       toast.success('Conexión Cloud API guardada');
-      setOpenNewConnection(false);
+      setOpenCloudSettings(false);
       fetchConnections();
     } catch {
       toast.error('No se pudo guardar la conexión Cloud API');
@@ -125,8 +124,8 @@ const Connections = () => {
         <Typography variant="h4">WhatsApp</Typography>
         <Stack direction="row" spacing={1}>
           <Chip color="warning" label="QR deshabilitado" />
-          <Button variant="contained" onClick={() => setOpenNewConnection(true)}>
-            Nueva conexión
+          <Button variant="contained" onClick={() => { fetchCloudSettings(); setOpenCloudSettings(true); }}>
+            Configurar Cloud API
           </Button>
         </Stack>
       </Box>
@@ -179,8 +178,8 @@ const Connections = () => {
         </TableContainer>
       </Paper>
 
-      <Dialog open={openNewConnection} onClose={() => setOpenNewConnection(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Nueva conexión WhatsApp Cloud API</DialogTitle>
+      <Dialog open={openCloudSettings} onClose={() => setOpenCloudSettings(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>WhatsApp Cloud API</DialogTitle>
         <DialogContent>
           <Stack spacing={1.5} sx={{ mt: 1 }}>
             <TextField label="Verify Token" value={waCloudVerifyToken} onChange={(e) => setWaCloudVerifyToken(e.target.value)} fullWidth />
@@ -192,6 +191,7 @@ const Connections = () => {
               onChange={(e) => setWaCloudAccessToken(e.target.value)}
               type={showWaSecrets ? 'text' : 'password'}
               fullWidth
+              helperText={waCloudAccessToken ? '' : 'Campo vacío = se mantiene el actual'}
             />
             <TextField
               label="App Secret (opcional)"
@@ -199,6 +199,7 @@ const Connections = () => {
               onChange={(e) => setWaCloudAppSecret(e.target.value)}
               type={showWaSecrets ? 'text' : 'password'}
               fullWidth
+              helperText={waCloudAppSecret ? '' : 'Campo vacío = se mantiene el actual'}
             />
             <Divider />
             <Typography variant="subtitle2">Recaptación automática (Meta Template)</Typography>
@@ -228,29 +229,20 @@ const Connections = () => {
               helperText="3 días = 4320"
             />
             <Divider />
-            <Typography variant="subtitle2">Guardrails IA por tipo de conversación</Typography>
+            <Typography variant="subtitle2">Guardrails IA</Typography>
             <FormControlLabel
               control={<Switch checked={agentGuardrailsEnabled} onChange={(e) => setAgentGuardrailsEnabled(e.target.checked)} />}
-              label="Activar guardrails finos"
+              label="Activar límites de caracteres y auto-cierre por tipo de conversación"
             />
-            <TextField
-              label="Policies JSON"
-              value={agentConversationPoliciesJson}
-              onChange={(e) => setAgentConversationPoliciesJson(e.target.value)}
-              fullWidth
-              multiline
-              minRows={4}
-              helperText='Ejemplo: {"sales":{"maxReplyChars":280},"support":{"autoHandoffOnSensitive":true}}'
-            />
-            <Button variant="outlined" onClick={() => setShowWaSecrets((s) => !s)}>
+            <Button variant="outlined" size="small" onClick={() => setShowWaSecrets((s) => !s)}>
               {showWaSecrets ? 'Ocultar secretos' : 'Mostrar secretos'}
             </Button>
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setOpenNewConnection(false)}>Cancelar</Button>
+          <Button onClick={() => setOpenCloudSettings(false)}>Cancelar</Button>
           <Button variant="contained" onClick={saveCloudSettings} disabled={savingWaCloud}>
-            {savingWaCloud ? 'Guardando...' : 'Guardar conexión'}
+            {savingWaCloud ? 'Guardando…' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

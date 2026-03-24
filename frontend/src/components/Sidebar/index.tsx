@@ -47,7 +47,7 @@ const Sidebar = () => {
     { text: 'Billing', icon: <CreditCardIcon />, path: '/billing' },
     { text: 'Agente IA', icon: <SmartToyIcon />, path: '/ai-agents', adminOnly: true },
     { text: 'Conocimiento', icon: <AutoStoriesIcon />, path: '/knowledge', adminOnly: true },
-    { text: 'Templates', icon: <TextSnippetIcon />, path: '/templates', adminOnly: true },
+    { text: 'Templates', icon: <TextSnippetIcon />, path: '/templates' },
     { text: 'Usuarios', icon: <PeopleIcon />, path: '/users', adminOnly: true },
     { text: 'Integraciones', icon: <SettingsIcon />, path: '/integrations', adminOnly: true },
     { text: 'Configuración', icon: <SettingsIcon />, path: '/settings', adminOnly: true }

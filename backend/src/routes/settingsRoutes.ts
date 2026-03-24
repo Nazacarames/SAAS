@@ -19,7 +19,7 @@ const getWaHardeningMetrics = () => {
   const s = getRuntimeSettings() as any;
   const appSecretConfigured = Boolean(String(s.waCloudAppSecret || "").trim());
   const allowUnsignedWebhook = parseBoolWithDefault(s.waWebhookAllowUnsigned, false);
-  const replayFailClosed = parseBoolWithDefault(s.waWebhookPayloadReplayFailClosed, true);
+  const replayFailClosed = parseBoolWithDefault(s.waOutboundDedupeFailClosed, true);
 
   return {
     runtime: {
@@ -36,7 +36,7 @@ const getWaHardeningAlertSnapshot = () => {
   const s = getRuntimeSettings() as any;
   const appSecretConfigured = Boolean(String(s.waCloudAppSecret || "").trim());
   const allowUnsignedWebhook = parseBoolWithDefault(s.waWebhookAllowUnsigned, false);
-  const replayFailClosed = parseBoolWithDefault(s.waWebhookPayloadReplayFailClosed, true);
+  const replayFailClosed = parseBoolWithDefault(s.waOutboundDedupeFailClosed, true);
 
   const pendingAlerts: any[] = [];
 
@@ -150,6 +150,51 @@ settingsRoutes.get("/meta/webhook-status", isAuth, isAdmin, async (_req, res) =>
     pageIdConfigured: Boolean(s.metaLeadAdsPageId),
     callbackUrl: `${process.env.BACKEND_URL || ""}/api/ai/meta-leads/webhook`
   });
+});
+
+settingsRoutes.get("/meta/templates", isAuth, isAdmin, async (_req: any, res) => {
+  const companyId = Number(_req.user?.companyId || 1);
+
+  let accessToken = "";
+  let wabaId = "";
+
+  try {
+    const [conn]: any = await sequelize.query(
+      `SELECT waba_id, access_token FROM meta_connections WHERE company_id = :companyId ORDER BY id DESC LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+    if (conn?.access_token && conn?.waba_id) {
+      accessToken = String(conn.access_token);
+      wabaId = String(conn.waba_id);
+    }
+  } catch { /* ignore */ }
+
+  if (!accessToken || !wabaId) {
+    return res.json({ templates: [], error: "no_credentials" });
+  }
+
+  try {
+    const url = `https://graph.facebook.com/v21.0/${wabaId}/message_templates?access_token=${accessToken}`;
+    const resp = await fetch(url);
+    const data = await resp.json() as any;
+
+    if (!resp.ok) {
+      return res.json({ templates: [], error: data?.error?.message || "api_error" });
+    }
+
+    const templates = (data.data || []).map((t: any) => ({
+      id: t.id,
+      name: t.name,
+      status: t.status,
+      language: t.language,
+      category: t.category,
+      components: t.components?.map((c: any) => c.type) || []
+    }));
+
+    return res.json({ templates, error: null });
+  } catch (e: any) {
+    return res.json({ templates: [], error: String(e?.message || "fetch_error") });
+  }
 });
 
 settingsRoutes.get("/whatsapp-cloud/hardening-status", isAuth, isAdmin, async (_req, res) => {
@@ -510,6 +555,8 @@ settingsRoutes.put("/whatsapp-cloud", isAuth, isAdmin, async (req, res) => {
     waOutboundIdempotencyKeyMinLength: Number(body.waOutboundIdempotencyKeyMinLength || 8),
     waOutboundRequestTimeoutMs: Number(body.waOutboundRequestTimeoutMs || 12000),
     waFirstContactHolaTemplateRequired: typeof body.waFirstContactHolaTemplateRequired === "boolean" ? body.waFirstContactHolaTemplateRequired : true,
+    waFirstContactHolaTemplateName: String(body.waFirstContactHolaTemplateName || "hola"),
+    waFirstContactHolaTemplateLang: String(body.waFirstContactHolaTemplateLang || "es_AR"),
     waInboundReplayTtlSeconds: Number(body.waInboundReplayTtlSeconds || 86400),
     waInboundReplayMaxBlocksPerPayload: Number(body.waInboundReplayMaxBlocksPerPayload || 40),
     waWebhookPayloadReplayTtlSeconds: Number(body.waWebhookPayloadReplayTtlSeconds || 120),

@@ -14,6 +14,7 @@ import { recordInboundDuplicate, recordInboundError, recordInboundMessage } from
 import { getRuntimeSettings } from "../SettingsServices/RuntimeSettingsService";
 import { searchTokkoProperties } from "../TokkoServices/TokkoService";
 import { normalizeWaPhone } from "../../utils/phoneNormalization";
+import { addJob, QUEUE_NAMES } from "../QueueService";
 
 type MetaWebhookPayload = { entry?: Array<{ changes?: Array<{ value?: { messages?: Array<{ id?: string; from?: string; timestamp?: string; type?: string; text?: { body?: string } }> } }> }> };
 type ConversationType = "sales" | "support" | "scheduling" | "general";
@@ -165,7 +166,7 @@ const loadAgentState = async (ticketId: number): Promise<Record<string, any>> =>
   }
 };
 
-const saveAgentState = async (ticketId: number, companyId: number, patch: Record<string, any>) => {
+export const saveAgentState = async (ticketId: number, companyId: number, patch: Record<string, any>) => {
   try {
     await ensureAgentStateTable();
     const current = await loadAgentState(ticketId);
@@ -190,6 +191,22 @@ const ensureStageEventsTable = async () => {
   await sequelize.query(`CREATE TABLE IF NOT EXISTS ai_stage_events (id SERIAL PRIMARY KEY, ticket_id INTEGER NOT NULL, company_id INTEGER NOT NULL, from_stage VARCHAR(40), to_stage VARCHAR(40) NOT NULL, reason VARCHAR(120), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW())`);
   await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_ai_stage_events_company_created ON ai_stage_events(company_id, created_at)`);
   stageEventsTableReady = true;
+};
+
+// Cached welcome messages per company (refresh every 5 minutes)
+const welcomeMsgCache: Map<number, { msg: string; ts: number }> = new Map();
+const getWelcomeMsg = async (companyId: number): Promise<string> => {
+  const cached = welcomeMsgCache.get(companyId);
+  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.msg;
+  try {
+    const [row]: any = await sequelize.query(
+      `SELECT welcome_msg FROM ai_agents WHERE company_id = :companyId AND is_active = true ORDER BY id DESC LIMIT 1`,
+      { replacements: { companyId }, type: QueryTypes.SELECT }
+    );
+    const msg = row?.welcome_msg?.trim() || "";
+    welcomeMsgCache.set(companyId, { msg, ts: Date.now() });
+    return msg;
+  } catch { return ""; }
 };
 
 const recordStageEvent = async (args: { ticketId: number; companyId: number; fromStage?: string; toStage: string; reason?: string }) => {
@@ -393,7 +410,7 @@ const classifyConversation = (text: string): ConversationType => {
   if (/precio|plan|comprar|contratar|promo|descuento|cotiz|propiedad|departamento|depto|casa|alquiler|venta|inmueble|ambientes?|monoambiente|ph\b|terreno|lote/.test(t)) return "sales";
   return "general";
 };
-const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
+export const applyGuardrails = async ({ text, reply, conversationType }: { text: string; reply: string; conversationType: ConversationType }): Promise<{ finalReply?: string; handoff?: boolean; reason: string; action: string }> => {
   const policy = resolvePolicies()[conversationType] || defaultPolicies.general;
   const low = text.toLowerCase();
   if (policy.autoHandoffOnSensitive && /legal|abogado|demanda|tarjeta|transferencia|cbu/.test(low)) return { handoff: true, reason: "Tema sensible detectado para soporte", action: "handoff_sensitive" };
@@ -759,7 +776,7 @@ const shouldReleaseDedupeAfterProviderFailure = (status?: number): boolean => {
   return s >= 400 && s < 500;
 };
 
-const sendCloudText = async (
+export const sendCloudText = async (
   to: string,
   text: string,
   providerIdempotencyKey?: string
@@ -1219,7 +1236,7 @@ const buildAgentStateHint = (state: Record<string, any>, incomingText: string) =
 // Strip sentences that re-ask for criteria the current turn already provided.
 // E.g. if the user said "2 ambientes hasta 90000 usd", remove any sentence
 // in the reply that asks about ambientes or presupuesto.
-const stripRedundantCriteriaAsk = (reply: string, patch: Record<string, any>): string => {
+export const stripRedundantCriteriaAsk = (reply: string, patch: Record<string, any>): string => {
   if (!reply || !patch || typeof patch !== "object") return reply;
   const labels: string[] = [];
   if (patch.rooms) labels.push("ambientes?|dormitorios?");
@@ -1253,7 +1270,7 @@ const stripAgentFiller = (reply: string): string => {
   return cleaned || raw;
 };
 
-const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
+export const applyCommercialPlaybook = (reply: string, state: Record<string, any>) => {
   const base = stripAgentFiller(String(reply || "").trim());
   if (!base) return base;
   if (/\?$/.test(base) && base.length < 650) return base;
@@ -1360,7 +1377,11 @@ const classifyInboundIntent = (text: string, state?: Record<string, any>): Inbou
   if (criteriaCount >= 1) {
     return "property_search";
   }
-  const hasExistingContext = state && (state.location || state.propertyType || state.rooms || state.maxPriceUsd);
+  // More robust context check: any meaningful state field indicates an ongoing conversation
+  const stateKeys = Object.keys(state || {}).filter(k =>
+    !["lastInboundFingerprint", "lastAutoReplyAt", "updatedAt", "lastOutcome", "nextBestAction", "lastAgentModel"].includes(k)
+  );
+  const hasExistingContext = stateKeys.length > 0;
   if (hasExistingContext && low.length > 3) {
     // Message with existing conversation context → treat as context update,
     // not a greeting.  Let the orchestrator handle it.
@@ -1382,8 +1403,11 @@ const buildZoneInquiryReply = (): string =>
 const buildSellAndBuyReply = (): string =>
   "Sí, te podemos asesorar tanto en venta como en compra. ¿Querés que arranquemos por la tasación de tu propiedad actual o preferís empezar por buscar opciones nuevas?";
 
-const buildGeneralQuestionReply = (): string =>
-  "¡Hola! Soy el asistente de la inmobiliaria. Contame qué estás buscando o en qué te puedo ayudar, y te doy una mano.";
+const buildGeneralQuestionReply = async (companyId: number): Promise<string> => {
+  const welcomeMsg = await getWelcomeMsg(companyId);
+  if (welcomeMsg) return welcomeMsg;
+  return "¡Hola! Soy el asistente de la inmobiliaria. Contame qué estás buscando o en qué te puedo ayudar, y te doy una mano.";
+};
 
 const buildLegalSensitiveHandoffReply = (): string =>
   "Entiendo tu consulta. Este tipo de temas requiere atención personalizada de un asesor. Te paso ahora con un humano para que te ayude directamente.";
@@ -1431,7 +1455,7 @@ const buildSmartCriteriaFallback = (text: string, missing: string[], state: Reco
   return `Para buscarte opciones concretas, me falta saber: ${trulyMissing.join(" y ")}. Con eso te paso propiedades ahora mismo.`;
 };
 
-const formatTokkoOptionsMessages = (results: any[]): string[] => {
+export const formatTokkoOptionsMessages = (results: any[]): string[] => {
   if (!Array.isArray(results) || results.length === 0) return [];
   const top = results.slice(0, 3);
   const perProperty = top.map((r: any) => {
@@ -1449,7 +1473,7 @@ const formatTokkoOptionsMessages = (results: any[]): string[] => {
   ];
 };
 
-const formatTokkoOptionsReply = (results: any[]) => {
+export const formatTokkoOptionsReply = (results: any[]) => {
   const msgs = formatTokkoOptionsMessages(results);
   if (!msgs.length) return "";
   return msgs.join("\n");
@@ -1666,21 +1690,25 @@ const runAutonomousAgent = ({ ticket, contact, incomingText, inboundMessageId, i
   const text = String(incomingText || "").trim();
   if (!text || (ticket as any).human_override || (ticket as any).bot_enabled === false) return Promise.resolve();
 
-  // Queue: serialize turns per ticket (FIFO).  Previous skip-Set silently
-  // dropped concurrent turns — the queue ensures each inbound processes
-  // sequentially so turn N+1 always sees turn N's saved state.
-  const prev = ticketTurnQueue.get(ticket.id) ?? Promise.resolve();
-  const turn = prev.catch(() => {}).then(() =>
-    executeAgentTurn({ ticket, contact, text, inboundMessageId, inboundCreatedAt })
-  );
-  ticketTurnQueue.set(ticket.id, turn);
-  turn.catch(() => {}).finally(() => {
-    if (ticketTurnQueue.get(ticket.id) === turn) ticketTurnQueue.delete(ticket.id);
+  // Queue AI processing to BullMQ for async handling (non-blocking)
+  addJob(QUEUE_NAMES.AI_PROCESSING, {
+    name: "agent-turn",
+    data: {
+      ticketId: ticket.id,
+      contactId: contact.id,
+      message: text,
+      companyId: ticket.companyId
+    }
+  }).catch((err) => {
+    console.error("[wa-cloud] failed to queue AI job:", err?.message);
+    // Fallback: run synchronously if queue fails
+    executeAgentTurn({ ticket, contact, text, inboundMessageId, inboundCreatedAt }).catch(() => {});
   });
-  return turn;
+
+  return Promise.resolve();
 };
 
-const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; text: string; inboundMessageId?: string; inboundCreatedAt?: Date }) => {
+export const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inboundCreatedAt }: { ticket: any; contact: any; text: string; inboundMessageId?: string; inboundCreatedAt?: Date }) => {
   try {
   const low = text.toLowerCase();
   const conversationType = classifyConversation(text);
@@ -1954,7 +1982,7 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
 
     // ── 6. General question (only if NO existing context) ──────────────
     if (!replyPlan && intent === "general_question") {
-      const gqReply = buildGeneralQuestionReply();
+      const gqReply = await buildGeneralQuestionReply(ticket.companyId);
       replyPlan = {
         text: gqReply,
         decisionKey: "intent_general_question",
@@ -2138,7 +2166,7 @@ const executeAgentTurn = async ({ ticket, contact, text, inboundMessageId, inbou
   // (except low-signal turns which intentionally stay silent).
   if (!replyPlan) {
     if (!isLowSignalMessage(text)) {
-      const fallback = buildGeneralQuestionReply();
+      const fallback = await buildGeneralQuestionReply(ticket.companyId);
       replyPlan = {
         text: fallback,
         decisionKey: "fallback_no_plan",

@@ -3,6 +3,7 @@ import { QueryTypes } from "sequelize";
 import crypto from "crypto";
 import isAuth from "../middleware/isAuth";
 import isAdmin from "../middleware/isAdmin";
+import { generateEmbeddingsForChunks } from "../services/AIServices/ConversationOrchestrator";
 import sequelize from "../database";
 import Contact from "../models/Contact";
 import Ticket from "../models/Ticket";
@@ -834,6 +835,15 @@ aiRoutes.get("/kb/stats", isAuth, async (req: any, res) => {
   );
 
   return res.json(row || { total: 0, synced: 0, pending: 0, categories: 0 });
+});
+
+aiRoutes.post("/kb/embeddings/backfill", isAuth, isAdmin, async (_req: any, res: any) => {
+  try {
+    const result = await generateEmbeddingsForChunks();
+    return res.json({ ok: true, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message });
+  }
 });
 
 aiRoutes.get("/appointments", isAuth, async (req: any, res) => {

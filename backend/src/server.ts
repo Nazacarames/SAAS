@@ -7,7 +7,7 @@ import path from "path";
 import { initIO } from "./libs/socket";
 import { syncTokkoLocationsToKnowledge } from "./services/TokkoServices/TokkoService";
 import { addRecurringJob, closeAllQueues, QUEUE_NAMES } from "./services/QueueService";
-import { startInactivityCheckWorker, stopInactivityCheckWorker } from "./workers";
+import { startInactivityCheckWorker, stopInactivityCheckWorker, startAIProcessingWorker, stopAIProcessingWorker } from "./workers";
 
 dotenv.config();
 
@@ -64,6 +64,7 @@ const gracefulShutdown = async (signal: string) => {
 
     // Close queue workers
     await stopInactivityCheckWorker();
+    await stopAIProcessingWorker();
     await closeAllQueues();
     console.log("[Server] Queue workers closed");
 
@@ -92,6 +93,7 @@ const startServer = async () => {
 
     // Start BullMQ worker for inactivity checks
     await startInactivityCheckWorker();
+    await startAIProcessingWorker();
 
     // Schedule recurring inactivity check job (every minute)
     await addRecurringJob(QUEUE_NAMES.INACTIVITY_CHECK, "inactivity-scan", {}, "* * * * *");

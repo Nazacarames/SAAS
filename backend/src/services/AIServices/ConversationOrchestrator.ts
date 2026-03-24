@@ -248,18 +248,158 @@ const getRecentMessages = async (companyId: number, contactId?: number, ticketId
 };
 
 const searchKnowledge = async (companyId: number, query: string) => {
-  const rows: any[] = await sequelize.query(
-    `SELECT c.id, c.chunk_text, d.title, d.category,
-            ts_rank_cd(c.chunk_tsv, websearch_to_tsquery('spanish', :query)) AS score
+  // Hybrid RAG: FTS + vector similarity with reciprocal rank fusion
+  const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
+
+  // --- FTS search ---
+  const ftsRows: any[] = await sequelize.query(
+    `SELECT c.id, c.chunk_text, d.title, d.category, c.embedding_json,
+            ts_rank_cd(c.chunk_tsv, websearch_to_tsquery('spanish', :query)) AS fts_score
      FROM kb_chunks c
      JOIN kb_documents d ON d.id = c.document_id
      WHERE d.company_id = :companyId
        AND c.chunk_tsv @@ websearch_to_tsquery('spanish', :query)
-     ORDER BY score DESC, c.id DESC
-     LIMIT 5`,
+     ORDER BY fts_score DESC, c.id DESC
+     LIMIT 10`,
     { replacements: { companyId, query }, type: QueryTypes.SELECT }
   );
-  return rows;
+
+  if (!ftsRows.length) return [];
+
+  // --- Vector search (if embeddings exist and OpenAI key available) ---
+  let vectorRows: Array<{ id: number; chunk_text: string; title: string; category: string; vector_score: number }> = [];
+  if (openaiKey) {
+    try {
+      // Generate query embedding
+      const embResp = await fetch("https://api.openai.com/v1/embeddings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: "text-embedding-3-small",
+          input: query.slice(0, 800)
+        })
+      });
+      if (embResp.ok) {
+        const embData: any = await embResp.json();
+        const queryVector: number[] = embData.data?.[0]?.embedding;
+        if (queryVector?.length) {
+          // Get chunks that have embeddings
+          const rowsWithEmbeddings = ftsRows.filter((r: any) => r.embedding_json);
+          if (rowsWithEmbeddings.length > 0) {
+            // Compute cosine similarity in JS
+            const cosineSim = (a: number[], b: number[]): number => {
+              let dot = 0, normA = 0, normB = 0;
+              for (let i = 0; i < a.length; i++) {
+                dot += a[i] * b[i];
+                normA += a[i] * a[i];
+                normB += b[i] * b[i];
+              }
+              return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-8);
+            };
+
+            const scored = rowsWithEmbeddings.map((r: any) => {
+              const emb = typeof r.embedding_json === "string"
+                ? JSON.parse(r.embedding_json)
+                : r.embedding_json;
+              const sim = cosineSim(queryVector, emb);
+              return { id: r.id, chunk_text: r.chunk_text, title: r.title, category: r.category, vector_score: sim };
+            });
+            vectorRows = scored
+              .filter((r: any) => r.vector_score > 0.5)
+              .sort((a: any, b: any) => b.vector_score - a.vector_score)
+              .slice(0, 5);
+          }
+        }
+      }
+    } catch { /* vector search optional */ }
+  }
+
+  // --- Reciprocal Rank Fusion ---
+  const k = 60; // RRF constant
+  const ftsScoreMap = new Map<number, number>();
+  ftsRows.forEach((r: any, i: number) => {
+    ftsScoreMap.set(r.id, 1 / (k + i + 1));
+  });
+
+  const vectorScoreMap = new Map<number, number>();
+  vectorRows.forEach((r: any, i: number) => {
+    vectorScoreMap.set(r.id, 1 / (k + i + 1));
+  });
+
+  // Merge scores
+  const allIds = new Set([...ftsScoreMap.keys(), ...vectorScoreMap.keys()]);
+  const fused = Array.from(allIds).map(id => ({
+    id,
+    ftsScore: ftsScoreMap.get(id) || 0,
+    vectorScore: vectorScoreMap.get(id) || 0,
+    combinedScore: (ftsScoreMap.get(id) || 0) + (vectorScoreMap.get(id) || 0)
+  }));
+
+  // Map back to chunk data
+  const chunkMap = new Map<number, any>();
+  ftsRows.forEach((r: any) => chunkMap.set(r.id, r));
+  vectorRows.forEach((r: any) => { if (!chunkMap.has(r.id)) chunkMap.set(r.id, r); });
+
+  fused.sort((a, b) => b.combinedScore - a.combinedScore);
+  const topResults = fused.slice(0, 5).map((f: any) => {
+    const chunk = chunkMap.get(f.id);
+    return {
+      id: f.id,
+      chunk_text: chunk?.chunk_text,
+      title: chunk?.title,
+      category: chunk?.category,
+      score: f.combinedScore,
+      fts_score: f.ftsScore,
+      vector_score: f.vectorScore
+    };
+  });
+
+  return topResults;
+};
+
+// Generate and store embeddings for KB chunks (call to backfill existing chunks)
+export const generateEmbeddingsForChunks = async (chunkIds?: number[]) => {
+  const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!openaiKey) return { generated: 0, errors: 0 };
+
+  const whereClause = chunkIds?.length
+    ? `AND c.id = ANY(:chunkIds)`
+    : `AND c.embedding_json IS NULL AND c.chunk_text IS NOT NULL AND LENGTH(c.chunk_text) > 10`;
+  const replacements: any = { chunkIds: chunkIds || null };
+
+  const chunks: any[] = await sequelize.query(
+    `SELECT c.id, c.chunk_text
+     FROM kb_chunks c
+     JOIN kb_documents d ON d.id = c.document_id
+     WHERE d.company_id = 1 ${whereClause}
+     LIMIT 100`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  let generated = 0, errors = 0;
+  for (const chunk of chunks) {
+    try {
+      const text = String(chunk.chunk_text || "").slice(0, 800);
+      const resp = await fetch("https://api.openai.com/v1/embeddings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },
+        body: JSON.stringify({ model: "text-embedding-3-small", input: text })
+      });
+      if (!resp.ok) { errors++; continue; }
+      const data: any = await resp.json();
+      const embedding: number[] = data.data?.[0]?.embedding;
+      if (!embedding?.length) { errors++; continue; }
+      await sequelize.query(
+        `UPDATE kb_chunks SET embedding_json = :embedding WHERE id = :id`,
+        { replacements: { id: chunk.id, embedding: JSON.stringify(embedding) }, type: QueryTypes.UPDATE }
+      );
+      generated++;
+    } catch { errors++; }
+  }
+  return { generated, errors };
 };
 
 // Sanitize user-controlled strings before injecting into LLM prompts
@@ -679,7 +819,9 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
   // More tokens needed since model may reason through tool results before responding
   const maxTokens = Number(agent?.max_tokens || 700);
   const assistantName = String(agent?.name || "Asistente");
-  const agentPersona = String(agent?.persona || "").trim();
+  // Normalize persona: replace non-existent tool names
+  let agentPersona = String(agent?.persona || "").trim();
+  agentPersona = agentPersona.replace(/get_company_info/g, "search_knowledge_base");
 
   const [contact]: any = args.contactId
     ? await sequelize.query(
@@ -691,7 +833,30 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
       )
     : [null];
 
+  // Load ticket state for context
+  let ticketState: Record<string, any> = {};
+  if (args.ticketId) {
+    try {
+      const [stateRow]: any = await sequelize.query(
+        `SELECT state_json FROM ai_ticket_state WHERE ticket_id = :ticketId LIMIT 1`,
+        { replacements: { ticketId: args.ticketId }, type: QueryTypes.SELECT }
+      );
+      if (stateRow?.state_json) {
+        ticketState = JSON.parse(String(stateRow.state_json)) || {};
+      }
+    } catch { /* ignore */ }
+  }
+
   const recentMessages = await getRecentMessages(args.companyId, args.contactId, args.ticketId, 14);
+
+  // Build criteria context from state
+  const criteriaParts: string[] = [];
+  if (ticketState.location) criteriaParts.push(`zona: ${ticketState.location}`);
+  if (ticketState.propertyType) criteriaParts.push(`tipo: ${ticketState.propertyType}`);
+  if (ticketState.rooms) criteriaParts.push(`ambientes: ${ticketState.rooms}`);
+  if (ticketState.maxPriceUsd) criteriaParts.push(`presupuesto: hasta USD ${ticketState.maxPriceUsd}`);
+  if (ticketState.salesStage) criteriaParts.push(`etapa: ${ticketState.salesStage}`);
+  const criteriaContext = criteriaParts.length > 0 ? `\n\nCRITERIOS CONOCIDOS DEL CLIENTE: ${criteriaParts.join(" | ")}.` : "";
 
   // System prompt: persona + tool usage instructions
   const systemParts = [
@@ -704,7 +869,7 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
     "",
     "REGLAS:",
     "- Leé el historial COMPLETO antes de responder. Nunca ignorés lo que el usuario ya dijo.",
-    "- Nunca repitas preguntas que ya hiciste.",
+    "- Nunca repitas preguntas que ya hiciste ni saludes de nuevo si ya es una conversación en curso.",
     "- Si el usuario da un criterio (zona, tipo, presupuesto), usalo de inmediato en search_properties — no pidas más aclaraciones antes de buscar.",
     "- Presentá los resultados de propiedades de forma natural: título, precio, ubicación, y si tiene link, compartilo.",
     "- Si no encontrás resultados, decíselo y ofrecé ajustar criterios.",
@@ -721,6 +886,10 @@ export const generateConversationalReply = async (args: OrchestratorArgs): Promi
         `Contacto: ${safeContactName || "sin nombre"}${safeNeeds ? ` | Necesidad registrada: ${safeNeeds}` : ""}`
       );
     }
+  }
+
+  if (criteriaContext) {
+    systemParts.push(criteriaContext);
   }
 
   const systemPrompt = systemParts.join("\n");
