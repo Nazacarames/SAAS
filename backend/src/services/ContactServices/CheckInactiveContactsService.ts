@@ -125,7 +125,8 @@ const CheckInactiveContactsService = async () => {
   `, { replacements: { contactIds, companyIds }, type: QueryTypes.SELECT });
 
   const ticketsByContactId = new Map<number, any>();
-  for (const t of ticketsResult || []) {
+  const ticketsArr: any[] = Array.isArray(ticketsResult) ? ticketsResult : [];
+  for (const t of ticketsArr) {
     if (!ticketsByContactId.has(t.contactId)) {
       ticketsByContactId.set(t.contactId, t);
     }
@@ -155,7 +156,7 @@ const CheckInactiveContactsService = async () => {
       ORDER BY m."ticketId", m."createdAt" DESC
     `, { replacements: { ticketIds }, type: QueryTypes.SELECT });
 
-    for (const msg of lastMessages || []) {
+    for (const msg of Array.isArray(lastMessages) ? lastMessages : []) {
       lastMessagesByTicketId.set(msg.ticketId, msg);
     }
 
@@ -167,7 +168,7 @@ const CheckInactiveContactsService = async () => {
       GROUP BY "ticketId"
     `, { replacements: { ticketIds }, type: QueryTypes.SELECT });
 
-    for (const row of inboundCounts || []) {
+    for (const row of Array.isArray(inboundCounts) ? inboundCounts : []) {
       inboundCountsByTicketId.set(row.ticketId, parseInt(row.count, 10));
     }
   }
