@@ -228,6 +228,7 @@ const chunkText = (text: string, maxLen = 900) => {
 
 export const syncTokkoLocationsToKnowledge = async (companyId = 1) => {
   const loc = await fetchTokkoLocations();
+  if ((loc as any).skipped) return { ok: true, skipped: true, reason: "tokko_disabled" };
   if (!loc.ok) return { ok: false, status: (loc as any).status || 500, error: "tokko_location_fetch_failed" };
 
   const flat = flattenLocations(loc.objects || []);

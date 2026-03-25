@@ -33,7 +33,7 @@ export const startAIProcessingWorker = async (): Promise<Worker> => {
     {
       connection: {
         url: process.env.REDIS_URL || "redis://localhost:6379",
-        maxRetriesPerRequest: 3,
+        maxRetriesPerRequest: null,
       },
       concurrency: 3,
     }

@@ -19,7 +19,7 @@ const queueEvents = new Map<string, QueueEvents>();
 
 const getConnectionParams = () => ({
   url: process.env.REDIS_URL || "redis://localhost:6379",
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: null,
 });
 
 // Get or create a queue
