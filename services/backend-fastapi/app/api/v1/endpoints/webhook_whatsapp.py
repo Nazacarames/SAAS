@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.services.ai_agent_service import generate_reply
 from app.services.contacts_service import get_contact_by_phone
 from app.services.messages_service import get_conversation_messages
+from app.services.conversation_orchestrator import orchestrate_reply
 
 router = APIRouter(prefix="/whatsapp-cloud", tags=["whatsapp-webhook"])
 
@@ -27,6 +28,69 @@ router = APIRouter(prefix="/whatsapp-cloud", tags=["whatsapp-webhook"])
 _replay_cache: dict[str, float] = {}
 _replay_cache_lock = threading.Lock()
 _REPLAY_TTL_SECONDS = 3600  # 1 hour TTL
+
+
+def get_conversation_state(db: Session, contact_id: int, company_id: int) -> tuple[str, Optional[int]]:
+    """
+    Get conversation state for a contact.
+    Returns (state, conversation_id).
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT id, state FROM ai_conversations
+                WHERE contact_id = :contact_id AND company_id = :company_id
+                ORDER BY updated_at DESC LIMIT 1
+            """),
+            {"contact_id": contact_id, "company_id": company_id}
+        ).mappings().first()
+        if row:
+            return row["state"] or "new", row["id"]
+    except Exception as e:
+        print(f"[webhook] get_conversation_state error: {e}")
+    return "new", None
+
+
+def save_conversation_state(
+    db: Session,
+    contact_id: int,
+    company_id: int,
+    state: str,
+    intent: str,
+    slots: dict,
+    conversation_id: Optional[int] = None,
+) -> Optional[int]:
+    """Save or update conversation state."""
+    try:
+        slots_json = json.dumps(slots or {}, ensure_ascii=False)
+        if conversation_id:
+            db.execute(
+                text("""
+                    UPDATE ai_conversations
+                    SET state = :state, intent = :intent, slots_json = :slots_json,
+                        messages_count = messages_count + 1, updated_at = NOW()
+                    WHERE id = :id
+                """),
+                {"id": conversation_id, "state": state, "intent": intent, "slots_json": slots_json}
+            )
+            db.commit()
+            return conversation_id
+        else:
+            row = db.execute(
+                text("""
+                    INSERT INTO ai_conversations (company_id, contact_id, state, intent, slots_json, messages_count, created_at, updated_at)
+                    VALUES (:company_id, :contact_id, :state, :intent, :slots_json, 1, NOW(), NOW())
+                    RETURNING id
+                """),
+                {"company_id": company_id, "contact_id": contact_id, "state": state,
+                 "intent": intent, "slots_json": slots_json}
+            ).mappings().first()
+            db.commit()
+            return row["id"] if row else None
+    except Exception as e:
+        print(f"[webhook] save_conversation_state error: {e}")
+        db.rollback()
+        return None
 
 
 def get_app_secret() -> str:
@@ -260,7 +324,15 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
     # Reverse to chronological order (oldest first)
     conversation_history = list(reversed(conversation_history))
     
-    # Process through AI agent (use company's name from database for proper multi-tenant support)
+    # Load conversation state for state machine persistence
+    try:
+        conversation_state, conversation_id = get_conversation_state(db, contact["id"], company_id)
+    except Exception as e:
+        print(f"[webhook] Error loading conversation state: {e}")
+        conversation_state = "new"
+        conversation_id = None
+    
+    # Process through Orchestrator (with state machine + tools)
     try:
         # Get company name from database for proper multi-tenant AI configuration
         company_name = "Default"
@@ -274,14 +346,20 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
         except Exception:
             pass
 
-        ai_result = await generate_reply(
+        # Use orchestrate_reply instead of generate_reply for full pipeline
+        ai_result = await orchestrate_reply(
             text=message_text,
             conversation_history=conversation_history,
-            company_name=company_name,
-            company_id=company_id
+            company_id=company_id,
+            conversation_id=conversation_id,
+            contact_id=contact["id"],
+            conversation_state=conversation_state,
         )
         
         ai_reply = ai_result.get("reply", "")
+        new_conversation_state = ai_result.get("conversation_state", conversation_state)
+        intent = ai_result.get("intent", "unknown")
+        slots = ai_result.get("slots", {})
         
         if ai_reply:
             # Save AI reply
@@ -295,6 +373,17 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
             if wa_config:
                 send_result = await send_whatsapp_message(from_number, ai_reply, wa_config)
                 print(f"WhatsApp send result: {send_result}")
+        
+        # Persist conversation state
+        try:
+            save_conversation_state(
+                db, contact["id"], company_id,
+                new_conversation_state, intent, slots, conversation_id
+            )
+        except Exception as e:
+            print(f"[webhook] Error saving conversation state: {e}")
+        
+        print(f"[webhook] Orchestrator result: state={new_conversation_state}, intent={intent}, tool_calls={ai_result.get('toolCallCount', 0)}")
         
         return {
             "ok": True,

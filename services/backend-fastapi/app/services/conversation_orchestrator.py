@@ -260,6 +260,14 @@ def classify_intent(text: str, conversation_state: str = "new") -> dict:
     if any(k in text_lower for k in kb_signals):
         return {"intent": "knowledge_query", "confidence": 0.8, "action": "query_kb"}
 
+    expand_signals = [
+        'amplia', 'ampliá', 'ampliar', 'amplíe', 'amplie', 'ensancha', 'abrí', 'abri',
+        'más zona', 'mas zona', 'más precio', 'mas precio', 'rango de precio',
+        'subi el precio', 'subí el precio', 'aumenta el precio', 'aumentá el precio'
+    ]
+    if any(k in text_lower for k in expand_signals):
+        return {"intent": "property_search", "confidence": 0.9, "action": "collect_slots_or_search"}
+
     if any(k in text_lower for k in ['sí', 'si', 'correcto', 'dale', 'perfecto', 'ok', 'sí, dale']):
         return {"intent": "confirmation", "confidence": 0.8, "action": "continue_conversation"}
 
@@ -310,6 +318,24 @@ async def execute_tool(
     import httpx
 
     if tool_name == "search_properties":
+        # Check if company is a real estate company (inmobiliaria)
+        if db:
+            try:
+                industry_row = db.execute(
+                    text('SELECT industry FROM companies WHERE id = :company_id LIMIT 1'),
+                    {"company_id": company_id}
+                ).mappings().first()
+                industry = industry_row["industry"].lower() if industry_row else "inmobiliaria"
+                if industry not in ("inmobiliaria", "real estate", "realestate", "agencia inmobiliaria", "broker"):
+                    return {
+                        "ok": True,
+                        "results": [],
+                        "message": "Búsqueda de propiedades no disponible para este tipo de empresa. Tokko solo está habilitado para inmobiliarias."
+                    }
+            except Exception as e:
+                print(f"[orchestrator] Industry check error: {e}")
+                # Default to allow for backwards compatibility
+        
         try:
             tokko_url = settings.tokko_api_url or "https://api.tokkobroker.com/api/v1"
             params = {"key": settings.tokko_api_key, "limit": 20}
@@ -607,7 +633,10 @@ class ConversationOrchestrator:
                 )
                 reply_text = response2.choices[0].message.content or reply_text
 
-            # Step 8: Apply guardrails
+            # Step 8: Deterministic fallback for property search when tool returned results
+            reply_text = self._force_property_results_reply(reply_text)
+
+            # Apply guardrails
             reply_text = apply_guardrails(reply_text, conversation_history, self.intent)
 
             # Step 9: Fallback if empty
@@ -695,6 +724,44 @@ class ConversationOrchestrator:
 
         messages.append({"role": "user", "content": text})
         return messages
+
+    def _force_property_results_reply(self, reply_text: str) -> str:
+        """If search_properties returned results but model replies with a negative phrase, force concrete options."""
+        negative_patterns = [
+            'no encontré opciones exactas',
+            'no encontre opciones exactas',
+            'no encontré coincidencia exacta',
+            'no encontre coincidencia exacta',
+        ]
+        lower_reply = (reply_text or '').lower()
+        has_negative = any(p in lower_reply for p in negative_patterns)
+
+        search_calls = [
+            tc for tc in (self.tool_calls or [])
+            if tc.get('tool') == 'search_properties' and tc.get('result', {}).get('ok')
+        ]
+        if not search_calls:
+            return reply_text
+
+        last_results = search_calls[-1].get('result', {}).get('results') or []
+        if not last_results:
+            return reply_text
+
+        if not has_negative:
+            return reply_text
+
+        lines = []
+        for i, prop in enumerate(last_results[:3], start=1):
+            title = prop.get('title') or 'Propiedad'
+            location = prop.get('location') or 'Sin zona'
+            price = prop.get('price') or 'Consultar'
+            rooms = prop.get('rooms')
+            rooms_txt = f" | 🏠 {rooms} amb." if rooms else ''
+            url = prop.get('url') or ''
+            url_txt = f" | 🔗 {url}" if url else ''
+            lines.append(f"{i}) {title} | 📍 {location} | 💰 {price}{rooms_txt}{url_txt}")
+
+        return "Te paso opciones concretas:\n" + "\n".join(lines)
 
     async def _persist_traces(
         self,

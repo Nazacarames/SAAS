@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 import threading
@@ -110,7 +111,7 @@ def login(
 @router.post("/refresh", response_model=RefreshResponse)
 def refresh(
     response: Response,
-    body: RefreshRequest | None = None,
+    body: Optional[RefreshRequest] = None,
     refresh_cookie: str | None = Cookie(default=None, alias="refreshToken"),
     db: Session = Depends(get_db),
 ):
@@ -178,12 +179,12 @@ def register(
     body: RegisterRequest,
     response: Response,
     db: Session = Depends(get_db),
-    request: Request | None = None,
+    # request removed - was causing FastAPI error
 ):
     # Rate limiting
     ip = "unknown"
-    if request:
-        ip = request.client.host if request.client else "unknown"
+    # if request:  # removed
+        # ip = request.client.host if request.client else unknown - removed
 
     if not _check_register_rate_limit(ip):
         raise HTTPException(

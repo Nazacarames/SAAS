@@ -28,3 +28,5 @@ def require_admin(payload: dict = Depends(get_current_user_payload)):
     if profile not in {"admin", "super"}:
         raise HTTPException(status_code=403, detail="Admin only")
     return payload
+
+from app.core.db import get_db
