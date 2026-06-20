@@ -39,3 +39,4 @@ Thumbs.db
 # Temp / bak files
 *.bak
 *.bak.*
+data/
