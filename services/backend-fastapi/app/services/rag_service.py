@@ -75,7 +75,9 @@ class RAGService:
     Returns top-k results with chunk IDs for citations.
     """
 
-    def __init__(self, company_id: int = 1):
+    def __init__(self, company_id: int = None):
+        if company_id is None or int(company_id) <= 0:
+            raise ValueError("company_id is required (multi-tenant safety)")
         self.company_id = company_id
         self.client = get_openai_client()
         self._db_gen = None
@@ -341,7 +343,7 @@ class RAGService:
 
 def hybrid_search(
     query: str,
-    company_id: int = 1,
+    company_id: int = None,
     top_k: int = 5,
     category: Optional[str] = None,
 ) -> dict:
@@ -352,7 +354,7 @@ def hybrid_search(
 
 def get_kb_context_for_prompt(
     query: str,
-    company_id: int = 1,
+    company_id: int = None,
     max_chars: int = 4000,
     top_k: int = 5,
 ) -> tuple[str, list[dict]]:

@@ -86,7 +86,7 @@ def validate_refresh_token(db: Session, token: str) -> dict | None:
         text(
             "SELECT id FROM refresh_tokens "
             'WHERE token = :token AND revoked = false AND "expiresAt" > :now '
-            "LIMIT 1"
+            "LIMIT 1 FOR UPDATE SKIP LOCKED"
         ),
         {"token": token, "now": datetime.now(timezone.utc)},
     ).mappings().first()
@@ -195,6 +195,24 @@ def create_user_with_company(
                 "metadata": "{}",
                 "now": now,
             },
+        )
+
+    # Seed default KB templates for new company
+    _kb_defaults = [
+        ("Información de la empresa", "empresa", "Nombre de la empresa: [COMPLETAR]\nDirección de la oficina: [COMPLETAR]\nTeléfono / WhatsApp: [COMPLETAR]\nEmail de contacto: [COMPLETAR]\nSitio web: [COMPLETAR]"),
+        ("Horario de atención", "empresa", "Lunes a viernes: [COMPLETAR — ej: 9:00 a 18:00 hs]\nSábados: [COMPLETAR — ej: 9:00 a 13:00 hs]\nDomingos y feriados: [COMPLETAR — ej: Cerrado]\nAtención por WhatsApp: [COMPLETAR]"),
+        ("Redes sociales", "empresa", "Instagram: [COMPLETAR — ej: @empresa]\nFacebook: [COMPLETAR]\nTikTok: [COMPLETAR o eliminar si no aplica]\nLinkedIn: [COMPLETAR o eliminar si no aplica]\nSitio web: [COMPLETAR]"),
+        ("Servicios que ofrecemos", "servicios", "Servicios principales: [COMPLETAR — describir qué ofrece la empresa]\nZona de cobertura: [COMPLETAR — describir zona geográfica de cobertura]"),
+        ("Honorarios y comisiones", "servicios", "Comisión / honorario principal: [COMPLETAR]\nOtros servicios: [COMPLETAR]\nNota: Los valores pueden variar según el caso. Consultar sin compromiso."),
+        ("Preguntas frecuentes", "faq", "Pregunta 1: [COMPLETAR]\nRespuesta: [COMPLETAR]\n\nPregunta 2: [COMPLETAR]\nRespuesta: [COMPLETAR]\n\nPregunta 3: [COMPLETAR]\nRespuesta: [COMPLETAR]"),
+        ("Proceso de trabajo", "faq", "Paso 1: [COMPLETAR]\nPaso 2: [COMPLETAR]\nPaso 3: [COMPLETAR]\nPaso 4: [COMPLETAR]\n\n¿Qué necesito para empezar? [COMPLETAR]"),
+    ]
+    for _kb_title, _kb_cat, _kb_content in _kb_defaults:
+        db.execute(
+            text("""INSERT INTO kb_documents
+                (company_id, title, category, source_type, status, content, is_default, needs_setup, created_at, updated_at)
+                VALUES (:cid, :title, :cat, 'manual', 'ready', :content, TRUE, TRUE, :now, :now)"""),
+            {"cid": company_id, "title": _kb_title, "cat": _kb_cat, "content": _kb_content, "now": now}
         )
 
     db.commit()

@@ -159,9 +159,11 @@ def get_company_info() -> Dict:
     }
 
 
-def get_knowledge_base(category: str = None) -> List[Dict]:
-    """Obtener documentos de la base de conocimiento"""
-    docs = get_kb_documents(1)  # company_id = 1
+def get_knowledge_base(category: str = None, company_id: int = None) -> List[Dict]:
+    """Obtener documentos de la base de conocimiento (deprecated — caller must pass company_id)"""
+    if not company_id:
+        raise ValueError("company_id required for get_knowledge_base")
+    docs = get_kb_documents(company_id)
     if category:
         docs = [d for d in docs if d.get("category") == category]
     return docs
@@ -247,7 +249,7 @@ async def generate_reply(
     text: str,
     conversation_history: list = None,
     company_name: str = None,
-    company_id: int = 1,
+    company_id: int = None,
     use_orchestrator: bool = False,
 ) -> dict:
     """
@@ -347,7 +349,6 @@ REGLAS DE USO DE HERRAMIENTAS (OBLIGATORIAS):
             messages=messages,
             tools=FUNCTIONS,
             tool_choice="auto",
-            max_tokens=ai_config.get("max_tokens", 1000),
             temperature=ai_config.get("temperature", 0.3)  # Lower temp = more focused
         )
 
@@ -429,7 +430,6 @@ REGLAS DE USO DE HERRAMIENTAS (OBLIGATORIAS):
                 response2 = openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=messages,
-                    max_tokens=ai_config.get("max_tokens", 1000),
                     temperature=ai_config.get("temperature", 0.7)
                 )
                 reply_text = response2.choices[0].message.content or reply_text
@@ -450,7 +450,6 @@ REGLAS DE USO DE HERRAMIENTAS (OBLIGATORIAS):
             response_refine = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": refine_prompt}],
-                max_tokens=ai_config.get("max_tokens", 800),
                 temperature=0.5,
             )
             reply_text = response_refine.choices[0].message.content or reply_text

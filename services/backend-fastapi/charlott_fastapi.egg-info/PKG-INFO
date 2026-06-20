@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: charlott-fastapi
 Version: 0.1.0
 Summary: Charlott CRM FastAPI backend
-Requires-Python: >=3.11
+Requires-Python: >=3.10
 Requires-Dist: fastapi>=0.116.0
 Requires-Dist: uvicorn[standard]>=0.30.0
 Requires-Dist: sqlalchemy>=2.0.36

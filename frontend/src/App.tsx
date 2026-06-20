@@ -47,8 +47,8 @@ function App() {
                             <SocketInitializer />
                             <Routes />
                             <ToastContainer
-                                position="top-right"
-                                autoClose={3000}
+                                position="bottom-right"
+                                autoClose={2800}
                                 hideProgressBar={false}
                                 newestOnTop
                                 closeOnClick
