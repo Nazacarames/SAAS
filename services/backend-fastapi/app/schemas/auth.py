@@ -47,3 +47,16 @@ class RegisterResponse(BaseModel):
     ok: bool = True
     user: UserOut
     token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
+
+class GenericOkResponse(BaseModel):
+    ok: bool = True

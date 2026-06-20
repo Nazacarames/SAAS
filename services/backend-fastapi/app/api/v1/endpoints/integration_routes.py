@@ -57,8 +57,24 @@ class PropertySearchInput(BaseModel):
 
 
 # --- Tokko Integration ---
-def get_tokko_credentials(company_id: int = 1) -> Optional[dict]:
-    """Get Tokko credentials from settings"""
+def get_tokko_credentials(company_id: int = None, db: Session = None) -> Optional[dict]:
+    if company_id is None or int(company_id) <= 0:
+        raise ValueError("company_id is required (multi-tenant safety)")
+    """Get Tokko credentials for a specific company. Checks DB first, falls back to env vars."""
+    if db and company_id:
+        try:
+            row = db.execute(
+                text("SELECT tokko_api_key, tokko_base_url FROM companies WHERE id = :cid LIMIT 1"),
+                {"cid": company_id}
+            ).mappings().first()
+            if row and row.get("tokko_api_key"):
+                return {
+                    "api_url": (row.get("tokko_base_url") or "https://www.tokkobroker.com/api/v1").rstrip("/"),
+                    "api_key": row["tokko_api_key"],
+                }
+        except Exception:
+            pass
+    # Fallback to env vars (only if no per-company key found)
     if settings.tokko_api_url and settings.tokko_api_key:
         return {
             "api_url": settings.tokko_api_url,
@@ -180,23 +196,32 @@ async def get_hardening_status(payload: dict = Depends(get_current_user_payload)
 
 
 @router.get("/tokko/status")
-async def tokko_status(payload: dict = Depends(optional_auth)):
+async def tokko_status(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db)
+):
     """Get Tokko integration status"""
-    company_id = (payload.get("companyId") if payload else 1) if payload else 1
-    creds = get_tokko_credentials(company_id)
+    company_id = int(payload.get("companyId", 0))
+    if not company_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="No company in token")
+    creds = get_tokko_credentials(company_id, db=db)
     return {"ok": True, "connected": creds is not None}
 
 
 @router.post("/tokko/properties/search")
 async def tokko_search_properties(
     search: PropertySearchInput,
-    payload: dict = Depends(optional_auth)
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db)
 ):
     """Search properties in Tokko API"""
     import httpx
-    
-    company_id = (payload.get("companyId") if payload else 1) if payload else 1
-    creds = get_tokko_credentials(company_id)
+
+    company_id = int(payload.get("companyId", 0))
+    if not company_id:
+        raise HTTPException(status_code=403, detail="No company in token")
+    creds = get_tokko_credentials(company_id, db=db)
     
     if not creds:
         raise HTTPException(status_code=400, detail="Tokko not configured")
@@ -246,13 +271,16 @@ async def tokko_search_properties(
 @router.get("/tokko/properties/{property_id}/photos")
 async def tokko_get_property_photos(
     property_id: int,
-    payload: dict = Depends(optional_auth)
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db)
 ):
     """Get photos for a property from Tokko"""
     import httpx
-    
-    company_id = (payload.get("companyId") if payload else 1) if payload else 1
-    creds = get_tokko_credentials(company_id)
+
+    company_id = int(payload.get("companyId", 0))
+    if not company_id:
+        raise HTTPException(status_code=403, detail="No company in token")
+    creds = get_tokko_credentials(company_id, db=db)
     
     if not creds:
         raise HTTPException(status_code=400, detail="Tokko not configured")
@@ -274,6 +302,6 @@ async def tokko_get_property_photos(
 
 
 @router.get("/")
-async def list_integrations(payload: dict = Depends(optional_auth)):
+async def list_integrations(payload: dict = Depends(get_current_user_payload)):
     """List all integrations"""
     return {"tokko": {"connected": False}, "meta": {"connected": False}, "whatsapp": {"connected": True}}

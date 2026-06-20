@@ -10,7 +10,8 @@ class MessageSendRequest(BaseModel):
 
 
 class MessageOut(BaseModel):
-    id: int
+    # messages.id is a UUID string in this schema, not a serial int
+    id: str | int
     body: str | None = None
     fromMe: bool | None = None
     contactId: int | None = None

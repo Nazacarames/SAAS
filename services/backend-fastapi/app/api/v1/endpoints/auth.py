@@ -1,5 +1,9 @@
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 import threading
 import time
@@ -8,6 +12,8 @@ from app.api.deps import get_current_user_payload
 from app.core.config import settings
 from app.core.db import get_db
 from app.schemas.auth import (
+    ForgotPasswordRequest,
+    GenericOkResponse,
     LoginRequest,
     LoginResponse,
     LogoutResponse,
@@ -16,6 +22,7 @@ from app.schemas.auth import (
     RefreshResponse,
     RegisterRequest,
     RegisterResponse,
+    ResetPasswordRequest,
 )
 from app.services.auth_service import (
     create_access_token,
@@ -23,12 +30,14 @@ from app.services.auth_service import (
     create_user_with_company,
     get_user_by_email,
     get_user_by_id,
+    hash_password,
     revoke_user_refresh_tokens,
     store_refresh_token,
     user_exists,
     validate_refresh_token,
     verify_password,
 )
+from app.services.email_service import send_password_reset_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -79,12 +88,36 @@ def me(
 
 
 # ── POST /api/auth/login ─────────────────────────────────────────
+# Login rate limiter: 10 attempts per 15 min per IP
+_login_buckets: dict[str, dict] = {}
+_login_buckets_lock = threading.Lock()
+_LOGIN_WINDOW_MS = 15 * 60 * 1000
+_LOGIN_MAX_PER_WINDOW = 10
+
+def _check_login_rate_limit(ip: str) -> bool:
+    now = int(time.time() * 1000)
+    with _login_buckets_lock:
+        bucket = _login_buckets.get(ip)
+        if bucket and bucket["resetAt"] > now and bucket["count"] >= _LOGIN_MAX_PER_WINDOW:
+            return False
+        if not bucket or bucket["resetAt"] <= now:
+            _login_buckets[ip] = {"count": 1, "resetAt": now + _LOGIN_WINDOW_MS}
+        else:
+            bucket["count"] += 1
+        return True
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(
     body: LoginRequest,
     response: Response,
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    _xff = request.headers.get("x-forwarded-for", "")
+    _ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
+    if not _check_login_rate_limit(_ip):
+        raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
     user = get_user_by_email(db, body.email)
     if not user or not verify_password(body.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
@@ -178,13 +211,12 @@ def _check_register_rate_limit(ip: str) -> bool:
 def register(
     body: RegisterRequest,
     response: Response,
+    request: Request,
     db: Session = Depends(get_db),
-    # request removed - was causing FastAPI error
 ):
-    # Rate limiting
-    ip = "unknown"
-    # if request:  # removed
-        # ip = request.client.host if request.client else unknown - removed
+    # Rate limiting — use real client IP (X-Forwarded-For from nginx, fallback to direct)
+    _xff = request.headers.get("x-forwarded-for", "")
+    ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
 
     if not _check_register_rate_limit(ip):
         raise HTTPException(
@@ -236,3 +268,89 @@ def register(
         },
         "token": access,
     }
+
+
+# ── POST /api/auth/forgot-password ───────────────────────────────
+_forgot_buckets: dict[str, dict] = {}
+_forgot_buckets_lock = threading.Lock()
+_FORGOT_WINDOW_MS = 15 * 60 * 1000
+_FORGOT_MAX_PER_WINDOW = 5
+
+
+def _check_forgot_rate_limit(ip: str) -> bool:
+    now = int(time.time() * 1000)
+    with _forgot_buckets_lock:
+        bucket = _forgot_buckets.get(ip)
+        if bucket and bucket["resetAt"] > now and bucket["count"] >= _FORGOT_MAX_PER_WINDOW:
+            return False
+        if not bucket or bucket["resetAt"] <= now:
+            _forgot_buckets[ip] = {"count": 1, "resetAt": now + _FORGOT_WINDOW_MS}
+        else:
+            bucket["count"] += 1
+        return True
+
+
+@router.post("/forgot-password", response_model=GenericOkResponse)
+def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    _xff = request.headers.get("x-forwarded-for", "")
+    ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
+    if not _check_forgot_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
+
+    user = get_user_by_email(db, body.email.strip().lower())
+    if not user:
+        return {"ok": True}
+
+    token = secrets.token_urlsafe(48)
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    db.execute(
+        text(
+            "INSERT INTO password_reset_tokens (user_id, token, expires_at) "
+            "VALUES (:uid, :token, :exp)"
+        ),
+        {"uid": user["id"], "token": token, "exp": expires},
+    )
+    db.commit()
+
+    send_password_reset_email(user["email"], user["name"], token)
+    return {"ok": True}
+
+
+# ── POST /api/auth/reset-password ────────────────────────────────
+@router.post("/reset-password", response_model=GenericOkResponse)
+def reset_password(
+    body: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+
+    row = db.execute(
+        text(
+            "SELECT id, user_id FROM password_reset_tokens "
+            "WHERE token = :token AND used_at IS NULL AND expires_at > :now "
+            "LIMIT 1 FOR UPDATE"
+        ),
+        {"token": body.token, "now": datetime.now(timezone.utc)},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=400, detail="El enlace expiró o ya fue usado. Solicitá uno nuevo.")
+
+    new_hash = hash_password(body.password)
+    db.execute(
+        text('UPDATE users SET "passwordHash" = :h, "updatedAt" = :now WHERE id = :uid'),
+        {"h": new_hash, "now": datetime.now(timezone.utc), "uid": row["user_id"]},
+    )
+    db.execute(
+        text("UPDATE password_reset_tokens SET used_at = :now WHERE id = :id"),
+        {"now": datetime.now(timezone.utc), "id": row["id"]},
+    )
+    revoke_user_refresh_tokens(db, row["user_id"])
+    db.commit()
+
+    return {"ok": True}

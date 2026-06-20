@@ -168,6 +168,7 @@ def messages_send(
         contact_id=contact_id,
         user_id=user_id,
         body=body.body,
+        idempotency_key=idem_key,
     )
     if not row:
         raise HTTPException(status_code=404, detail="contact not found")

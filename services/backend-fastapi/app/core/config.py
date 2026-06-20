@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     tokko_api_url: str = ""
     tokko_api_key: str = ""
 
+    # SMTP for password reset
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    smtp_from: str = ""
+    frontend_url: str = "https://login.charlott.ai"
+    # MercadoPago
+    mp_access_token: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

@@ -6,7 +6,14 @@ from sqlalchemy.orm import Session
 _CONTACT_COLS = (
     'id, name, number, email, "whatsappId", source, "leadStatus", '
     '"assignedUserId", "companyId", "inactivityMinutes", "inactivityWebhookId", '
-    '"createdAt", "updatedAt"'
+    '"createdAt", "updatedAt", '
+    'lead_score, business_type, needs, progress_tags, '
+    # Stage thresholds owned by the backend: the frontend renders lead_stage
+    # as-is instead of re-deriving it from score thresholds client-side.
+    "CASE WHEN COALESCE(lead_score, 0) >= 75 THEN 'interesado' "
+    "WHEN COALESCE(lead_score, 0) >= 50 THEN 'calificado' "
+    "WHEN COALESCE(lead_score, 0) >= 25 THEN 'contactado' "
+    "ELSE 'nuevo' END AS lead_stage"
 )
 
 
@@ -75,19 +82,29 @@ def get_contact(db: Session, *, company_id: int, contact_id: int):
     return dict(row) if row else None
 
 
-def get_contact_by_phone(db: Session, phone: str):
-    """Find contact by phone number (normalized to digits only)"""
-    # Normalize: keep only digits
+def get_contact_by_phone(db: Session, phone: str, company_id: int = None):
+    """Find contact by phone number scoped to a specific company."""
     normalized = re.sub(r"\D", "", phone)
-    
-    row = db.execute(
-        text(
-            f"SELECT {_CONTACT_COLS} FROM contacts "
-            "WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), '(', '') LIKE :phone "
-            "LIMIT 1"
-        ),
-        {"phone": f"%{normalized}%"},
-    ).mappings().first()
+    if company_id:
+        row = db.execute(
+            text(
+                f'SELECT {_CONTACT_COLS} FROM contacts '
+                'WHERE "companyId" = :company_id '
+                'AND REPLACE(REPLACE(REPLACE(REPLACE(number, \'+\', \'\'), \' \', \'\'), \'-\', \'\'), \'(\', \'\') LIKE :phone '
+                'LIMIT 1'
+            ),
+            {"company_id": company_id, "phone": f"%{normalized}%"},
+        ).mappings().first()
+    else:
+        # Fallback: no company_id known yet (should only happen on first message)
+        row = db.execute(
+            text(
+                f"SELECT {_CONTACT_COLS} FROM contacts "
+                "WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), '(', '') LIKE :phone "
+                "LIMIT 1"
+            ),
+            {"phone": f"%{normalized}%"},
+        ).mappings().first()
     return dict(row) if row else None
 
 
@@ -104,6 +121,7 @@ def update_contact(db: Session, *, company_id: int, contact_id: int, payload: di
     allowed = {
         "name", "number", "email", "whatsappId", "source",
         "leadStatus", "assignedUserId", "inactivityMinutes", "inactivityWebhookId",
+        "business_type", "needs", "progress_tags",
     }
     col_map = {
         "whatsappId": '"whatsappId"',
@@ -134,9 +152,21 @@ def update_contact(db: Session, *, company_id: int, contact_id: int, payload: di
         params,
     )
 
-    # Handle tags if provided
+    # Handle progress_tags as direct TEXT[] update (bypasses ContactTag join table)
+    if "progress_tags" in payload and payload["progress_tags"] is not None:
+        tags_val = payload["progress_tags"]
+        if isinstance(tags_val, list):
+            from sqlalchemy import text as _text
+            db.execute(
+                _text("UPDATE contacts SET progress_tags = CAST(:pt AS TEXT[]), \"updatedAt\" = NOW() WHERE id = :id AND \"companyId\" = :company_id"),
+                {"pt": [str(t) for t in tags_val], "id": contact_id, "company_id": company_id},
+            )
+
+    # Handle legacy tag IDs (integer list only)
     if "tags" in payload and payload["tags"] is not None:
-        _sync_tags(db, contact_id, payload["tags"])
+        tag_list = payload["tags"]
+        if isinstance(tag_list, list) and all(isinstance(t, int) for t in tag_list):
+            _sync_tags(db, contact_id, tag_list)
 
     db.commit()
     return get_contact(db, company_id=company_id, contact_id=contact_id)

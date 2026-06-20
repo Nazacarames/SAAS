@@ -93,6 +93,29 @@ const fallbackPreviewImageUrl = (url?: string) => {
   return `https://image.thum.io/get/width/1200/noanimate/${encodeURIComponent(clean)}`;
 };
 
+const parsePropertyCards = (body: string): Array<{ photo: string | null; text: string }> | null => {
+  const CARD_SEP = ' ||| ';
+  if (!body.includes('[FOTO:') && !body.includes(CARD_SEP)) return null;
+  const pin = '\u{1F4CD}'; // 📍
+  const cardStart = body.indexOf(pin);
+  let bodyPart: string;
+  if (cardStart >= 0) {
+    bodyPart = body.slice(cardStart);
+  } else if (body.toLowerCase().startsWith('te paso opciones concretas:')) {
+    bodyPart = body.split(':').slice(1).join(':').trim();
+  } else {
+    return null;
+  }
+  const rawItems = bodyPart.split(CARD_SEP).map((s) => s.trim()).filter(Boolean);
+  if (rawItems.length === 0) return null;
+  return rawItems.map((item) => {
+    const photoMatch = item.match(/\[FOTO:(https?:\/\/[^\]]+)\]/);
+    const photo = photoMatch ? photoMatch[1] : null;
+    const text = item.replace(/\s*\[FOTO:https?:\/\/[^\]]+\]\s*/g, '').trim();
+    return { photo, text };
+  });
+};
+
 const buildSummary = (msgs: any[]) => {
   const inbound = (msgs || []).filter((m) => !m.fromMe && String(m.body || '').trim());
   if (inbound.length === 0) return 'Sin contexto todavía. Esperando más mensajes del cliente.';
@@ -131,11 +154,6 @@ const Conversations = () => {
   const [decisionLogs, setDecisionLogs] = useState<any[]>([]);
   const messagesFetchSeq = useRef(0);
   const contactFetchSeq = useRef(0);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const selectedConvRef = useRef<ConversationItem | null>(null);
-
-  // Keep ref in sync so socket callbacks always see current selection
-  useEffect(() => { selectedConvRef.current = selectedConv; }, [selectedConv]);
 
   const toTs = (value?: string | number) => {
     if (value === null || value === undefined || value === '') return 0;
@@ -242,62 +260,38 @@ const Conversations = () => {
 
   useEffect(() => {
     const socket = socketConnection.connect();
-    if (!socket) return;
 
     const handleNewMessage = (data: any) => {
-      // Always refresh conversation list to update last message / ordering
-      fetchTickets();
-      // If viewing the same contact, append the message directly for instant UI
-      const current = selectedConvRef.current;
-      const incomingContactId = Number(
-        data?.contactId || data?.message?.contactId || data?.contact?.id || 0
-      );
-      if (current && incomingContactId === current.contactId) {
-        const msg = data?.message;
-        if (msg?.id) {
-          setMessages((prev) => {
-            // Avoid duplicates
-            if (prev.some((m: any) => m.id === msg.id)) return prev;
-            return [...prev, msg];
-          });
-        } else {
-          // Fallback: re-fetch if message payload is incomplete
-          fetchConversationMessages(current.contactId);
+        fetchTickets();
+        if (selectedConv && Number(data?.contactId) === selectedConv.contactId) {
+            fetchConversationMessages(selectedConv.contactId);
         }
-      }
     };
 
     const handleTicketUpdate = () => {
-      fetchTickets();
+        fetchTickets();
     };
 
-    const handleReconnect = () => {
-      // After reconnection, refresh everything to ensure UI is up-to-date
-      fetchTickets();
-      const current = selectedConvRef.current;
-      if (current) fetchConversationMessages(current.contactId);
-    };
-
-    socket.on('newMessage', handleNewMessage);
-    socket.on('ticketUpdate', handleTicketUpdate);
-    socket.on('contactUpdate', handleTicketUpdate);
-    socket.on('connect', handleReconnect);
+    if (socket) {
+        socket.on('newMessage', handleNewMessage);
+        socket.on('ticketUpdate', handleTicketUpdate);
+        socket.on('contactUpdate', handleTicketUpdate);
+    }
 
     return () => {
-      socket.off('newMessage', handleNewMessage);
-      socket.off('ticketUpdate', handleTicketUpdate);
-      socket.off('contactUpdate', handleTicketUpdate);
-      socket.off('connect', handleReconnect);
+        if (socket) {
+            socket.off('newMessage', handleNewMessage);
+            socket.off('ticketUpdate', handleTicketUpdate);
+            socket.off('contactUpdate', handleTicketUpdate);
+        }
     };
-  }, []);
-
-  // Auto-scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [selectedConv?.contactId]);
 
   useEffect(() => {
-    const id = setInterval(() => { fetchTickets(); }, 30000);
+    // Jittered interval (25-35s) so simultaneously-open clients don't all
+    // poll the backend at the same aligned moment (thundering herd).
+    const period = 25000 + Math.floor(Math.random() * 10000);
+    const id = setInterval(() => { fetchTickets(); }, period);
     return () => clearInterval(id);
   }, []);
 
@@ -452,7 +446,9 @@ const Conversations = () => {
   };
 
   const leadScore = Number(contactData?.lead_score || 0);
-  const leadStage = stageFromScore(leadScore);
+  // Backend owns the stage mapping (lead_stage column); local thresholds are
+  // only a fallback for stale API responses.
+  const leadStage = contactData?.lead_stage || stageFromScore(leadScore);
   const summary = useMemo(() => buildSummary(messages), [messages]);
   const latestTicketId = useMemo(() => {
     const m = [...messages].reverse().find((x: any) => Number(x.ticketId || 0) > 0);
@@ -482,7 +478,7 @@ const Conversations = () => {
     }
   };
 
-  const progressTags = (contactData?.tags || []).map((t: any) => String(t.name || '').toLowerCase());
+  const progressTags: string[] = (contactData?.progress_tags || []).map((t: string) => t.toLowerCase());
   const hasOpciones = progressTags.includes('opciones_presentadas');
   const hasInteres = progressTags.includes('interes_detectado');
 
@@ -490,23 +486,14 @@ const Conversations = () => {
     if (!selectedConv?.contactId) return;
     setSavingProgress(true);
     try {
-      const currentTags = (contactData?.tags || []).map((t: any) => String(t.name || '')).filter(Boolean);
-      const lower = currentTags.map((x: string) => x.toLowerCase());
-      const exists = lower.includes(tag.toLowerCase());
+      const current: string[] = (contactData?.progress_tags || []).map((t: string) => t.toLowerCase());
+      const exists = current.includes(tag.toLowerCase());
       const next = exists
-        ? currentTags.filter((x: string) => x.toLowerCase() !== tag.toLowerCase())
-        : [...currentTags, tag];
+        ? current.filter((x: string) => x !== tag.toLowerCase())
+        : [...current, tag.toLowerCase()];
 
       await api.put(`/contacts/${selectedConv.contactId}`, {
-        name: contactData?.name || selectedConv.name,
-        number: contactData?.number || selectedConv.number,
-        email: contactData?.email || '',
-        source: contactData?.source || null,
-        leadStatus: contactData?.leadStatus || 'read',
-        assignedUserId: contactData?.assignedUserId || null,
-        inactivityMinutes: contactData?.inactivityMinutes || 30,
-        inactivityWebhookId: contactData?.inactivityWebhookId || null,
-        tags: next
+        progress_tags: next
       });
 
       await fetchContactData(selectedConv.contactId);
@@ -542,27 +529,27 @@ const Conversations = () => {
           height: '100%',
           display: 'flex',
           overflow: 'hidden',
-          borderRadius: 3,
-          bgcolor: 'rgba(10,16,30,0.95)',
-          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: '14px',
+          bgcolor: '#0C0E12',
+          border: '1px solid rgba(232,160,32,0.12)',
           boxShadow: '0 12px 40px rgba(0,0,0,0.45)'
         }}
       >
         <Box
           sx={{
             width: { xs: '100%', md: 360 },
-            borderRight: { md: '1px solid rgba(125,157,214,0.18)' },
-            bgcolor: 'rgba(12,20,36,0.92)',
+            borderRight: { md: '1px solid rgba(232,160,32,0.12)' },
+            bgcolor: '#13161C',
             display: selectedConv ? { xs: 'none', md: 'block' } : 'block'
           }}
         >
-          <Box sx={{ p: 1.5, bgcolor: 'rgba(17,28,48,0.92)', borderBottom: '1px solid rgba(125,157,214,0.18)' }}>
-            <Typography variant='subtitle1' sx={{ fontWeight: 700, color: '#e9edef' }}>
+          <Box sx={{ p: 1.5, bgcolor: '#1A1D24', borderBottom: '1px solid rgba(232,160,32,0.12)' }}>
+            <Typography variant='subtitle1' sx={{ fontWeight: 700, color: '#E8E6E1', fontFamily: '"Syne", sans-serif', letterSpacing: '-0.02em', fontSize: '0.95rem' }}>
               Conversaciones
             </Typography>
           </Box>
 
-          <Box sx={{ p: 1, bgcolor: 'rgba(12,20,36,0.92)' }}>
+          <Box sx={{ p: 1, bgcolor: '#13161C' }}>
             <TextField
               fullWidth
               size='small'
@@ -570,28 +557,28 @@ const Conversations = () => {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               InputProps={{
-                startAdornment: <SearchIcon sx={{ mr: 1, color: '#8696a0' }} fontSize='small' />
+                startAdornment: <SearchIcon sx={{ mr: 1, color: '#7A7872' }} fontSize='small' />
               }}
               sx={{
                 '& .MuiInputBase-root': {
-                  bgcolor: 'rgba(17,28,48,0.92)',
+                  bgcolor: '#1A1D24',
                   color: '#d1d7db',
                   borderRadius: 2
                 },
                 '& .MuiOutlinedInput-notchedOutline': { borderColor: 'transparent' },
-                '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#2a3942' },
-                '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#5BB2FF' }
+                '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(232,160,32,0.1)' },
+                '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#E8A020' }
               }}
             />
           </Box>
-          <Divider sx={{ borderColor: '#2a3942' }} />
+          <Divider sx={{ borderColor: 'rgba(232,160,32,0.1)' }} />
 
           {loadingTickets ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-              <CircularProgress size={24} sx={{ color: '#5BB2FF' }} />
+              <CircularProgress size={24} sx={{ color: '#E8A020' }} />
             </Box>
           ) : filtered.length === 0 ? (
-            <Typography variant='body2' sx={{ p: 2, color: '#8696a0' }}>
+            <Typography variant='body2' sx={{ p: 2, color: '#7A7872' }}>
               No hay conversaciones.
             </Typography>
           ) : (
@@ -604,34 +591,34 @@ const Conversations = () => {
                   sx={{
                     py: 1.2,
                     px: 1.5,
-                    borderBottom: '1px solid rgba(125,157,214,0.14)',
-                    '&.Mui-selected': { bgcolor: '#2a3942' },
-                    '&:hover': { bgcolor: 'rgba(17,28,48,0.92)' }
+                    borderBottom: '1px solid rgba(232,160,32,0.08)',
+                    '&.Mui-selected': { bgcolor: 'rgba(232,160,32,0.1)' },
+                    '&:hover': { bgcolor: '#1A1D24' }
                   }}
                 >
-                  <Avatar sx={{ width: 40, height: 40, mr: 1.2, bgcolor: '#3b4a54', color: '#e9edef' }}>
+                  <Avatar sx={{ width: 40, height: 40, mr: 1.2, bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020' }}>
                     {(c.name || '?').slice(0, 1).toUpperCase()}
                   </Avatar>
                   <ListItemText
                     primary={
                       <Stack direction='row' justifyContent='space-between' alignItems='center'>
-                        <Typography variant='body2' sx={{ fontWeight: 600, color: '#e9edef' }}>
+                        <Typography variant='body2' sx={{ fontWeight: 600, color: '#E8E6E1' }}>
                           {c.name}
                         </Typography>
-                        <Typography variant='caption' sx={{ color: '#8696a0' }}>
+                        <Typography variant='caption' sx={{ color: '#7A7872', fontFamily: '"JetBrains Mono", monospace', fontSize: '0.6rem' }}>
                           {fmtTime(c.updatedAt)}
                         </Typography>
                       </Stack>
                     }
                     secondary={
                       <Stack direction='row' justifyContent='space-between' alignItems='center'>
-                        <Typography variant='caption' noWrap sx={{ maxWidth: 180, color: '#8696a0' }}>
+                        <Typography variant='caption' noWrap sx={{ maxWidth: 180, color: '#7A7872' }}>
                           {c.lastMessage || c.number}
                         </Typography>
                         <Badge
                           color='success'
                           badgeContent={c.ticketCount > 99 ? '99+' : c.ticketCount}
-                          sx={{ '& .MuiBadge-badge': { bgcolor: '#5BB2FF', color: '#0b141a' } }}
+                          sx={{ '& .MuiBadge-badge': { bgcolor: '#E8A020', color: '#0b141a' } }}
                         />
                       </Stack>
                     }
@@ -647,7 +634,7 @@ const Conversations = () => {
             flex: 1,
             display: 'flex',
             flexDirection: 'column',
-            bgcolor: 'rgba(10,16,30,0.95)',
+            bgcolor: '#0C0E12',
             backgroundImage:
               'radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), radial-gradient(rgba(255,255,255,0.02) 1px, transparent 1px)',
             backgroundPosition: '0 0, 20px 20px',
@@ -655,8 +642,8 @@ const Conversations = () => {
           }}
         >
           {!selectedConv ? (
-            <Box sx={{ m: 'auto', textAlign: 'center', color: '#8696a0' }}>
-              <Typography variant='h6' sx={{ color: '#e9edef' }}>
+            <Box sx={{ m: 'auto', textAlign: 'center', color: '#7A7872' }}>
+              <Typography variant='h6' sx={{ color: '#E8E6E1' }}>
                 Seleccioná una conversación
               </Typography>
             </Box>
@@ -665,22 +652,22 @@ const Conversations = () => {
               <Box
                 sx={{
                   p: 1.2,
-                  bgcolor: 'rgba(17,28,48,0.92)',
-                  borderBottom: '1px solid rgba(125,157,214,0.18)',
+                  bgcolor: '#1A1D24',
+                  borderBottom: '1px solid rgba(232,160,32,0.12)',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center'
                 }}
               >
                 <Stack direction='row' spacing={1.2} alignItems='center'>
-                  <Avatar sx={{ bgcolor: '#3b4a54', color: '#e9edef' }}>
+                  <Avatar sx={{ bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020' }}>
                     {(selectedConv.name || '?').slice(0, 1).toUpperCase()}
                   </Avatar>
                   <Box>
-                    <Typography variant='body2' sx={{ fontWeight: 600, color: '#e9edef' }}>
+                    <Typography variant='body2' sx={{ fontWeight: 600, color: '#E8E6E1' }}>
                       {selectedConv.name}
                     </Typography>
-                    <Typography variant='caption' sx={{ color: '#8696a0' }}>
+                    <Typography variant='caption' sx={{ color: '#7A7872', fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem' }}>
                       {selectedConv.number}
                     </Typography>
                   </Box>
@@ -689,7 +676,7 @@ const Conversations = () => {
                   {selectedConv.statuses.slice(0, 2).map((s) => (
                     <Chip key={s} size='small' label={s} color={statusColor(s)} />
                   ))}
-                  <IconButton onClick={() => fetchConversationMessages(selectedConv.contactId)} size='small' sx={{ color: '#e9edef' }}>
+                  <IconButton onClick={() => fetchConversationMessages(selectedConv.contactId)} size='small' sx={{ color: '#E8E6E1' }}>
                     <RefreshIcon fontSize='small' />
                   </IconButton>
                 </Stack>
@@ -698,16 +685,44 @@ const Conversations = () => {
               <Stack spacing={1} sx={{ flex: 1, overflow: 'auto', p: 2 }}>
                 {loadingMessages ? (
                   <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-                    <CircularProgress size={24} sx={{ color: '#5BB2FF' }} />
+                    <CircularProgress size={24} sx={{ color: '#E8A020' }} />
                   </Box>
                 ) : messages.length === 0 ? (
-                  <Typography variant='body2' sx={{ color: '#8696a0' }}>
+                  <Typography variant='body2' sx={{ color: '#7A7872' }}>
                     No hay mensajes.
                   </Typography>
                 ) : (
-                  messages.map((m: any) => (
+                  messages.map((m) => {
+                    const propCards = m.fromMe ? parsePropertyCards(String(m.body || '')) : null;
+                    if (propCards && propCards.length > 0) {
+                      return (
+                        <Box key={m.id || `${m.createdAt}-${m.body}`} className='msg-in' sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.8 }}>
+                          {propCards.map((card, ci) => (
+                            <Paper
+                              key={ci}
+                              variant='outlined'
+                              sx={{ maxWidth: '78%', borderRadius: 2, bgcolor: 'rgba(232,160,32,0.1)', color: '#E8E6E1', borderColor: 'rgba(255,255,255,0.12)', overflow: 'hidden' }}
+                            >
+                              {card.photo && isHttpUrl(card.photo) && (
+                                <Box component='img' src={card.photo} alt='propiedad' sx={{ width: '100%', maxHeight: 200, objectFit: 'cover', display: 'block' }} />
+                              )}
+                              <Box sx={{ p: 1.1, px: 1.2 }}>
+                                <Typography variant='body2' sx={{ whiteSpace: 'pre-wrap' }}>{card.text}</Typography>
+                                {ci === propCards.length - 1 && (
+                                  <Typography variant='caption' sx={{ mt: 0.5, display: 'block', textAlign: 'right', color: 'rgba(233,237,239,0.72)' }}>
+                                    {fmtTime(m.createdAt)}
+                                  </Typography>
+                                )}
+                              </Box>
+                            </Paper>
+                          ))}
+                        </Box>
+                      );
+                    }
+                    return (
                     <Box
                       key={m.id || `${m.createdAt}-${m.body}`}
+                      className='msg-in'
                       sx={{ display: 'flex', justifyContent: m.fromMe ? 'flex-end' : 'flex-start' }}
                     >
                       <Paper
@@ -717,8 +732,8 @@ const Conversations = () => {
                           px: 1.2,
                           maxWidth: '78%',
                           borderRadius: 2,
-                          bgcolor: m.fromMe ? '#005c4b' : '#202c33',
-                          color: '#e9edef',
+                          bgcolor: m.fromMe ? 'rgba(232,160,32,0.12)' : '#1A1D24',
+                          color: '#E8E6E1',
                           borderColor: 'rgba(255,255,255,0.12)'
                         }}
                       >
@@ -753,12 +768,12 @@ const Conversations = () => {
                                 const fallbackImage = fallbackPreviewImageUrl(mediaUrl);
                                 const previewImage = image || fallbackImage;
                                 return (
-                                  <Box sx={{ mt: 0.8, border: '1px solid rgba(255,255,255,0.16)', borderRadius: 1.5, overflow: 'hidden', bgcolor: 'rgba(0,0,0,0.12)' }}>
+                                  <Box sx={{ mt: 0.8, border: '1px solid rgba(232,160,32,0.15)', borderRadius: 1.5, overflow: 'hidden', bgcolor: 'rgba(255,255,255,0.03)' }}>
                                     {previewImage && <Box component='img' src={previewImage} alt='preview' sx={{ width: '100%', maxHeight: 180, objectFit: 'cover' }} /> }
                                     <Box sx={{ p: 1 }}>
                                       {title && <Typography variant='body2' sx={{ fontWeight: 700 }}>{title}</Typography>}
                                       {desc && <Typography variant='caption' sx={{ color: '#b8c7cf', display: 'block' }}>{desc}</Typography>}
-                                      <a href={mediaUrl} target='_blank' rel='noreferrer' style={{ color: '#7cd4ff', fontSize: 12 }}>{host || 'Abrir enlace'}</a>
+                                      <a href={mediaUrl} target='_blank' rel='noreferrer' style={{ color: '#E8A020', fontSize: 12 }}>{host || 'Abrir enlace'}</a>
                                     </Box>
                                   </Box>
                                 );
@@ -771,12 +786,12 @@ const Conversations = () => {
                         })()}
                       </Paper>
                     </Box>
-                  ))
+                    );
+                  })
                 )}
-                <div ref={messagesEndRef} />
               </Stack>
 
-              <Box sx={{ p: 1.2, bgcolor: 'rgba(17,28,48,0.92)', borderTop: '1px solid #2a3942' }}>
+              <Box sx={{ p: 1.2, bgcolor: '#1A1D24', borderTop: '1px solid #2a3942' }}>
                 {savedReplies.length > 0 && (
                   <Stack direction='row' spacing={0.8} sx={{ mb: 1, overflowX: 'auto', pb: 0.5 }}>
                     {savedReplies.slice(0, 8).map((r) => (
@@ -785,7 +800,7 @@ const Conversations = () => {
                         size='small'
                         label={r.shortcut}
                         onClick={() => setText((t) => (t ? `${t} ${r.message}` : r.message))}
-                        sx={{ bgcolor: '#2a3942', color: '#e9edef', border: '1px solid #3b4a54' }}
+                        sx={{ bgcolor: 'rgba(232,160,32,0.1)', color: '#E8E6E1', border: '1px solid rgba(232,160,32,0.2)' }}
                       />
                     ))}
                   </Stack>
@@ -793,7 +808,7 @@ const Conversations = () => {
                 <Stack direction='row' spacing={1} alignItems='center'>
                   <Tooltip title='Templates'>
                     <span>
-                      <IconButton onClick={openTemplateMenu} disabled={sending || templates.length === 0} sx={{ color: '#e9edef' }}>
+                      <IconButton onClick={openTemplateMenu} disabled={sending || templates.length === 0} sx={{ color: '#E8E6E1' }}>
                         <TemplateIcon />
                       </IconButton>
                     </span>
@@ -825,16 +840,16 @@ const Conversations = () => {
                     }}
                     sx={{
                       '& .MuiInputBase-root': {
-                        bgcolor: '#2a3942',
-                        color: '#e9edef',
+                        bgcolor: 'rgba(232,160,32,0.1)',
+                        color: '#E8E6E1',
                         borderRadius: 3
                       },
                       '& .MuiOutlinedInput-notchedOutline': { borderColor: 'transparent' },
-                      '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#3b4a54' },
-                      '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#5BB2FF' }
+                      '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(232,160,32,0.2)' },
+                      '& .MuiInputBase-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#E8A020' }
                     }}
                   />
-                  <IconButton onClick={handleSend} disabled={sending || !text.trim()} sx={{ width: 50, height: 50, borderRadius: '50%', bgcolor: '#5BB2FF', color: '#ffffff', boxShadow: '0 6px 14px rgba(34,166,242,0.35)', '&:hover': { bgcolor: '#4B9BE0' }, '&.Mui-disabled': { bgcolor: '#2D405A', color: '#9bb2c3' } }}>
+                  <IconButton onClick={handleSend} disabled={sending || !text.trim()} sx={{ width: 50, height: 50, borderRadius: '50%', bgcolor: '#E8A020', color: '#0C0E12', boxShadow: '0 4px 16px rgba(232,160,32,0.3)', '&:hover': { bgcolor: '#CC8C1A', boxShadow: '0 4px 20px rgba(232,160,32,0.45)' }, '&.Mui-disabled': { bgcolor: 'rgba(232,160,32,0.15)', color: 'rgba(232,160,32,0.35)' } }}>
                     {sending ? <CircularProgress size={20} color='inherit' /> : <SendIcon />}
                   </IconButton>
                 </Stack>
@@ -844,35 +859,35 @@ const Conversations = () => {
         </Box>
 
         {selectedConv && (
-          <Box sx={{ width: 320, borderLeft: '1px solid #202c33', bgcolor: 'rgba(12,20,36,0.92)', p: 1.2, display: { xs: 'none', lg: 'block' }, overflow: 'auto' }}>
+          <Box sx={{ width: 320, borderLeft: '1px solid rgba(232,160,32,0.1)', bgcolor: '#13161C', p: 1.2, display: { xs: 'none', lg: 'block' }, overflow: 'auto' }}>
             <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb: 1 }}>
-              <Typography variant='subtitle1' sx={{ color: '#e9edef', fontWeight: 700 }}>
+              <Typography variant='subtitle1' sx={{ color: '#E8E6E1', fontWeight: 700, fontFamily: '"Syne", sans-serif', letterSpacing: '-0.02em' }}>
                 Datos del cliente
               </Typography>
               <Stack direction='row' spacing={0.6} alignItems='center'>
-                <Typography variant='caption' sx={{ color: '#9fb1bb', minWidth: 52, textAlign: 'right' }}>{isBotEnabled ? 'Bot ON' : 'Bot OFF'}</Typography>
+                <Typography variant='caption' sx={{ color: '#7A7872', minWidth: 52, textAlign: 'right' }}>{isBotEnabled ? 'Bot ON' : 'Bot OFF'}</Typography>
                 <Switch
                   size='small'
                   checked={isBotEnabled}
                   disabled={savingHandoff || !latestTicketId}
                   onChange={(_e, checked) => toggleHandoff(!checked)}
                   sx={{
-                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#2f7dfa' },
-                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: '#2f7dfa' }
+                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#E8A020' },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: '#E8A020' }
                   }}
                 />
               </Stack>
             </Stack>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
               <FormControl fullWidth size='small'>
-                <InputLabel sx={{ color: '#9fb1bb' }}>Estado del Lead</InputLabel>
+                <InputLabel sx={{ color: '#7A7872' }}>Estado del Lead</InputLabel>
                 <Select
                   label='Estado del Lead'
                   value={leadStage}
                   disabled={savingLeadStage}
                   onChange={(e) => updateLeadStage(String(e.target.value))}
-                  sx={{ color: '#e9edef' }}
+                  sx={{ color: '#E8E6E1' }}
                 >
                   <MenuItem value='nuevo'>Nuevo</MenuItem>
                   <MenuItem value='contactado'>Contactado</MenuItem>
@@ -883,15 +898,15 @@ const Conversations = () => {
 
               <Box sx={{ mt: 1.2 }}>
                 <Stack direction='row' justifyContent='space-between'>
-                  <Typography variant='caption' sx={{ color: '#9fb1bb' }}>Puntuación</Typography>
-                  <Typography variant='caption' sx={{ color: '#9fb1bb' }}>{leadScore}%</Typography>
+                  <Typography variant='caption' sx={{ color: '#7A7872' }}>Puntuación</Typography>
+                  <Typography variant='caption' sx={{ color: '#7A7872' }}>{leadScore}%</Typography>
                 </Stack>
                 <LinearProgress variant='determinate' value={Math.max(0, Math.min(100, leadScore))} sx={{ mt: 0.5, height: 8, borderRadius: 6 }} />
               </Box>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
-              <Typography variant='subtitle2' sx={{ mb: 1 }}>Progreso del paso</Typography>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
+              <Typography variant='subtitle2' sx={{ mb: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>Progreso del paso</Typography>
               <Stack spacing={0.6}>
                 <Stack direction='row' alignItems='center' justifyContent='space-between'>
                   <Stack direction='row' alignItems='center' spacing={0.6}>
@@ -900,7 +915,7 @@ const Conversations = () => {
                       checked={hasOpciones}
                       disabled={savingProgress}
                       onChange={() => toggleProgressTag('opciones_presentadas')}
-                      sx={{ color: '#9fb1bb', '&.Mui-checked': { color: '#00a884' } }}
+                      sx={{ color: '#7A7872', '&.Mui-checked': { color: '#E8A020' } }}
                     />
                     <Typography variant='caption'>opciones presentadas</Typography>
                   </Stack>
@@ -912,7 +927,7 @@ const Conversations = () => {
                       checked={hasInteres}
                       disabled={savingProgress}
                       onChange={() => toggleProgressTag('interes_detectado')}
-                      sx={{ color: '#9fb1bb', '&.Mui-checked': { color: '#00a884' } }}
+                      sx={{ color: '#7A7872', '&.Mui-checked': { color: '#E8A020' } }}
                     />
                     <Typography variant='caption'>interés detectado</Typography>
                   </Stack>
@@ -920,8 +935,8 @@ const Conversations = () => {
               </Stack>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
-              <Typography variant='subtitle2' sx={{ mb: 1 }}>Datos capturados</Typography>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
+              <Typography variant='subtitle2' sx={{ mb: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>Datos capturados</Typography>
               <Typography variant='caption' display='block'>Nombre: {contactData?.name || selectedConv.name}</Typography>
               <Typography variant='caption' display='block'>Email: {contactData?.email || '-'}</Typography>
               <Typography variant='caption' display='block'>Teléfono: {contactData?.number || selectedConv.number}</Typography>
@@ -929,26 +944,26 @@ const Conversations = () => {
               <Typography variant='caption' display='block'>Necesidad: {contactData?.needs || '-'}</Typography>
             </Paper>
 
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
-              <Typography variant='subtitle2' sx={{ mb: 1 }}>Mini resumen IA</Typography>
-              <Typography variant='caption'>{summary}</Typography>
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
+              <Typography variant='subtitle2' sx={{ mb: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>Mini resumen IA</Typography>
+              <Typography variant='caption'>{contactData?.needs?.trim() || summary}</Typography>
             </Paper>
 
-            <Paper sx={{ p: 1.2, bgcolor: 'rgba(17,28,48,0.92)', color: '#e9edef' }}>
-              <Typography variant='subtitle2' sx={{ mb: 1 }}>Trazabilidad de decisiones IA</Typography>
+            <Paper sx={{ p: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
+              <Typography variant='subtitle2' sx={{ mb: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>Trazabilidad de decisiones IA</Typography>
               {decisionLogs.length === 0 ? (
-                <Typography variant='caption' sx={{ color: '#9fb1bb' }}>Sin decisiones registradas para este ticket.</Typography>
+                <Typography variant='caption' sx={{ color: '#7A7872' }}>Sin decisiones registradas para este ticket.</Typography>
               ) : (
                 <Stack spacing={0.8}>
                   {decisionLogs.slice(0, 10).map((d: any) => (
-                    <Box key={d.id} sx={{ border: '1px solid #2a3942', borderRadius: 1.5, p: 0.8 }}>
+                    <Box key={d.id} sx={{ border: '1px solid rgba(232,160,32,0.1)', borderRadius: 1.5, p: 0.8 }}>
                       <Stack direction='row' justifyContent='space-between'>
                         <Chip size='small' label={`${d.conversation_type || 'general'} · ${d.decision_key || 'decision'}`} />
-                        <Typography variant='caption' sx={{ color: '#9fb1bb' }}>{fmtTime(d.created_at)}</Typography>
+                        <Typography variant='caption' sx={{ color: '#7A7872' }}>{fmtTime(d.created_at)}</Typography>
                       </Stack>
                       <Typography variant='caption' display='block' sx={{ mt: 0.5 }}>Motivo: {d.reason || '-'}</Typography>
                       <Typography variant='caption' display='block'>Acción: {d.guardrail_action || '-'}</Typography>
-                      <Typography variant='caption' display='block' sx={{ color: '#9fb1bb' }}>Preview: {d.response_preview || '-'}</Typography>
+                      <Typography variant='caption' display='block' sx={{ color: '#7A7872' }}>Preview: {d.response_preview || '-'}</Typography>
                     </Box>
                   ))}
                 </Stack>

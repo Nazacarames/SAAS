@@ -3,15 +3,31 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import (
     ai_routes, auth, billing_routes, contacts, conversations, health,
-    messages,  settings_routes, users,
+    messages, settings_routes, saved_replies_routes, users,
     webhook_whatsapp, whatsapp_routes, tags_routes,
     integration_routes, meta_webhook_routes, webhooks_routes,
-    
+    training,
 )
 from app.core.config import settings
+from app.core.logging_middleware import setup_logging, CorrelationIdMiddleware
 from app.services.socketio_handler import sio_app as socketio_app
 
 app = FastAPI(title=settings.app_name)
+
+
+_reminder_task = None  # keep a strong reference so the task is never GC'd
+
+
+@app.on_event("startup")
+async def _start_appointment_reminders():
+    global _reminder_task
+    import asyncio
+    from app.services.appointment_reminders import reminder_loop
+    _reminder_task = asyncio.create_task(reminder_loop())
+
+
+setup_logging()
+app.add_middleware(CorrelationIdMiddleware)
 
 # CORS middleware - restrict origins in production
 _is_prod = settings.environment == "production"
@@ -44,6 +60,7 @@ app.include_router(contacts.router, prefix=settings.api_prefix)
 app.include_router(conversations.router, prefix=settings.api_prefix)
 app.include_router(messages.router, prefix=settings.api_prefix)
 app.include_router(tags_routes.router, prefix=settings.api_prefix)
+app.include_router(saved_replies_routes.router)
 app.include_router(webhooks_routes.router, prefix=settings.api_prefix)
 
 # WhatsApp
@@ -52,6 +69,7 @@ app.include_router(whatsapp_routes.router, prefix=settings.api_prefix)
 
 # AI
 app.include_router(ai_routes.router)
+app.include_router(training.router)
 
 # Settings & Billing
 app.include_router(settings_routes.router, prefix=settings.api_prefix)

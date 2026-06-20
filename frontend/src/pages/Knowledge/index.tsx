@@ -91,8 +91,8 @@ const Knowledge = () => {
         </Stack>
       </Stack>
 
-      <Grid container spacing={2} sx={{ mb: 2 }}>{cards.map((c) => (
-        <Grid item xs={12} md={3} key={c.title}><Paper sx={{ p: 2 }}><Typography variant='caption'>{c.title}</Typography><Typography variant='h5'>{c.value}</Typography></Paper></Grid>
+      <Grid container spacing={2} sx={{ mb: 2 }}>{cards.map((c, ci) => (
+        <Grid item xs={12} md={3} key={c.title}><Paper className={`anim-fade-up anim-fade-up-${ci + 1}`} sx={{ p: 2 }}><Typography variant='caption'>{c.title}</Typography><Typography variant='h5'>{c.value}</Typography></Paper></Grid>
       ))}</Grid>
 
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -110,7 +110,7 @@ const Knowledge = () => {
 
       <Grid container spacing={2}>{docs.map((d: any) => (
         <Grid item xs={12} md={4} key={d.id}>
-          <Paper variant='outlined' sx={{ p: 1.5 }}>
+          <Paper variant='outlined' className='hover-lift anim-scale-in' sx={{ p: 1.5 }}>
             <Stack direction='row' justifyContent='space-between' sx={{ mb: 1 }}>
               <Chip size='small' label={d.category || 'general'} />
               <Typography variant='caption'>{d.status === 'ready' ? 'Sincronizado' : d.status}</Typography>
@@ -133,7 +133,14 @@ const Knowledge = () => {
             <TextField select label='Categoría' value={form.category} onChange={(e) => setForm((f: any) => ({ ...f, category: e.target.value }))}>
               <MenuItem value='general'>general</MenuItem><MenuItem value='faq'>faq</MenuItem><MenuItem value='precios'>precios</MenuItem><MenuItem value='casos_uso'>casos_uso</MenuItem>
             </TextField>
-            <TextField label='Contenido' multiline minRows={7} value={form.content} onChange={(e) => setForm((f: any) => ({ ...f, content: e.target.value }))} />
+            <TextField
+              label='Contenido'
+              multiline
+              minRows={7}
+              value={form.content}
+              onChange={(e) => setForm((f: any) => ({ ...f, content: e.target.value }))}
+              helperText={`${(form.content || '').length} caracteres. Consejo: un documento por tema (ej: "Requisitos de alquiler", "Horarios y sucursales"). Documentos cortos y enfocados dan mejores respuestas que un manual entero pegado junto.`}
+            />
           </Stack>
         </DialogContent>
         <DialogActions>

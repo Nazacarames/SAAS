@@ -1,37 +1,41 @@
 # Dependencies
 node_modules/
-backend/node_modules/
-frontend/node_modules/
+.venv/
+__pycache__/
+*.pyc
 
-# Environment
+# Environment / Secrets
 .env
-.env.local
-.env.production
-.env.*.local
-
-# Secrets
-.secrets/
+.env.*
 *.secret
 *.key
+.secrets/
 
-# Build
-backend/dist/
+# Build artifacts
 frontend/build/
+frontend/dist/
+backend/dist/
+
+# Runtime
+*.log
+npm-debug.log*
+runtime-settings.json
+token_search_dump.txt
+
+# Backups (on VPS only)
+backups/
+/var/backups/
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-npm-debug.log*
-
-# Runtime settings with potential secrets
-# backend/runtime-settings.json
-
-# Temp files
-token_search_dump.txt
+# Temp / bak files
+*.bak
+*.bak.*

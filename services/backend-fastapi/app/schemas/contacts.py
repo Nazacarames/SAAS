@@ -23,6 +23,9 @@ class ContactUpdateRequest(BaseModel):
     inactivityMinutes: int | None = None
     inactivityWebhookId: int | None = None
     tags: list[int] | None = None
+    progress_tags: list[str] | None = None
+    business_type: str | None = None
+    needs: str | None = None
 
 
 class ContactOut(BaseModel):
@@ -39,3 +42,11 @@ class ContactOut(BaseModel):
     inactivityWebhookId: int | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
+    lead_score: float | None = None
+    business_type: str | None = None
+    needs: str | None = None
+    progress_tags: list[str] | None = None
+    lead_stage: str | None = None
+
+    class Config:
+        from_attributes = True

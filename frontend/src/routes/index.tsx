@@ -2,6 +2,8 @@ import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/Auth/AuthContext';
 import Login from '../pages/Login';
 import Register from '../pages/Register';
+import ForgotPassword from '../pages/ForgotPassword';
+import ResetPassword from '../pages/ResetPassword';
 import Dashboard from '../pages/Dashboard';
 import Conversations from '../pages/Conversations';
 import Contacts from '../pages/Contacts';
@@ -38,6 +40,8 @@ const Routes = () => {
       <Route path='/landing' element={<LandingB />} />
       <Route path='/login' element={isAuth ? <Navigate to='/' /> : <Login />} />
       <Route path='/register' element={isAuth ? <Navigate to='/' /> : <Register />} />
+      <Route path='/forgot-password' element={isAuth ? <Navigate to='/' /> : <ForgotPassword />} />
+      <Route path='/reset-password' element={isAuth ? <Navigate to='/' /> : <ResetPassword />} />
 
       <Route
         path='/'

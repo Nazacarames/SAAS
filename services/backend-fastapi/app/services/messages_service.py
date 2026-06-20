@@ -3,7 +3,10 @@ import math
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-_MSG_COLS = 'm.id, m.body, m."fromMe", m."contactId"'
+_MSG_COLS = (
+    'm.id, m.body, m."fromMe", m."contactId", '
+    'm."ticketId", m."createdAt", m."mediaType", m."mediaUrl"'
+)
 _MSG_FROM = (
     "FROM messages m "
     'JOIN contacts c ON c.id = m."contactId" '
@@ -78,6 +81,7 @@ def create_outbound_message(
     contact_id: int,
     user_id: int,
     body: str,
+    idempotency_key: str | None = None,
 ):
     exists = db.execute(
         text('SELECT id FROM contacts WHERE id=:id AND "companyId"=:company_id LIMIT 1'),
@@ -86,26 +90,61 @@ def create_outbound_message(
     if not exists:
         return None
 
+    # Idempotency: if this key was already processed, return the original row
+    # instead of inserting a duplicate (safe retries from the UI / API clients).
+    if idempotency_key:
+        prior = db.execute(
+            text(
+                'SELECT id, body, "fromMe", "contactId" FROM messages '
+                "WHERE idempotency_key = :ikey LIMIT 1"
+            ),
+            {"ikey": idempotency_key},
+        ).mappings().first()
+        if prior:
+            return dict(prior)
+
+    # NOTE: messages table has no "userId" column; sender attribution lives on
+    # the ticket. user_id is accepted for API compatibility but not persisted.
     row = db.execute(
         text(
-            'INSERT INTO messages (body, "fromMe", "contactId", "userId", "createdAt", "updatedAt") '
-            'VALUES (:body, true, :contact_id, :user_id, NOW(), NOW()) '
+            'INSERT INTO messages (body, "fromMe", "contactId", idempotency_key, "createdAt", "updatedAt") '
+            "VALUES (:body, true, :contact_id, :ikey, NOW(), NOW()) "
+            "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
             'RETURNING id, body, "fromMe", "contactId"'
         ),
-        {"body": body, "contact_id": contact_id, "user_id": user_id},
+        {"body": body, "contact_id": contact_id, "ikey": idempotency_key},
     ).mappings().first()
     db.commit()
-    return dict(row)
+
+    if row is None and idempotency_key:
+        # Concurrent retry won the race — return the row it inserted
+        prior = db.execute(
+            text(
+                'SELECT id, body, "fromMe", "contactId" FROM messages '
+                "WHERE idempotency_key = :ikey LIMIT 1"
+            ),
+            {"ikey": idempotency_key},
+        ).mappings().first()
+        return dict(prior) if prior else None
+
+    return dict(row) if row else None
 
 
-def get_conversation_messages(db: Session, contact_id: int, limit: int = 20):
-    """Get recent messages for a contact (for AI context)"""
+def get_conversation_messages(db: Session, contact_id: int, limit: int = 20, company_id: int = None):
+    """Get recent messages for a contact, scoped to company to prevent cross-tenant leakage.
+
+    company_id is mandatory: without it a caller could read another tenant's
+    conversation history just by passing a foreign contact_id.
+    """
+    if not company_id:
+        raise ValueError("company_id is required (multi-tenant safety)")
     rows = db.execute(
         text(
-            'SELECT body, "fromMe", "createdAt" FROM messages '
-            'WHERE "contactId" = :contact_id '
-            'ORDER BY "createdAt" DESC LIMIT :limit'
+            'SELECT m.body, m."fromMe", m."createdAt" FROM messages m '
+            'JOIN contacts c ON c.id = m."contactId" '
+            'WHERE m."contactId" = :contact_id AND c."companyId" = :company_id '
+            'ORDER BY m."createdAt" DESC LIMIT :limit'
         ),
-        {"contact_id": contact_id, "limit": limit},
+        {"contact_id": contact_id, "company_id": company_id, "limit": limit},
     ).mappings().all()
     return [{"body": r["body"], "fromMe": r["fromMe"], "createdAt": str(r["createdAt"])} for r in rows]
