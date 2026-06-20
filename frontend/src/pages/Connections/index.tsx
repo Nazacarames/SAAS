@@ -39,7 +39,7 @@ interface WhatsAppConnection {
   isDefault: boolean;
 }
 
-const CALLBACK_URL = 'https://login.charlott.ai/api/whatsapp-cloud/webhook';
+const CALLBACK_URL = 'https://crm.lmtmas.com/api/whatsapp-cloud/webhook';
 
 const Connections = () => {
   const [connections, setConnections] = useState<WhatsAppConnection[]>([]);

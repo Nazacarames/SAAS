@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_pass: str = ""
     smtp_from: str = ""
-    frontend_url: str = "https://login.charlott.ai"
+    frontend_url: str = "https://crm.lmtmas.com"
     # MercadoPago
     mp_access_token: str = ""
 
