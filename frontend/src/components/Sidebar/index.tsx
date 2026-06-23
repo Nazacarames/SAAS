@@ -27,7 +27,7 @@ const menuItems = [
   { text: 'Conversaciones',  icon: <ChatIcon />,        path: '/conversations', section: 'main' },
   { text: 'Leads',           icon: <ContactsIcon />,    path: '/leads',         section: 'main' },
   { text: 'Agenda',          icon: <CalendarMonthIcon />, path: '/agenda',      section: 'main' },
-  { text: 'WhatsApp',        icon: <WhatsAppIcon />,    path: '/connections',   section: 'main' },
+  { text: 'Canales',         icon: <WhatsAppIcon />,    path: '/connections',   section: 'main' },
   { text: 'Reportes',        icon: <AnalyticsIcon />,   path: '/reports',       section: 'ops', adminOnly: true },
   { text: 'Billing',         icon: <CreditCardIcon />,  path: '/billing',       section: 'ops' },
   { text: 'Agente IA',       icon: <SmartToyIcon />,    path: '/ai-agents',     section: 'config', adminOnly: true },

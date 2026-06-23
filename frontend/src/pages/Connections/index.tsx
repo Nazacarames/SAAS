@@ -1,343 +1,340 @@
+import { useEffect, useState, useCallback } from 'react';
 import {
-  Typography,
-  Box,
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Chip,
-  Button,
-  TextField,
-  Stack,
-  Divider,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  CircularProgress,
-  Alert,
-  IconButton,
-  Tooltip
+  Box, Typography, Stack, Button, Chip, IconButton, Dialog, DialogTitle,
+  DialogContent, DialogActions, TextField, Select, MenuItem, FormControl,
+  InputLabel, CircularProgress, InputAdornment, Paper, Tooltip,
 } from '@mui/material';
 import {
-  CheckCircleRounded as CheckIcon,
-  RadioButtonUncheckedRounded as PendingIcon,
-  ContentCopyRounded as CopyIcon
+  Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon,
+  ContentCopy as CopyIcon, CheckCircle as CheckIcon,
+  Cancel as CancelIcon, Refresh as TestIcon,
+  Visibility, VisibilityOff,
 } from '@mui/icons-material';
-import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
-interface WhatsAppConnection {
+const CHANNEL_META: Record<string, { label: string; color: string; icon: string; fields: string[] }> = {
+  whatsapp:  { label: 'WhatsApp',  color: '#25D366', icon: 'W', fields: ['Phone Number ID', 'Access Token', 'App Secret'] },
+  instagram: { label: 'Instagram', color: '#E1306C', icon: 'I', fields: ['IG Account ID', 'Access Token'] },
+  messenger: { label: 'Messenger', color: '#0084FF', icon: 'M', fields: ['Page ID', 'Access Token'] },
+};
+
+const WEBHOOK_URL = `${window.location.origin}/webhooks/meta`;
+
+const copyText = (text: string, label: string) => {
+  navigator.clipboard.writeText(text);
+  toast.success(`${label} copiado`);
+};
+
+interface Channel {
   id: number;
+  channel_type: string;
   name: string;
   status: string;
-  battery?: number;
-  isDefault: boolean;
+  external_id: string;
+  verify_token: string;
+  has_token: boolean;
+  created_at: string;
 }
 
-const CALLBACK_URL = 'https://crm.lmtmas.com/api/whatsapp-cloud/webhook';
-
 const Connections = () => {
-  const [connections, setConnections] = useState<WhatsAppConnection[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<Channel | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, { ok: boolean; data?: any; error?: string }>>({});
 
-  const [openNewConnection, setOpenNewConnection] = useState(false);
-  const [waCloudVerifyToken, setWaCloudVerifyToken] = useState('');
-  const [waCloudPhoneNumberId, setWaCloudPhoneNumberId] = useState('');
-  const [waCloudAccessToken, setWaCloudAccessToken] = useState('');
-  const [waCloudAppSecret, setWaCloudAppSecret] = useState('');
-  const [waCloudDefaultWhatsappId, setWaCloudDefaultWhatsappId] = useState('1');
-  const [showWaSecrets, setShowWaSecrets] = useState(false);
-  const [savingWaCloud, setSavingWaCloud] = useState(false);
+  const [formType, setFormType] = useState('whatsapp');
+  const [formName, setFormName] = useState('');
+  const [formExternalId, setFormExternalId] = useState('');
+  const [formToken, setFormToken] = useState('');
+  const [formAppSecret, setFormAppSecret] = useState('');
+  const [showSecrets, setShowSecrets] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  // Setup progress
-  const [credsConfigured, setCredsConfigured] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; name?: string; phone?: string; error?: string } | null>(null);
-  const [testing, setTesting] = useState(false);
-
-  useEffect(() => {
-    fetchConnections();
-    fetchCloudSettings();
-  }, []);
-
-  const fetchConnections = async () => {
+  const load = useCallback(async () => {
     try {
-      const { data } = await api.get('/whatsapps');
-      setConnections(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.error('Error fetching connections:', error);
-      toast.error('Error al cargar conexiones');
+      const { data } = await api.get('/api/channels');
+      setChannels(data.channels || []);
+    } catch {
+      toast.error('No se pudieron cargar los canales');
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openCreate = () => {
+    setEditing(null);
+    setFormType('whatsapp');
+    setFormName('');
+    setFormExternalId('');
+    setFormToken('');
+    setFormAppSecret('');
+    setDialogOpen(true);
   };
 
-  const fetchCloudSettings = async () => {
-    try {
-      const { data } = await api.get('/settings/whatsapp-cloud');
-      const s = data?.settings || {};
-      const c = data?.configured || {};
-      setWaCloudVerifyToken(s.waCloudVerifyToken || '');
-      setWaCloudPhoneNumberId(s.waCloudPhoneNumberId || '');
-      setWaCloudAccessToken('');
-      setWaCloudAppSecret('');
-      setWaCloudDefaultWhatsappId(String(s.waCloudDefaultWhatsappId || 1));
-      setCredsConfigured(Boolean(c.phoneNumberId && c.accessToken));
-    } catch {
-      // ignore
-    }
+  const openEdit = (ch: Channel) => {
+    setEditing(ch);
+    setFormType(ch.channel_type);
+    setFormName(ch.name);
+    setFormExternalId(ch.external_id);
+    setFormToken('');
+    setFormAppSecret('');
+    setDialogOpen(true);
   };
 
-  const testConnection = async (useFormValues: boolean) => {
-    setTesting(true);
-    setTestResult(null);
+  const handleSave = async () => {
+    setSaving(true);
     try {
-      const body: any = {};
-      if (useFormValues) {
-        if (waCloudAccessToken.trim()) body.accessToken = waCloudAccessToken.trim();
-        if (waCloudPhoneNumberId.trim()) body.phoneNumberId = waCloudPhoneNumberId.trim();
+      if (editing) {
+        await api.put(`/api/channels/${editing.id}`, {
+          name: formName || undefined,
+          external_id: formExternalId || undefined,
+          access_token: formToken || undefined,
+          app_secret: formAppSecret || undefined,
+        });
+        toast.success('Canal actualizado');
+      } else {
+        await api.post('/api/channels', {
+          channel_type: formType,
+          name: formName || CHANNEL_META[formType]?.label || formType,
+          external_id: formExternalId,
+          access_token: formToken,
+          app_secret: formAppSecret,
+        });
+        toast.success('Canal creado');
       }
-      const { data } = await api.post('/settings/whatsapp-cloud/test', body);
-      setTestResult({ ok: true, name: data.verifiedName, phone: data.displayPhoneNumber });
-      toast.success(`Conexión OK: ${data.verifiedName || data.displayPhoneNumber}`);
+      setDialogOpen(false);
+      await load();
     } catch (e: any) {
-      const detail = e?.response?.data?.detail || 'No se pudo validar la conexión';
-      setTestResult({ ok: false, error: detail });
-      toast.error(detail);
+      toast.error(e?.response?.data?.detail || 'Error al guardar');
     } finally {
-      setTesting(false);
+      setSaving(false);
     }
   };
 
-  const saveCloudSettings = async () => {
-    // Validate before submitting: a silent save with missing credentials
-    // leaves the user thinking they are connected when they are not.
-    if (!waCloudPhoneNumberId.trim()) return toast.error('Falta el Phone Number ID (lo encontrás en Meta Developers → WhatsApp → Configuración de API)');
-    if (!credsConfigured && !waCloudAccessToken.trim()) return toast.error('Falta el Access Token (generalo en Meta Developers)');
-
-    setSavingWaCloud(true);
+  const handleDelete = async (ch: Channel) => {
+    if (!confirm(`¿Desactivar canal "${ch.name}"?`)) return;
     try {
-      const payload: any = {
-        waCloudVerifyToken,
-        waCloudPhoneNumberId: waCloudPhoneNumberId.trim(),
-        waCloudDefaultWhatsappId: Number(waCloudDefaultWhatsappId || 1),
-      };
-
-      if (waCloudAccessToken.trim()) payload.waCloudAccessToken = waCloudAccessToken.trim();
-      if (waCloudAppSecret.trim()) payload.waCloudAppSecret = waCloudAppSecret.trim();
-
-      await api.put('/settings/whatsapp-cloud', { settings: payload });
-      toast.success('Conexión Cloud API guardada');
-      setOpenNewConnection(false);
-      fetchConnections();
-      fetchCloudSettings();
+      await api.delete(`/api/channels/${ch.id}`);
+      toast.success('Canal desactivado');
+      await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'No se pudo guardar la conexión Cloud API');
-    } finally {
-      setSavingWaCloud(false);
+      toast.error(e?.response?.data?.detail || 'Error al desactivar');
     }
   };
 
-  const copyText = (value: string, label: string) => {
-    navigator.clipboard.writeText(value);
-    toast.info(`${label} copiado`);
+  const handleTest = async (ch: Channel) => {
+    setTestResults(prev => ({ ...prev, [ch.id]: { ok: false, error: 'testing...' } }));
+    try {
+      const { data } = await api.post(`/api/channels/${ch.id}/test`);
+      setTestResults(prev => ({ ...prev, [ch.id]: data }));
+      if (data.ok) toast.success(`${ch.name}: conexión verificada`);
+      else toast.error(`${ch.name}: ${data.error || 'error'}`);
+    } catch (e: any) {
+      setTestResults(prev => ({ ...prev, [ch.id]: { ok: false, error: e?.response?.data?.detail || 'Error' } }));
+      toast.error('Error al testear');
+    }
   };
 
-  const steps = [
-    {
-      label: '1. Cargar credenciales de Meta',
-      done: credsConfigured,
-      hint: 'Access Token y Phone Number ID desde Meta Developers'
-    },
-    {
-      label: '2. Probar la conexión',
-      done: Boolean(testResult?.ok),
-      hint: 'Validamos tus credenciales contra Meta en segundos'
-    },
-    {
-      label: '3. Configurar el webhook en Meta',
-      done: false,
-      hint: 'Pegá la Callback URL y el Verify Token en Meta Developers → WhatsApp → Webhooks'
-    }
-  ];
+  const meta = (type: string) => CHANNEL_META[type] || { label: type, color: '#888', icon: '?', fields: [] };
+
+  if (loading) {
+    return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress sx={{ color: '#E8A020' }} /></Box>;
+  }
 
   return (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h4">WhatsApp</Typography>
-        <Stack direction="row" spacing={1}>
-          <Button variant="outlined" onClick={() => testConnection(false)} disabled={testing || !credsConfigured}>
-            {testing ? <CircularProgress size={18} /> : 'Probar conexión'}
-          </Button>
-          <Button variant="contained" onClick={() => setOpenNewConnection(true)}>
-            {credsConfigured ? 'Editar conexión' : 'Conectar WhatsApp'}
-          </Button>
-        </Stack>
-      </Box>
+    <Box sx={{ maxWidth: 900, mx: 'auto' }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
+        <Box>
+          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '1.5rem', color: '#E8EBF2' }}>
+            Canales
+          </Typography>
+          <Typography sx={{ fontSize: '0.82rem', color: 'rgba(255,255,255,0.4)' }}>
+            WhatsApp, Instagram y Messenger conectados a tu CRM
+          </Typography>
+        </Box>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
+          Agregar canal
+        </Button>
+      </Stack>
 
-      {testResult && (
-        <Alert severity={testResult.ok ? 'success' : 'error'} sx={{ mb: 2 }} onClose={() => setTestResult(null)}>
-          {testResult.ok
-            ? `Conectado correctamente: ${testResult.name || ''} (${testResult.phone || ''})`
-            : testResult.error}
-        </Alert>
+      {/* Webhook panel */}
+      <Paper sx={{ p: 2, mb: 3, borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <Typography sx={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.5)', mb: 1, fontWeight: 600 }}>Webhook URL (para Meta Developers)</Typography>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Typography sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace', color: '#E8A020', flexGrow: 1, wordBreak: 'break-all' }}>
+            {WEBHOOK_URL}
+          </Typography>
+          <IconButton size="small" onClick={() => copyText(WEBHOOK_URL, 'Webhook URL')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
+        </Stack>
+        <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', mt: 0.5 }}>
+          URL unificada para WhatsApp, Instagram y Messenger. El verify token se muestra en cada canal.
+        </Typography>
+      </Paper>
+
+      {/* Channels list */}
+      {channels.length === 0 ? (
+        <Paper sx={{ p: 4, textAlign: 'center', borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <Typography sx={{ color: 'rgba(255,255,255,0.4)', mb: 2 }}>No hay canales configurados</Typography>
+          <Button variant="outlined" onClick={openCreate}>Agregar primer canal</Button>
+        </Paper>
+      ) : (
+        <Stack spacing={1.5}>
+          {channels.map((ch, i) => {
+            const m = meta(ch.channel_type);
+            const test = testResults[ch.id];
+            return (
+              <Paper
+                key={ch.id}
+                className={`anim-fade-up anim-fade-up-${i}`}
+                sx={{
+                  p: 2, borderRadius: '10px',
+                  background: 'rgba(255,255,255,0.02)',
+                  border: `1px solid ${ch.status === 'active' ? 'rgba(255,255,255,0.06)' : 'rgba(239,83,80,0.15)'}`,
+                  transition: 'border-color 200ms ease',
+                  '&:hover': { borderColor: `${m.color}33` },
+                }}
+              >
+                <Stack direction="row" alignItems="center" spacing={2}>
+                  {/* Icon */}
+                  <Box sx={{
+                    width: 40, height: 40, borderRadius: '10px',
+                    background: `${m.color}18`, border: `1px solid ${m.color}30`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '1rem', color: m.color,
+                  }}>
+                    {m.icon}
+                  </Box>
+
+                  {/* Info */}
+                  <Box sx={{ flexGrow: 1 }}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography sx={{ fontWeight: 600, fontSize: '0.9rem', color: '#E8EBF2' }}>{ch.name}</Typography>
+                      <Chip
+                        size="small"
+                        label={ch.status === 'active' ? 'Activo' : ch.status}
+                        sx={{
+                          height: 20, fontSize: '0.65rem', fontWeight: 600,
+                          backgroundColor: ch.status === 'active' ? 'rgba(52,211,153,0.12)' : 'rgba(239,83,80,0.12)',
+                          color: ch.status === 'active' ? '#34D399' : '#EF5350',
+                        }}
+                      />
+                      {test && (
+                        <Chip
+                          size="small"
+                          icon={test.ok ? <CheckIcon sx={{ fontSize: '12px !important' }} /> : <CancelIcon sx={{ fontSize: '12px !important' }} />}
+                          label={test.ok ? 'Conectado' : (test.error === 'testing...' ? 'Verificando...' : 'Error')}
+                          sx={{
+                            height: 20, fontSize: '0.65rem',
+                            backgroundColor: test.ok ? 'rgba(52,211,153,0.12)' : 'rgba(239,83,80,0.12)',
+                            color: test.ok ? '#34D399' : '#EF5350',
+                          }}
+                        />
+                      )}
+                    </Stack>
+                    <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.35)', fontFamily: '"JetBrains Mono", monospace' }}>
+                      {m.label} &middot; {ch.external_id}
+                    </Typography>
+                  </Box>
+
+                  {/* Verify token */}
+                  {ch.verify_token && (
+                    <Tooltip title="Copiar Verify Token">
+                      <IconButton size="small" onClick={() => copyText(ch.verify_token, 'Verify Token')}>
+                        <CopyIcon sx={{ fontSize: 14 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+
+                  {/* Actions */}
+                  <Tooltip title="Probar conexión"><IconButton size="small" onClick={() => handleTest(ch)}><TestIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
+                  <Tooltip title="Editar"><IconButton size="small" onClick={() => openEdit(ch)}><EditIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
+                  <Tooltip title="Desactivar"><IconButton size="small" onClick={() => handleDelete(ch)}><DeleteIcon sx={{ fontSize: 16, color: 'rgba(239,83,80,0.6)' }} /></IconButton></Tooltip>
+                </Stack>
+              </Paper>
+            );
+          })}
+        </Stack>
       )}
 
-      {/* Setup checklist for non-technical users */}
-      <Paper className='anim-fade-up anim-fade-up-1' sx={{ p: 2.5, mb: 2 }}>
-        <Typography variant="h6" sx={{ mb: 1.5 }}>Pasos para conectar tu WhatsApp Business</Typography>
-        <Stack spacing={1.5}>
-          {steps.map((s) => (
-            <Stack key={s.label} direction="row" spacing={1.5} alignItems="flex-start">
-              {s.done ? (
-                <CheckIcon className='check-pop' sx={{ color: '#4AB87A', fontSize: 20, mt: 0.2 }} />
-              ) : (
-                <PendingIcon sx={{ color: 'rgba(255,255,255,0.3)', fontSize: 20, mt: 0.2, transition: 'color 200ms ease' }} />
-              )}
-              <Box sx={{ opacity: s.done ? 0.65 : 1, transition: 'opacity 300ms ease' }}>
-                <Typography variant="body2" sx={{ fontWeight: 600, textDecoration: s.done ? 'line-through' : 'none', textDecorationColor: 'rgba(255,255,255,0.3)' }}>{s.label}</Typography>
-                <Typography variant="caption" color="text.secondary">{s.hint}</Typography>
-              </Box>
-            </Stack>
-          ))}
-        </Stack>
-
-        <Divider sx={{ my: 2 }} />
-
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-          Datos para el paso 3 (Meta Developers → WhatsApp → Configuración → Webhooks):
-        </Typography>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
-          <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>Callback URL: {CALLBACK_URL}</Typography>
-          <Tooltip title="Copiar">
-            <IconButton size="small" onClick={() => copyText(CALLBACK_URL, 'Callback URL')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
-          </Tooltip>
-        </Stack>
-        {waCloudVerifyToken && (
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>Verify Token: {waCloudVerifyToken}</Typography>
-            <Tooltip title="Copiar">
-              <IconButton size="small" onClick={() => copyText(waCloudVerifyToken, 'Verify Token')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
-            </Tooltip>
-          </Stack>
-        )}
-      </Paper>
-
-      <Paper className='anim-fade-up anim-fade-up-2'>
-        <TableContainer>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>ID</TableCell>
-                <TableCell>Nombre</TableCell>
-                <TableCell>Estado</TableCell>
-                <TableCell>Predeterminada</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {loading ? (
-                <TableRow>
-                  <TableCell colSpan={4} align="center">Cargando...</TableCell>
-                </TableRow>
-              ) : connections.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={4} align="center">No hay conexiones registradas</TableCell>
-                </TableRow>
-              ) : (
-                connections.map((conn) => (
-                  <TableRow key={conn.id}>
-                    <TableCell>{conn.id}</TableCell>
-                    <TableCell>{conn.name}</TableCell>
-                    <TableCell>
-                      {/* DB status is stale by design (Cloud API has no persistent
-                          socket). Show live test result when available. */}
-                      {testResult?.ok ? (
-                        <Chip size="small" color="success" label="CONECTADO" />
-                      ) : (
-                        <Tooltip title='Usá "Probar conexión" para verificar el estado real'>
-                          <Chip size="small" variant="outlined" label={credsConfigured ? 'SIN VERIFICAR' : 'SIN CONFIGURAR'} />
-                        </Tooltip>
-                      )}
-                    </TableCell>
-                    <TableCell>{conn.isDefault ? 'Sí' : 'No'}</TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Paper>
-
-      <Dialog open={openNewConnection} onClose={() => setOpenNewConnection(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{credsConfigured ? 'Editar conexión WhatsApp Cloud API' : 'Conectar WhatsApp Cloud API'}</DialogTitle>
+      {/* Create/Edit Dialog */}
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700 }}>
+          {editing ? 'Editar canal' : 'Agregar canal'}
+        </DialogTitle>
         <DialogContent>
-          <Stack spacing={1.5} sx={{ mt: 1 }}>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {!editing && (
+              <FormControl fullWidth size="small">
+                <InputLabel>Tipo de canal</InputLabel>
+                <Select value={formType} label="Tipo de canal" onChange={e => setFormType(e.target.value)}>
+                  <MenuItem value="whatsapp">WhatsApp Cloud API</MenuItem>
+                  <MenuItem value="instagram">Instagram DMs</MenuItem>
+                  <MenuItem value="messenger">Facebook Messenger</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+
             <TextField
-              label="Phone Number ID"
-              helperText="Meta Developers → WhatsApp → Configuración de API → Phone number ID"
-              value={waCloudPhoneNumberId}
-              onChange={(e) => setWaCloudPhoneNumberId(e.target.value)}
-              fullWidth
-              required
+              size="small" fullWidth
+              label="Nombre del canal"
+              placeholder={meta(formType).label}
+              value={formName}
+              onChange={e => setFormName(e.target.value)}
+              helperText="Nombre para identificar este canal (ej: WhatsApp Principal, IG Empresa)"
             />
+
             <TextField
+              size="small" fullWidth required
+              label={formType === 'whatsapp' ? 'Phone Number ID' : formType === 'instagram' ? 'IG Account ID' : 'Page ID'}
+              value={formExternalId}
+              onChange={e => setFormExternalId(e.target.value)}
+              helperText={
+                formType === 'whatsapp'
+                  ? 'Lo encontrás en Meta Developers → WhatsApp → Configuración de API'
+                  : formType === 'instagram'
+                  ? 'ID de la cuenta profesional de Instagram'
+                  : 'ID de la página de Facebook'
+              }
+            />
+
+            <TextField
+              size="small" fullWidth
               label="Access Token"
-              helperText={credsConfigured ? 'Dejalo vacío para mantener el actual' : 'Token permanente generado en Meta Developers'}
-              value={waCloudAccessToken}
-              onChange={(e) => setWaCloudAccessToken(e.target.value)}
-              type={showWaSecrets ? 'text' : 'password'}
-              fullWidth
-              required={!credsConfigured}
+              type={showSecrets ? 'text' : 'password'}
+              value={formToken}
+              onChange={e => setFormToken(e.target.value)}
+              helperText={editing ? 'Dejá en blanco para mantener el actual' : ''}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton size="small" onClick={() => setShowSecrets(!showSecrets)}>
+                      {showSecrets ? <VisibilityOff sx={{ fontSize: 16 }} /> : <Visibility sx={{ fontSize: 16 }} />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
             />
-            <TextField
-              label="App Secret (opcional, recomendado)"
-              helperText="Valida la firma de los webhooks de Meta"
-              value={waCloudAppSecret}
-              onChange={(e) => setWaCloudAppSecret(e.target.value)}
-              type={showWaSecrets ? 'text' : 'password'}
-              fullWidth
-            />
-            <TextField
-              label="Verify Token"
-              helperText="Se genera automáticamente; podés personalizarlo"
-              value={waCloudVerifyToken}
-              onChange={(e) => setWaCloudVerifyToken(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Default WhatsApp ID (CRM)"
-              value={waCloudDefaultWhatsappId}
-              onChange={(e) => setWaCloudDefaultWhatsappId(e.target.value)}
-              fullWidth
-            />
-            <Stack direction="row" spacing={1}>
-              <Button variant="outlined" size="small" onClick={() => setShowWaSecrets((s) => !s)}>
-                {showWaSecrets ? 'Ocultar secretos' : 'Mostrar secretos'}
-              </Button>
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => testConnection(true)}
-                disabled={testing || (!waCloudAccessToken.trim() && !credsConfigured) || !waCloudPhoneNumberId.trim()}
-              >
-                {testing ? <CircularProgress size={16} /> : 'Probar antes de guardar'}
-              </Button>
-            </Stack>
-            {testResult && (
-              <Alert severity={testResult.ok ? 'success' : 'error'}>
-                {testResult.ok ? `OK: ${testResult.name || ''} (${testResult.phone || ''})` : testResult.error}
-              </Alert>
+
+            {formType === 'whatsapp' && (
+              <TextField
+                size="small" fullWidth
+                label="App Secret"
+                type={showSecrets ? 'text' : 'password'}
+                value={formAppSecret}
+                onChange={e => setFormAppSecret(e.target.value)}
+                helperText="Recomendado para verificar firmas de webhook"
+              />
             )}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setOpenNewConnection(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={saveCloudSettings} disabled={savingWaCloud}>
-            {savingWaCloud ? 'Guardando...' : 'Guardar conexión'}
+          <Button onClick={() => setDialogOpen(false)}>Cancelar</Button>
+          <Button variant="contained" onClick={handleSave} disabled={saving || !formExternalId.trim()}>
+            {saving ? <CircularProgress size={18} /> : editing ? 'Guardar' : 'Crear canal'}
           </Button>
         </DialogActions>
       </Dialog>

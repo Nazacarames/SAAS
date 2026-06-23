@@ -43,6 +43,7 @@ type ConversationItem = {
   updatedAt?: string;
   ticketCount: number;
   statuses: string[];
+  source?: string;
 };
 
 const stageFromScore = (score: number) => {
@@ -596,9 +597,23 @@ const Conversations = () => {
                     '&:hover': { bgcolor: '#1A1D24' }
                   }}
                 >
-                  <Avatar sx={{ width: 40, height: 40, mr: 1.2, bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020' }}>
-                    {(c.name || '?').slice(0, 1).toUpperCase()}
-                  </Avatar>
+                  <Box sx={{ position: 'relative', mr: 1.2 }}>
+                    <Avatar sx={{ width: 40, height: 40, bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020' }}>
+                      {(c.name || '?').slice(0, 1).toUpperCase()}
+                    </Avatar>
+                    {c.source && (
+                      <Box sx={{
+                        position: 'absolute', bottom: -2, right: -2, width: 16, height: 16,
+                        borderRadius: '50%', border: '2px solid #0C0E12',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '0.5rem', fontWeight: 800, fontFamily: '"Syne", sans-serif',
+                        background: c.source === 'instagram' ? '#E1306C' : c.source === 'messenger' ? '#0084FF' : '#25D366',
+                        color: '#fff',
+                      }}>
+                        {c.source === 'instagram' ? 'I' : c.source === 'messenger' ? 'M' : 'W'}
+                      </Box>
+                    )}
+                  </Box>
                   <ListItemText
                     primary={
                       <Stack direction='row' justifyContent='space-between' alignItems='center'>
