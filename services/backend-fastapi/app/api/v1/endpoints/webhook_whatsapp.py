@@ -22,6 +22,11 @@ from app.services.ai_agent_service import generate_reply
 from app.services.contacts_service import get_contact_by_phone, create_contact
 from app.services.messages_service import get_conversation_messages
 from app.services.conversation_orchestrator import orchestrate_reply
+from app.services.channels.whatsapp import (
+    send_whatsapp_message as _channel_send_wa_msg,
+    send_whatsapp_image as _channel_send_wa_img,
+    get_whatsapp_config as _channel_get_wa_cfg,
+)
 from app.services.billing_service import increment_usage, check_conversation_limit, check_subscription_active
 
 router = APIRouter(prefix="/whatsapp-cloud", tags=["whatsapp-webhook"])
