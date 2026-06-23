@@ -1,230 +1,186 @@
-# Atiendechat - Sistema de Atención WhatsApp
+# LMTM CRM
 
-Sistema completo de atención al cliente vía WhatsApp desarrollado con Node.js, React y TypeScript.
+CRM multi-tenant de WhatsApp con IA para equipos comerciales (foco inmobiliario). Centraliza conversaciones de WhatsApp, responde con un agente de IA 24/7 (RAG + base de conocimiento), captura y califica leads de Meta Lead Ads, agenda citas con recordatorios automáticos y mide el funnel comercial.
 
-## 🚀 Características
+**Producción:** https://crm.lmtmas.com
 
-- ✅ **Autenticación JWT** con refresh tokens
-- ✅ **Multi-tenancy** - Soporte para múltiples empresas
-- ✅ **Gestión de Tickets** - Sistema completo de tickets de atención
-- ✅ **Conexiones WhatsApp** - Múltiples conexiones WhatsApp por empresa
-- ✅ **Gestión de Contactos** - Base de datos de contactos
-- ✅ **Colas/Departamentos** - Organización por departamentos
-- ✅ **Dashboard** - Estadísticas en tiempo real
-- ✅ **UI Premium** - Interfaz moderna con Material-UI
-- 🔄 **Socket.io** - Comunicación en tiempo real
-- 🔄 **WhatsApp Integration** - Integración con Baileys (en progreso)
+---
 
-## 📋 Requisitos
+## Arquitectura
 
-- Node.js 20.x
-- PostgreSQL 14+
-- Redis 6+
-- Git
+| Capa | Stack |
+|---|---|
+| Backend | **FastAPI** (Python 3.10), SQLAlchemy + psycopg3, 2 workers uvicorn en `127.0.0.1:4010` |
+| Frontend | **React 18** + TypeScript + Vite + Material-UI v5 |
+| Base de datos | **PostgreSQL** (multi-tenant, todo scopeado por `company_id`) |
+| IA | OpenAI vía orquestador conversacional propio (RAG híbrido + KB por empresa) |
+| Mensajería | **WhatsApp Cloud API** (Meta Graph v21) + **Meta Lead Ads** webhooks |
+| Infra | VPS + nginx (TLS Let's Encrypt) + systemd |
 
-## 🛠️ Instalación
+El backend antiguo en Node.js/Baileys fue **migrado completamente a FastAPI** y removido.
 
-### 1. Clonar el repositorio
-
-```bash
-git clone <repository-url>
-cd Atiendechat
+```
+.
+├── frontend/                     # React + Vite (SPA servida por nginx)
+│   └── src/
+│       ├── pages/                # Conversations, Contacts, Leads, Agenda,
+│       │                         # Reports, Billing, AIAgents, Knowledge, etc.
+│       ├── components/           # Sidebar, HealthAlert, etc.
+│       ├── context/Auth/         # Auth context
+│       ├── layout/MainLayout.tsx
+│       └── routes/
+├── services/backend-fastapi/     # API FastAPI
+│   └── app/
+│       ├── api/v1/endpoints/     # auth, conversations, contacts, agents_routes,
+│       │                         # billing_routes, settings_routes, health,
+│       │                         # webhook_whatsapp, meta_webhook_routes, ...
+│       ├── services/             # conversation_orchestrator, knowledge_base,
+│       │                         # appointment_reminders, billing_service,
+│       │                         # email_service, auth_service, contacts_service
+│       ├── schemas/              # Pydantic
+│       ├── core/                 # config, db, logging
+│       └── main.py
+└── deploy.sh                     # Deploy en un comando (VPS)
 ```
 
-### 2. Backend
+---
+
+## Funcionalidades
+
+- **Conversaciones WhatsApp** con panel de lead: score, etapa, datos capturados, trazabilidad de decisiones del agente y resumen de IA.
+- **Agente de IA** configurable por empresa: persona, horarios de atención, mensajes fuera de horario / despedida, RAG sobre base de conocimiento, dry-run de prueba.
+- **Meta Lead Ads**: captura automática de leads por webhook (uno por empresa), upsert de contacto y sincronización de nombre.
+- **Agenda estilo Calendly**: slots según horario del agente, alta/cancelación de citas, **recordatorios automáticos por WhatsApp** (24 h y 1 h antes).
+- **Reportes**: funnel, conversión, fuentes/campañas, motivos de pérdida de leads.
+- **Billing**: planes (Starter / Pro / Scale), medición de uso (conversaciones, respuestas IA, mensajes), enforcement de límites y checkout con **MercadoPago**.
+- **Auth**: JWT con refresh tokens rotativos, registro de empresa con trial, y **reset de contraseña por email**.
+- **Monitoreo**: health checks profundos, verificación diaria de salud de tokens de WhatsApp y banner de alerta en la UI.
+
+---
+
+## Desarrollo local
+
+### Backend (FastAPI)
 
 ```bash
-cd backend
-
-# Instalar dependencias
-npm install
-
-# Configurar variables de entorno
-cp .env.example .env
-# Editar .env con tus credenciales
-
-# Ejecutar migraciones
-npm run db:migrate
-
-# Ejecutar seeds (crea empresa y usuario admin por defecto)
-npm run db:seed
-
-# Compilar TypeScript
-npm run build
-
-# Iniciar en desarrollo
-npm run dev
+cd services/backend-fastapi
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Linux/Mac: source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env   # completar credenciales (ver más abajo)
+uvicorn app.main:app --reload --port 4010
 ```
 
-**Usuario admin por defecto:**
-- Email: `admin@atendechat.com`
-- Password: `admin123`
+Tests: `python -m pytest tests/ -v`
 
-### 3. Frontend
+### Frontend (React)
 
 ```bash
 cd frontend
-
-# Instalar dependencias
 npm install
-
-# Configurar variables de entorno
-cp .env.example .env
-
-# Iniciar en desarrollo
-npm run dev
+npm run dev      # desarrollo
+npm run build    # build de producción (genera frontend/build/)
 ```
 
-## 📁 Estructura del Proyecto
+El frontend usa rutas relativas (`/api`), así que no necesita conocer el dominio.
 
-```
-Atiendechat/
-├── backend/
-│   ├── src/
-│   │   ├── config/          # Configuraciones
-│   │   ├── database/        # Sequelize setup y migraciones
-│   │   ├── models/          # Modelos de base de datos
-│   │   ├── services/        # Lógica de negocio
-│   │   ├── controllers/     # Controladores
-│   │   ├── routes/          # Rutas de la API
-│   │   ├── middleware/      # Middlewares
-│   │   ├── helpers/         # Funciones auxiliares
-│   │   ├── app.ts           # Configuración Express
-│   │   └── server.ts        # Punto de entrada
-│   └── package.json
-│
-└── frontend/
-    ├── src/
-    │   ├── components/      # Componentes reutilizables
-    │   ├── pages/           # Páginas/vistas
-    │   ├── context/         # React Context
-    │   ├── services/        # Servicios API
-    │   ├── layout/          # Layouts
-    │   ├── routes/          # Configuración de rutas
-    │   └── App.tsx
-    └── package.json
-```
+---
 
-## 🔌 API Endpoints
+## Variables de entorno (backend `.env`)
 
-### Autenticación
-- `POST /api/auth/login` - Iniciar sesión
-- `POST /api/auth/refresh` - Renovar token
-
-### Usuarios
-- `GET /api/users` - Listar usuarios
-- `POST /api/users` - Crear usuario
-
-### WhatsApp
-- `GET /api/whatsapps` - Listar conexiones
-- `POST /api/whatsapps` - Crear conexión
-
-### Contactos
-- `GET /api/contacts` - Listar contactos
-
-### Tickets
-- `GET /api/tickets` - Listar tickets
-- `GET /api/tickets?status=open` - Filtrar por estado
-
-### Colas
-- `GET /api/queues` - Listar colas
-- `POST /api/queues` - Crear cola
-
-## 🗄️ Modelos de Base de Datos
-
-- **Company** - Empresas (multi-tenancy)
-- **User** - Usuarios/agentes
-- **Whatsapp** - Conexiones WhatsApp
-- **Contact** - Contactos
-- **Ticket** - Tickets de atención
-- **Message** - Mensajes
-- **Queue** - Colas/departamentos
-
-## 🔐 Autenticación
-
-El sistema utiliza JWT con refresh tokens:
-
-1. Login con email/password
-2. Recibe `token` (15min) y `refreshToken` (7 días)
-3. Usa `token` en header: `Authorization: Bearer <token>`
-4. Renueva con `/api/auth/refresh` cuando expire
-
-## 🎨 Frontend
-
-- **React 18** con TypeScript
-- **Vite** para desarrollo rápido
-- **Material-UI v5** para componentes
-- **React Router** para navegación
-- **Axios** para peticiones HTTP
-- **Socket.io Client** para tiempo real
-
-## 📦 Scripts Disponibles
-
-### Backend
-```bash
-npm run dev          # Desarrollo con hot-reload
-npm run build        # Compilar TypeScript
-npm run start        # Producción
-npm run db:migrate   # Ejecutar migraciones
-npm run db:seed      # Ejecutar seeds
-```
-
-### Frontend
-```bash
-npm run dev          # Desarrollo
-npm run build        # Build para producción
-npm run preview      # Preview del build
-```
-
-## 🚀 Deployment
-
-Ver `walkthrough.md` para instrucciones detalladas de deployment en VPS.
-
-## 📝 Variables de Entorno
-
-### Backend (.env)
 ```env
-NODE_ENV=development
-PORT=4000
-FRONTEND_URL=http://localhost:3000
+ENVIRONMENT=production
 
+# Base de datos
 DB_HOST=localhost
 DB_PORT=5432
-DB_USER=postgres
-DB_PASS=password
+DB_USER=atendechat_user
+DB_PASS=********
 DB_NAME=atendechat
 
-JWT_SECRET=your-secret-key
-JWT_REFRESH_SECRET=your-refresh-secret
-JWT_EXPIRES_IN=15m
+# JWT
+JWT_SECRET=********
+JWT_REFRESH_SECRET=********
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=7
 
-REDIS_HOST=localhost
-REDIS_PORT=6379
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# WhatsApp Cloud / Meta (verify token global; cada empresa puede tener el suyo)
+META_WEBHOOK_VERIFY_TOKEN=********
+META_APP_SECRET=********
+
+# SMTP (reset de contraseña)
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=
+
+# Dominio (emails de reset, back_urls de MercadoPago)
+FRONTEND_URL=https://crm.lmtmas.com
+
+# MercadoPago (vacío = checkout deshabilitado)
+MP_ACCESS_TOKEN=
 ```
 
-### Frontend (.env)
-```env
-VITE_BACKEND_URL=http://localhost:4000/api
+En producción el `Settings` falla al arrancar si faltan `JWT_SECRET`, `JWT_REFRESH_SECRET` o `DB_PASS`.
+
+---
+
+## Webhooks de Meta
+
+| Producto | Callback URL | Verify token |
+|---|---|---|
+| WhatsApp Cloud (todas las empresas) | `https://crm.lmtmas.com/api/whatsapp-cloud/webhook` | global o `waCloudVerifyToken` por empresa; rutea por `phone_number_id` |
+| Meta Lead Ads (por empresa) | `https://crm.lmtmas.com/api/ai/meta-leads/webhook/{company_id}` | `metaLeadAdsWebhookVerifyToken` de cada empresa |
+
+---
+
+## Despliegue (VPS)
+
+El repo vive en `/home/deploy/atendechat` (rama `main`). Deploy en un comando:
+
+```bash
+./deploy.sh
 ```
 
-## 🤝 Contribuir
+El script hace `git pull origin main`, instala dependencias, buildea el frontend, lo publica, reinicia el servicio y verifica el health.
 
-1. Fork el proyecto
-2. Crea una rama (`git checkout -b feature/AmazingFeature`)
-3. Commit cambios (`git commit -m 'Add AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
+Operación manual:
 
-## 📄 Licencia
+```bash
+systemctl restart charlott-fastapi      # backend FastAPI
+cd frontend && npm run build            # nginx sirve desde frontend/build
+systemctl reload nginx
+```
 
-Este proyecto es privado y propietario.
+### Health checks
 
-## 👥 Autores
+```bash
+curl https://crm.lmtmas.com/health              # liveness
+curl https://crm.lmtmas.com/health/deep         # + base de datos
+curl https://crm.lmtmas.com/health/whatsapp-tokens   # estado de tokens Meta
+```
 
-- Desarrollo inicial - 2026
+### Tareas programadas (systemd timers)
 
-## 🙏 Agradecimientos
+- `pg-backup-atendechat.timer` — backup diario de Postgres (gzip, retención 14 días) en `/var/backups/postgres`.
+- `wa-token-check.timer` — verificación diaria de salud de tokens de WhatsApp (loguea warnings).
 
-- Baileys por la integración con WhatsApp
-- Material-UI por los componentes
-- La comunidad de Node.js y React
+### SSL
+
+Certificado de Let's Encrypt con renovación automática. Para (re)emitir tras cambios de dominio: `/usr/local/bin/setup-crm-ssl.sh`.
+
+---
+
+## Notas operativas
+
+- El servicio `charlott-fastapi` corre con `Restart=always`.
+- nginx sirve el frontend directamente desde `frontend/build` (el build actualiza lo servido).
+- Todo el acceso a datos está scopeado por `company_id` — verificar siempre el tenant en cambios al backend.
+
+---
+
+Software privado y propietario.
