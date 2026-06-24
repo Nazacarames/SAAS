@@ -150,10 +150,18 @@ async def meta_dispatch(req: Request, response: Response, db: Session = Depends(
     return {"ok": True, "results": results}
 
 
-# ── WhatsApp: delegate to existing handler ────────────────────────
+# ── WhatsApp: route through the full processing pipeline ──────────
 async def _handle_whatsapp_entry(db: Session, entry: dict, raw_body: bytes, req: Request, response: Response):
-    from app.api.v1.endpoints.webhook_whatsapp import whatsapp_webhook
-    return {"channel": "whatsapp", "delegated": True}
+    """Process a WhatsApp entry through the shared inbound pipeline (save, orchestrate, reply)."""
+    from app.api.v1.endpoints.webhook_whatsapp import process_whatsapp_payload
+    try:
+        result = await process_whatsapp_payload(
+            db, {"object": "whatsapp_business_account", "entry": [entry]}, None
+        )
+        return {"channel": "whatsapp", **(result or {})}
+    except Exception as e:
+        log.error("[whatsapp] processing failed: %s\n%s", e, traceback.format_exc())
+        return {"channel": "whatsapp", "error": str(e)[:200]}
 
 
 # ── Instagram / Messenger: unified inbound ────────────────────────

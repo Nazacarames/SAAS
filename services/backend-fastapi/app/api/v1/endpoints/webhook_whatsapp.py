@@ -455,7 +455,11 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
     except Exception:
         return {"ok": True, "ignored": True, "reason": "invalid_json", "ai_reply": None}
 
-    # Extract message(s)
+    return await process_whatsapp_payload(db, payload, response)
+
+
+async def process_whatsapp_payload(db: Session, payload: dict, response: Response = None) -> dict:
+    """Core WhatsApp inbound processing - shared by endpoint and unified dispatcher."""
     extracted_messages = extract_messages_from_payload(payload)
     if not extracted_messages:
         return {"ok": True, "ignored": True, "reason": "no_text_message", "ai_reply": None}
@@ -478,7 +482,8 @@ async def whatsapp_webhook(req: Request, response: Response, db: Session = Depen
         new_messages.append((_mid, _from, _text))
 
     if not new_messages:
-        response.status_code = 202
+        if response is not None:
+            response.status_code = 202
         return {"ok": True, "ignored": True, "reason": "msg_id_already_processed", "ai_reply": None}
 
     # All batch messages come from the same sender; use the first for routing
