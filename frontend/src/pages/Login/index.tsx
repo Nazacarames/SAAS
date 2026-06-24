@@ -5,10 +5,16 @@ import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { useAuth } from '../../context/Auth/AuthContext';
 import { toast } from 'react-toastify';
 
+const channels = [
+  { label: 'WhatsApp', color: '#25D366', letter: 'W' },
+  { label: 'Instagram', color: '#E1306C', letter: 'I' },
+  { label: 'Messenger', color: '#0084FF', letter: 'M' },
+];
+
 const features = [
-  { icon: '⚡', title: 'Respuestas instantaneas', desc: 'IA que atiende leads 24/7 en WhatsApp' },
-  { icon: '📊', title: 'Funnel en tiempo real', desc: 'Metricas comerciales accionables' },
-  { icon: '🔗', title: 'Meta Lead Ads', desc: 'Captura y calificacion automatica' },
+  { icon: '💬', title: 'Multicanal real', desc: 'WhatsApp, Instagram y Messenger en una sola bandeja' },
+  { icon: '⚡', title: 'IA que responde 24/7', desc: 'Atiende y califica leads en todos tus canales' },
+  { icon: '🔗', title: 'Meta Lead Ads', desc: 'Captura y calificacion automatica de campañas' },
 ];
 
 const Login = () => {
@@ -50,21 +56,39 @@ const Login = () => {
         {/* Logo */}
         <Stack direction="row" alignItems="center" spacing={1.5} className="anim-fade-up">
           <Box sx={{ width: 36, height: 36, borderRadius: '10px', background: 'linear-gradient(135deg, #F5B840 0%, #C07818 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.95rem', color: '#0C0E12' }}>C</Typography>
+            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.95rem', color: '#0C0E12' }}>L</Typography>
           </Box>
-          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '1rem', color: '#E8EBF2' }}>Charlott</Typography>
+          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '1rem', color: '#E8EBF2' }}>LMTM CRM</Typography>
         </Stack>
 
         {/* Hero copy */}
         <Box>
           <Typography className="anim-fade-up anim-fade-up-1" sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: { md: '1.9rem', lg: '2.3rem' }, color: '#E8EBF2', lineHeight: 1.2, mb: 1.5 }}>
-            Tu operacion<br />
-            <Box component="span" sx={{ color: '#E8A020' }}>WhatsApp</Box>
+            Todas tus<br />
+            <Box component="span" sx={{ color: '#E8A020' }}>conversaciones</Box>
             <br />en un panel.
           </Typography>
-          <Typography className="anim-fade-up anim-fade-up-2" sx={{ fontSize: '0.875rem', color: 'rgba(255,255,255,0.42)', lineHeight: 1.8, mb: 4 }}>
-            CRM con IA para convertir conversaciones<br />en oportunidades reales de venta.
+          <Typography className="anim-fade-up anim-fade-up-2" sx={{ fontSize: '0.875rem', color: 'rgba(255,255,255,0.42)', lineHeight: 1.8, mb: 2.5 }}>
+            CRM con IA para WhatsApp, Instagram y Messenger.<br />Convertí cada chat en una oportunidad de venta.
           </Typography>
+
+          {/* Channel chips */}
+          <Stack direction="row" spacing={1} className="anim-fade-up anim-fade-up-2" sx={{ mb: 4 }}>
+            {channels.map((c) => (
+              <Stack key={c.label} direction="row" alignItems="center" spacing={0.8} sx={{
+                px: 1.2, py: 0.6, borderRadius: '8px',
+                background: `${c.color}14`, border: `1px solid ${c.color}30`,
+              }}>
+                <Box sx={{
+                  width: 16, height: 16, borderRadius: '50%', background: c.color,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.55rem', color: '#fff',
+                }}>{c.letter}</Box>
+                <Typography sx={{ fontSize: '0.72rem', fontWeight: 600, color: '#E8EBF2' }}>{c.label}</Typography>
+              </Stack>
+            ))}
+          </Stack>
+
           <Stack spacing={2.5}>
             {features.map((f, i) => (
               <Stack key={i} direction="row" spacing={1.5} alignItems="flex-start" className={'anim-fade-up anim-fade-up-' + (i + 3)}>
@@ -81,7 +105,7 @@ const Login = () => {
         </Box>
 
         <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.18)' }}>
-          2025 Charlott CRM
+          © 2026 LMTM CRM
         </Typography>
       </Box>
 
@@ -91,9 +115,9 @@ const Login = () => {
           {/* Mobile logo */}
           <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 4, display: { md: 'none' } }}>
             <Box sx={{ width: 30, height: 30, borderRadius: '8px', background: 'linear-gradient(135deg, #F5B840 0%, #C07818 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.8rem', color: '#0C0E12' }}>C</Typography>
+              <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.8rem', color: '#0C0E12' }}>L</Typography>
             </Box>
-            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, color: '#E8EBF2', fontSize: '0.95rem' }}>Charlott CRM</Typography>
+            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, color: '#E8EBF2', fontSize: '0.95rem' }}>LMTM CRM</Typography>
           </Stack>
 
           <Box className="anim-fade-up">

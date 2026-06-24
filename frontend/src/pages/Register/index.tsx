@@ -30,9 +30,9 @@ const Register = () => {
       <Box sx={{ width: '100%', maxWidth: 400 }}>
         <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 4 }}>
           <Box sx={{ width: 32, height: 32, borderRadius: '9px', background: 'linear-gradient(135deg, #F5B840 0%, #C07818 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.85rem', color: '#0C0E12' }}>C</Typography>
+            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 800, fontSize: '0.85rem', color: '#0C0E12' }}>L</Typography>
           </Box>
-          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, color: '#E8EBF2' }}>Charlott CRM</Typography>
+          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, color: '#E8EBF2' }}>LMTM CRM</Typography>
         </Stack>
 
         <Box className="anim-fade-up">

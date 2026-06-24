@@ -162,7 +162,7 @@ export default function LandingB() {
           }}>
             <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: AMBER, animation: 'pulseDot 2s ease-in-out infinite' }} />
             <span style={{ fontSize: '11px', color: AMBER, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: 'DM Sans, sans-serif' }}>
-              WhatsApp CRM
+              CRM Omnicanal con IA
             </span>
           </div>
 
@@ -188,8 +188,30 @@ export default function LandingB() {
             margin: '0 0 36px',
             maxWidth: '420px',
           }}>
-            CRM con WhatsApp para equipos de ventas. Gestiona leads, automatiza seguimientos y cierra más negocios.
+            WhatsApp, Instagram y Messenger en una sola bandeja. La IA atiende, califica leads y cierra más negocios por vos.
           </p>
+
+          {/* Channel chips */}
+          <div style={{ ...reveal(heroVisible, 200), display: 'flex', gap: '10px', marginBottom: '36px', flexWrap: 'wrap' }}>
+            {[
+              { label: 'WhatsApp', color: '#25D366', letter: 'W' },
+              { label: 'Instagram', color: '#E1306C', letter: 'I' },
+              { label: 'Messenger', color: '#0084FF', letter: 'M' },
+            ].map((c) => (
+              <div key={c.label} style={{
+                display: 'inline-flex', alignItems: 'center', gap: '8px',
+                padding: '7px 13px 7px 9px', borderRadius: '10px',
+                background: `${c.color}14`, border: `1px solid ${c.color}30`,
+              }}>
+                <span style={{
+                  width: '18px', height: '18px', borderRadius: '50%', background: c.color,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: '9px', color: '#fff',
+                }}>{c.letter}</span>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: TEXT, fontFamily: 'DM Sans, sans-serif' }}>{c.label}</span>
+              </div>
+            ))}
+          </div>
 
           <div style={{ ...reveal(heroVisible, 240), display: 'flex', gap: '12px' }}>
             <button
@@ -256,10 +278,10 @@ export default function LandingB() {
                   Conversaciones
                 </p>
                 {[
-                  { name: 'María García', msg: 'Quiero info del depto...', active: true },
-                  { name: 'Carlos López', msg: '¿Cuándo podemos ver?', active: false },
-                  { name: 'Ana Martínez', msg: 'Perfecto, confirmado', active: false },
-                  { name: 'Rodrigo Sosa', msg: 'Mandame la propuesta', active: false },
+                  { name: 'María García', msg: 'Quiero info del depto...', active: true, ch: '#25D366', chl: 'W' },
+                  { name: 'Carlos López', msg: '¿Cuándo podemos ver?', active: false, ch: '#E1306C', chl: 'I' },
+                  { name: 'Ana Martínez', msg: 'Perfecto, confirmado', active: false, ch: '#0084FF', chl: 'M' },
+                  { name: 'Rodrigo Sosa', msg: 'Mandame la propuesta', active: false, ch: '#25D366', chl: 'W' },
                 ].map((c, i) => (
                   <div key={i} style={{
                     padding: '8px',
@@ -269,11 +291,19 @@ export default function LandingB() {
                     display: 'flex', gap: '8px',
                     cursor: 'default',
                   }}>
-                    <div style={{
-                      width: '30px', height: '30px', borderRadius: '50%',
-                      background: `hsl(${i * 77 + 160}, 35%, 38%)`,
-                      flexShrink: 0,
-                    }} />
+                    <div style={{ position: 'relative', flexShrink: 0 }}>
+                      <div style={{
+                        width: '30px', height: '30px', borderRadius: '50%',
+                        background: `hsl(${i * 77 + 160}, 35%, 38%)`,
+                      }} />
+                      <div style={{
+                        position: 'absolute', bottom: '-2px', right: '-2px',
+                        width: '13px', height: '13px', borderRadius: '50%',
+                        background: c.ch, border: `2px solid ${SURFACE}`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: '6px', color: '#fff',
+                      }}>{c.chl}</div>
+                    </div>
                     <div style={{ overflow: 'hidden', minWidth: 0 }}>
                       <p style={{ margin: 0, fontSize: '11px', fontWeight: 600, color: c.active ? AMBER : TEXT, fontFamily: 'DM Sans, sans-serif', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</p>
                       <p style={{ margin: 0, fontSize: '10px', color: MUTED, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.msg}</p>
@@ -404,10 +434,10 @@ export default function LandingB() {
                 </div>
                 <div>
                   <h3 style={{ fontFamily: 'Syne, sans-serif', fontSize: '22px', fontWeight: 700, color: TEXT, margin: '0 0 10px', letterSpacing: '-0.025em' }}>
-                    Bandeja unificada de equipos
+                    Bandeja unificada omnicanal
                   </h3>
                   <p style={{ fontSize: '15px', color: MUTED, lineHeight: 1.65, maxWidth: '520px', margin: 0 }}>
-                    Todos los chats de WhatsApp de tu equipo en una sola pantalla. Asigna conversaciones, añade notas internas y etiqueta por etapa de venta. Nunca vuelvas a perder un lead por falta de seguimiento.
+                    WhatsApp, Instagram y Messenger de todo tu equipo en una sola pantalla. Asigna conversaciones, añade notas internas y etiqueta por etapa de venta. Nunca vuelvas a perder un lead, sin importar por qué canal escriba.
                   </p>
                 </div>
               </div>
@@ -468,10 +498,10 @@ export default function LandingB() {
                 </svg>
               </div>
               <h3 style={{ fontFamily: 'Syne, sans-serif', fontSize: '17px', fontWeight: 700, color: TEXT, margin: '0 0 8px', letterSpacing: '-0.02em' }}>
-                Respuestas automáticas
+                IA en cada canal
               </h3>
               <p style={{ fontSize: '13px', color: MUTED, lineHeight: 1.6, margin: 0 }}>
-                IA que atiende fuera de horario, califica leads y agenda citas sin intervención humana.
+                Atiende fuera de horario, califica leads y agenda citas en WhatsApp, Instagram y Messenger por igual.
               </p>
             </div>
 
@@ -516,7 +546,7 @@ export default function LandingB() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '40px' }}>
             {[
-              { n: '01', title: 'Conecta WhatsApp', desc: 'Vincula tu número de WhatsApp Business en menos de 2 minutos. Sin instalar nada.' },
+              { n: '01', title: 'Conecta tus canales', desc: 'Vinculá WhatsApp, Instagram y Messenger en minutos. Sin instalar nada.' },
               { n: '02', title: 'Invita tu equipo', desc: 'Agrega vendedores y asigna roles con permisos por agente.' },
               { n: '03', title: 'Importa tus leads', desc: 'Sube tu base de contactos o conecta tus anuncios de Meta Ads.' },
               { n: '04', title: 'Empieza a vender', desc: 'Gestiona todas las conversaciones desde un panel central y mide resultados.' },
@@ -607,7 +637,7 @@ export default function LandingB() {
             <span style={{ fontFamily: 'Syne, sans-serif', fontWeight: 700, fontSize: '15px', color: TEXT }}>LMTM CRM</span>
           </div>
           <span style={{ fontSize: '13px', color: MUTED }}>
-            © 2025 LMTM CRM. Todos los derechos reservados.
+            © 2026 LMTM CRM. Todos los derechos reservados.
           </span>
           <div style={{ display: 'flex', gap: '24px' }}>
             <a href="#" className="nav-a">Privacidad</a>
