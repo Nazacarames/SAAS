@@ -19,6 +19,7 @@ interface Lead {
   id: number;
   name: string;
   number?: string;
+  email?: string;
   source?: string;
   channel_type?: string;
   lead_score?: number;
@@ -49,6 +50,16 @@ const Leads = () => {
   const [formName, setFormName] = useState('');
   const [formColor, setFormColor] = useState(STAGE_COLORS[0]);
   const [saving, setSaving] = useState(false);
+
+  // Lead actions
+  const [leadMenuAnchor, setLeadMenuAnchor] = useState<null | HTMLElement>(null);
+  const [menuLead, setMenuLead] = useState<Lead | null>(null);
+  const [leadDialogOpen, setLeadDialogOpen] = useState(false);
+  const [editLead, setEditLead] = useState<Lead | null>(null);
+  const [leadName, setLeadName] = useState('');
+  const [leadNumber, setLeadNumber] = useState('');
+  const [leadEmail, setLeadEmail] = useState('');
+  const [savingLead, setSavingLead] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -129,6 +140,45 @@ const Leads = () => {
     [ids[i], ids[j]] = [ids[j], ids[i]];
     setStages((prev) => { const m = new Map(prev.map((x) => [x.id, x])); return ids.map((id) => m.get(id)!); });
     try { await api.put('/pipeline/reorder', { order: ids }); } catch { load(); }
+  };
+
+  // ── Lead CRUD ──
+  const openEditLead = (l: Lead) => {
+    setEditLead(l);
+    setLeadName(l.name || '');
+    setLeadNumber(l.number || '');
+    setLeadEmail(l.email || '');
+    setLeadDialogOpen(true);
+    setLeadMenuAnchor(null);
+  };
+
+  const saveLead = async () => {
+    if (!editLead) return;
+    setSavingLead(true);
+    try {
+      await api.put(`/contacts/${editLead.id}`, {
+        name: leadName.trim() || undefined,
+        number: leadNumber.trim() || undefined,
+        email: leadEmail.trim() || undefined,
+      });
+      toast.success('Lead actualizado');
+      setLeadDialogOpen(false);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al actualizar el lead');
+    } finally { setSavingLead(false); }
+  };
+
+  const deleteLead = async (l: Lead) => {
+    setLeadMenuAnchor(null);
+    if (!confirm(`¿Eliminar el lead "${l.name}"? Esta acción no se puede deshacer.`)) return;
+    try {
+      await api.delete(`/contacts/${l.id}`);
+      setStages((prev) => prev.map((s) => ({ ...s, leads: s.leads.filter((x) => x.id !== l.id), count: s.leads.filter((x) => x.id !== l.id).length })));
+      toast.success('Lead eliminado');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al eliminar el lead');
+    }
   };
 
   if (loading) return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress sx={{ color: '#E8A020' }} /></Box>;
@@ -223,6 +273,13 @@ const Leads = () => {
                         )}
                       </Stack>
                     </Box>
+                    <IconButton
+                      size="small"
+                      onClick={(e) => { e.stopPropagation(); setLeadMenuAnchor(e.currentTarget); setMenuLead(l); }}
+                      sx={{ flexShrink: 0, mt: -0.5, mr: -0.5, opacity: 0.5, '&:hover': { opacity: 1 } }}
+                    >
+                      <MoreIcon sx={{ fontSize: 15 }} />
+                    </IconButton>
                   </Stack>
                 </Box>
               ))}
@@ -230,6 +287,29 @@ const Leads = () => {
           </Box>
         ))}
       </Box>
+
+      {/* Lead menu */}
+      <Menu anchorEl={leadMenuAnchor} open={!!leadMenuAnchor} onClose={() => setLeadMenuAnchor(null)}>
+        <MenuItem onClick={() => menuLead && openEditLead(menuLead)}><EditIcon sx={{ fontSize: 16, mr: 1 }} /> Editar lead</MenuItem>
+        <MenuItem onClick={() => { setLeadMenuAnchor(null); navigate('/conversations'); }}>Ver conversación</MenuItem>
+        <MenuItem onClick={() => menuLead && deleteLead(menuLead)} sx={{ color: '#EF5350' }}><DeleteIcon sx={{ fontSize: 16, mr: 1 }} /> Eliminar lead</MenuItem>
+      </Menu>
+
+      {/* Edit lead dialog */}
+      <Dialog open={leadDialogOpen} onClose={() => setLeadDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700 }}>Editar lead</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField fullWidth size="small" label="Nombre" value={leadName} onChange={(e) => setLeadName(e.target.value)} />
+            <TextField fullWidth size="small" label="Teléfono" value={leadNumber} onChange={(e) => setLeadNumber(e.target.value)} helperText="Número de WhatsApp (con código de país)" />
+            <TextField fullWidth size="small" label="Email" type="email" value={leadEmail} onChange={(e) => setLeadEmail(e.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLeadDialogOpen(false)}>Cancelar</Button>
+          <Button variant="contained" onClick={saveLead} disabled={savingLead}>{savingLead ? <CircularProgress size={18} /> : 'Guardar'}</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Stage menu */}
       <Menu anchorEl={menuAnchor} open={!!menuAnchor} onClose={() => setMenuAnchor(null)}>

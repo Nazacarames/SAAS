@@ -101,7 +101,7 @@ def get_board(
 
     leads = db.execute(
         text(
-            """SELECT c.id, c.name, c.number, c.source, c.lead_score,
+            """SELECT c.id, c.name, c.number, c.email, c.source, c.lead_score,
                       c.progress_tags, c.stage_id,
                       c."leadStatus" AS lead_status, c.channel_id,
                       ch.channel_type,
@@ -128,6 +128,7 @@ def get_board(
             "id": lead["id"],
             "name": lead["name"],
             "number": lead["number"],
+            "email": lead["email"],
             "source": lead["source"],
             "channel_type": lead["channel_type"],
             "lead_score": lead["lead_score"],
