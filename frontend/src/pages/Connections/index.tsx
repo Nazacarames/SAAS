@@ -52,6 +52,8 @@ const Connections = () => {
   const [showSecrets, setShowSecrets] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const companyVerifyToken = channels.find((c) => c.verify_token)?.verify_token || '';
+
   const load = useCallback(async () => {
     try {
       const { data } = await api.get('/channels');
@@ -163,15 +165,32 @@ const Connections = () => {
 
       {/* Webhook panel */}
       <Paper sx={{ p: 2, mb: 3, borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
-        <Typography sx={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.5)', mb: 1, fontWeight: 600 }}>Webhook URL (para Meta Developers)</Typography>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Typography sx={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.5)', mb: 1, fontWeight: 600 }}>Configuración del webhook (Meta Developers)</Typography>
+
+        {/* Callback URL */}
+        <Typography sx={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 0.5, mb: 0.3 }}>Callback URL</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
           <Typography sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace', color: '#E8A020', flexGrow: 1, wordBreak: 'break-all' }}>
             {WEBHOOK_URL}
           </Typography>
-          <IconButton size="small" onClick={() => copyText(WEBHOOK_URL, 'Webhook URL')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
+          <IconButton size="small" onClick={() => copyText(WEBHOOK_URL, 'Callback URL')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
         </Stack>
-        <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', mt: 0.5 }}>
-          URL unificada para WhatsApp, Instagram y Messenger. El verify token se muestra en cada canal.
+
+        {/* Verify token (one per company) */}
+        {companyVerifyToken && (
+          <>
+            <Typography sx={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 0.5, mb: 0.3 }}>Verify Token</Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace', color: '#34D399', flexGrow: 1, wordBreak: 'break-all' }}>
+                {companyVerifyToken}
+              </Typography>
+              <IconButton size="small" onClick={() => copyText(companyVerifyToken, 'Verify Token')}><CopyIcon sx={{ fontSize: 14 }} /></IconButton>
+            </Stack>
+          </>
+        )}
+
+        <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', mt: 1 }}>
+          Una sola URL y un solo verify token para todos tus canales (WhatsApp, Instagram, Messenger). Se genera automáticamente al crear el primer canal.
         </Typography>
       </Paper>
 

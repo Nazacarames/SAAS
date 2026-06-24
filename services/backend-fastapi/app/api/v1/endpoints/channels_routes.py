@@ -16,6 +16,35 @@ router = APIRouter(prefix="/channels", tags=["channels"])
 log = logging.getLogger("app.channels.routes")
 
 
+def _get_company_verify_token(db: Session, company_id: int) -> str:
+    """Return the company's existing webhook verify token, if any channel already has one,
+    falling back to legacy company_runtime_settings tokens. Empty string if none."""
+    rows = db.execute(
+        text("SELECT config_json FROM channels WHERE company_id = :cid"),
+        {"cid": company_id},
+    ).mappings().all()
+    for row in rows:
+        try:
+            cfg = json.loads(row["config_json"]) if isinstance(row["config_json"], str) else (row["config_json"] or {})
+            if cfg.get("verifyToken"):
+                return cfg["verifyToken"]
+        except Exception:
+            continue
+
+    # Legacy fallback: reuse existing per-company token from company_runtime_settings
+    crs = db.execute(
+        text("SELECT settings_json FROM company_runtime_settings WHERE company_id = :cid LIMIT 1"),
+        {"cid": company_id},
+    ).mappings().first()
+    if crs and crs["settings_json"]:
+        try:
+            s = json.loads(crs["settings_json"]) if isinstance(crs["settings_json"], str) else crs["settings_json"]
+            return s.get("waCloudVerifyToken") or s.get("metaLeadAdsWebhookVerifyToken") or ""
+        except Exception:
+            pass
+    return ""
+
+
 class ChannelCreate(BaseModel):
     channel_type: str
     name: str
@@ -83,7 +112,12 @@ def create_channel(
     if existing:
         raise HTTPException(status_code=409, detail="Este canal ya está registrado")
 
-    verify_token = body.verify_token.strip() or secrets.token_urlsafe(32)
+    # One verify token per company: reuse the company's existing token (so the
+    # single unified webhook URL in Meta uses one consistent token across all
+    # channels). Generate a fresh random one only if the company has none yet.
+    verify_token = body.verify_token.strip()
+    if not verify_token:
+        verify_token = _get_company_verify_token(db, company_id) or secrets.token_urlsafe(32)
 
     mc_id = None
     if body.access_token.strip():
