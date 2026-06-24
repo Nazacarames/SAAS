@@ -8,7 +8,14 @@ interface TokenStatus {
   name: string;
   status: string;
   detail?: string;
+  channel_type?: string;
 }
+
+const CHANNEL_LABEL: Record<string, string> = {
+  whatsapp: 'WhatsApp',
+  instagram: 'Instagram',
+  messenger: 'Messenger',
+};
 
 const HealthAlert = () => {
   const [alerts, setAlerts] = useState<string[]>([]);
@@ -20,12 +27,14 @@ const HealthAlert = () => {
         const { data } = await api.get('/health/whatsapp-tokens');
         const problems: string[] = [];
         (data.tokens || []).forEach((t: TokenStatus) => {
+          const ch = CHANNEL_LABEL[t.channel_type || ''] || 'Canal';
+          const who = t.name || 'cuenta ' + t.companyId;
           if (t.status === 'expired') {
-            problems.push(`Token de WhatsApp expirado (${t.name || 'cuenta ' + t.companyId}). Renovalo en Conexiones.`);
-          } else if (t.status === 'not_configured') {
-            problems.push(`WhatsApp no configurado (${t.name || 'cuenta ' + t.companyId}).`);
+            problems.push(`Token de ${ch} expirado (${who}). Renovalo en Canales.`);
           } else if (t.status === 'error') {
-            problems.push(`Error en WhatsApp (${t.name}): ${t.detail?.slice(0, 80)}`);
+            problems.push(`Error en ${ch} (${who}): ${t.detail?.slice(0, 80)}`);
+          } else if (t.status === 'unreachable') {
+            problems.push(`No se pudo verificar ${ch} (${who}).`);
           }
         });
         setAlerts(problems);
