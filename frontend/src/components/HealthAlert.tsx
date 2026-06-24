@@ -24,7 +24,7 @@ const HealthAlert = () => {
   useEffect(() => {
     const check = async () => {
       try {
-        const { data } = await api.get('/health/whatsapp-tokens');
+        const { data } = await api.get('/channels/health');
         const problems: string[] = [];
         (data.tokens || []).forEach((t: TokenStatus) => {
           const ch = CHANNEL_LABEL[t.channel_type || ''] || 'Canal';

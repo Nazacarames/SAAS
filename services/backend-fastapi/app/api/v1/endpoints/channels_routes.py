@@ -308,3 +308,54 @@ async def test_channel(
             return {"ok": False, "error": msg, "status": resp.status_code}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
+
+
+@router.get("/health")
+async def channels_health(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Token health for THIS company's channels only (scoped — never leaks other tenants)."""
+    company_id = payload.get("companyId")
+    rows = db.execute(
+        text(
+            """SELECT c.id, c.name, c.company_id, c.channel_type, c.external_id,
+                      c.config_json, mc.access_token AS mc_token
+               FROM channels c
+               LEFT JOIN meta_connections mc ON mc.id = c.meta_connection_id
+               WHERE c.company_id = :cid AND c.status = 'active'
+               ORDER BY c.id"""
+        ),
+        {"cid": company_id},
+    ).mappings().all()
+
+    results = []
+    for r in rows:
+        try:
+            cfg = json.loads(r["config_json"]) if isinstance(r["config_json"], str) else (r["config_json"] or {})
+        except Exception:
+            cfg = {}
+        token = r.get("mc_token") or cfg.get("waCloudAccessToken") or ""
+        external_id = r["external_id"]
+        ctype = r["channel_type"]
+        base = {"companyId": r["company_id"], "name": r["name"], "channel_type": ctype, "external_id": external_id}
+
+        if not token or not external_id:
+            results.append({**base, "status": "not_configured", "detail": "Token o ID no configurado"})
+            continue
+
+        fields = {"whatsapp": "display_phone_number,verified_name", "instagram": "name,username", "messenger": "name,category"}.get(ctype, "name")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"https://graph.facebook.com/v21.0/{external_id}", params={"access_token": token, "fields": fields}, timeout=8)
+            if resp.status_code == 200:
+                results.append({**base, "status": "valid"})
+            else:
+                ed = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                code = ed.get("error", {}).get("code", resp.status_code)
+                results.append({**base, "status": "expired" if code == 190 else "error", "detail": ed.get("error", {}).get("message", "")[:120], "error_code": code})
+        except Exception as e:
+            results.append({**base, "status": "unreachable", "detail": str(e)[:120]})
+
+    all_valid = all(r["status"] == "valid" for r in results) if results else True
+    return {"status": "ok" if all_valid else "warning", "tokens": results}
