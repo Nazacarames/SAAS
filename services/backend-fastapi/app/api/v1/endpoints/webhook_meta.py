@@ -201,7 +201,7 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
         if existing:
             return {"ignored": True, "reason": "duplicate"}
 
-    contact = _resolve_contact(db, channel, inbound, adapter)
+    contact = await _resolve_contact(db, channel, inbound, adapter)
     if not contact:
         return {"ignored": True, "reason": "contact_resolve_failed"}
 
@@ -297,7 +297,7 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
         return {"ok": True, "error": str(e)[:200]}
 
 
-def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, adapter) -> Optional[dict]:
+async def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, adapter) -> Optional[dict]:
     company_id = int(channel["company_id"])
     channel_id = int(channel["id"])
 
@@ -342,10 +342,8 @@ def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, adapte
 
         profile = None
         try:
-            import asyncio
             config = get_send_config(channel)
-            loop = asyncio.get_event_loop()
-            profile = loop.run_until_complete(adapter.fetch_profile(config, inbound.sender_id))
+            profile = await adapter.fetch_profile(config, inbound.sender_id)
         except Exception:
             pass
 
@@ -380,10 +378,8 @@ def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, adapte
 
         profile = None
         try:
-            import asyncio
             config = get_send_config(channel)
-            loop = asyncio.get_event_loop()
-            profile = loop.run_until_complete(adapter.fetch_profile(config, inbound.sender_id))
+            profile = await adapter.fetch_profile(config, inbound.sender_id)
         except Exception:
             pass
 

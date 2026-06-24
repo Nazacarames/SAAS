@@ -194,30 +194,51 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
         return []
 
 
-def get_whatsapp_config(db: Session, company_id: int) -> Optional[dict]:
-    """Get active WhatsApp configuration for company from company_runtime_settings"""
+def get_whatsapp_config(db: Session, company_id: int, phone_number_id: str = None) -> Optional[dict]:
+    """Get WhatsApp send config for a company.
+
+    Prefers the active WhatsApp channel's token from meta_connections (where the
+    Channels UI saves renewals); if phone_number_id is given, picks that exact
+    number's channel (multi-number support). Falls back to the legacy
+    company_runtime_settings blob.
+    """
+    import json
+
+    # 1) Prefer the channels/meta_connections source of truth
+    if phone_number_id:
+        ch = db.execute(
+            text("SELECT c.external_id, mc.access_token FROM channels c "
+                 "JOIN meta_connections mc ON mc.id = c.meta_connection_id "
+                 "WHERE c.company_id = :cid AND c.channel_type = 'whatsapp' "
+                 "AND c.external_id = :pid AND COALESCE(mc.access_token,'') != '' LIMIT 1"),
+            {"cid": company_id, "pid": phone_number_id},
+        ).mappings().first()
+        if ch:
+            return {"phoneId": ch["external_id"], "token": ch["access_token"]}
+
+    ch = db.execute(
+        text("SELECT c.external_id, mc.access_token FROM channels c "
+             "JOIN meta_connections mc ON mc.id = c.meta_connection_id "
+             "WHERE c.company_id = :cid AND c.channel_type = 'whatsapp' AND c.status = 'active' "
+             "AND COALESCE(mc.access_token,'') != '' ORDER BY c.id LIMIT 1"),
+        {"cid": company_id},
+    ).mappings().first()
+    if ch and ch["external_id"] and ch["access_token"]:
+        return {"phoneId": ch["external_id"], "token": ch["access_token"]}
+
+    # 2) Legacy fallback: company_runtime_settings blob
     row = db.execute(
         text('SELECT settings_json FROM company_runtime_settings WHERE company_id = :company_id LIMIT 1'),
         {"company_id": company_id}
     ).mappings().first()
-    
     if not row:
         return None
-    
-    import json
-    settings = json.loads(row["settings_json"])
-    
-    # Extract WhatsApp Cloud API credentials
+    settings = json.loads(row["settings_json"]) if isinstance(row["settings_json"], str) else row["settings_json"]
     phone_id = settings.get("waCloudPhoneNumberId")
     access_token = settings.get("waCloudAccessToken")
-    
     if not phone_id or not access_token:
         return None
-    
-    return {
-        "phoneId": phone_id,
-        "token": access_token
-    }
+    return {"phoneId": phone_id, "token": access_token}
 
 
 async def send_whatsapp_message(phone: str, text: str, config: dict) -> dict:
@@ -599,7 +620,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             pass
 
         # Get WhatsApp config early (needed for sending replies)
-        wa_config = get_whatsapp_config(db, company_id)
+        wa_config = get_whatsapp_config(db, company_id, _phone_number_id if "_phone_number_id" in dir() else None)
 
         # Load wait message config (will be sent only if property cards are returned)
         _wait_msg = ""
