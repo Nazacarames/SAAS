@@ -54,7 +54,7 @@ const Connections = () => {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get('/api/channels');
+      const { data } = await api.get('/channels');
       setChannels(data.channels || []);
     } catch {
       toast.error('No se pudieron cargar los canales');
@@ -89,7 +89,7 @@ const Connections = () => {
     setSaving(true);
     try {
       if (editing) {
-        await api.put(`/api/channels/${editing.id}`, {
+        await api.put(`/channels/${editing.id}`, {
           name: formName || undefined,
           external_id: formExternalId || undefined,
           access_token: formToken || undefined,
@@ -97,7 +97,7 @@ const Connections = () => {
         });
         toast.success('Canal actualizado');
       } else {
-        await api.post('/api/channels', {
+        await api.post('/channels', {
           channel_type: formType,
           name: formName || CHANNEL_META[formType]?.label || formType,
           external_id: formExternalId,
@@ -118,7 +118,7 @@ const Connections = () => {
   const handleDelete = async (ch: Channel) => {
     if (!confirm(`¿Desactivar canal "${ch.name}"?`)) return;
     try {
-      await api.delete(`/api/channels/${ch.id}`);
+      await api.delete(`/channels/${ch.id}`);
       toast.success('Canal desactivado');
       await load();
     } catch (e: any) {
@@ -129,7 +129,7 @@ const Connections = () => {
   const handleTest = async (ch: Channel) => {
     setTestResults(prev => ({ ...prev, [ch.id]: { ok: false, error: 'testing...' } }));
     try {
-      const { data } = await api.post(`/api/channels/${ch.id}/test`);
+      const { data } = await api.post(`/channels/${ch.id}/test`);
       setTestResults(prev => ({ ...prev, [ch.id]: data }));
       if (data.ok) toast.success(`${ch.name}: conexión verificada`);
       else toast.error(`${ch.name}: ${data.error || 'error'}`);

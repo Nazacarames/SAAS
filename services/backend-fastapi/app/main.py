@@ -50,6 +50,7 @@ app.mount("/socket.io", socketio_app)
 
 # Health
 app.include_router(health.router)
+app.include_router(health.router, prefix=settings.api_prefix)
 
 # Auth & Users
 app.include_router(auth.router, prefix=settings.api_prefix)

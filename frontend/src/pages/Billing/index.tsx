@@ -61,8 +61,8 @@ const Billing = () => {
   const load = async () => {
     try {
       const [currentRes, plansRes] = await Promise.all([
-        api.get('/api/billing/current'),
-        api.get('/api/billing/plans'),
+        api.get('/billing/current'),
+        api.get('/billing/plans'),
       ]);
       setData(currentRes.data);
       setPlans(plansRes.data?.plans || []);
@@ -78,7 +78,7 @@ const Billing = () => {
   const handleCheckout = async (planCode: string) => {
     setCheckoutLoading(planCode);
     try {
-      const { data } = await api.post('/api/billing/checkout', { planCode });
+      const { data } = await api.post('/billing/checkout', { planCode });
       if (data?.checkoutUrl) {
         window.open(data.checkoutUrl, '_blank');
       } else {

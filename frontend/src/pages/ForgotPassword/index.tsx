@@ -13,7 +13,7 @@ const ForgotPassword = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      await api.post('/api/auth/forgot-password', { email });
+      await api.post('/auth/forgot-password', { email });
       setSent(true);
     } catch (err: any) {
       toast.error(err.response?.data?.detail || 'Error al enviar el email');
