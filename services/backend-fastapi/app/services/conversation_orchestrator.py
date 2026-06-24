@@ -855,6 +855,44 @@ def _enrich_search_args(args: dict, slots: dict) -> dict:
     return out
 
 
+_STATUS_TO_POS = {
+    "open": 0, "nuevo": 0, "new": 0, "primer_contacto": 0, "sin_contactar": 0,
+    "contactado": 1, "en_conversacion": 1,
+    "calificacion": 2, "calificado": 2, "interesado": 2,
+    "propuesta": 3, "negociacion": 3,
+    "cierre": 4, "ganado": 4, "won": 4, "cerrado": 4,
+}
+
+
+def _sync_stage_from_status(db, company_id: int, contact_id: int, lead_status: str) -> None:
+    """Map the inferred free-text leadStatus to the company pipeline stage and update contacts.stage_id,
+    so the Kanban board reflects the agent's progress. Matches by stage name first, then by position."""
+    if not lead_status:
+        return
+    from sqlalchemy import text as _t
+    ls = str(lead_status).strip().lower()
+    stages = db.execute(
+        _t('SELECT id, name, position FROM lead_stages WHERE company_id = :c ORDER BY position, id'),
+        {"c": company_id},
+    ).mappings().all()
+    if not stages:
+        return
+    target = None
+    for s in stages:
+        if str(s["name"]).strip().lower() == ls:
+            target = s["id"]; break
+    if target is None:
+        pos = _STATUS_TO_POS.get(ls)
+        if pos is None:
+            return
+        pos = min(pos, len(stages) - 1)
+        target = stages[pos]["id"]
+    db.execute(
+        _t('UPDATE contacts SET stage_id = :sid WHERE id = :cid AND "companyId" = :c AND (stage_id IS DISTINCT FROM :sid)'),
+        {"sid": target, "cid": contact_id, "c": company_id},
+    )
+
+
 async def execute_tool(
     tool_name: str,
     tool_args: dict,
@@ -2447,6 +2485,12 @@ BASE DE CONOCIMIENTO:
             {"score": int(round(new_score)), "status": new_status, "needs": needs_summary[:900],
              "cid": self.contact_id, "company": self.company_id},
         )
+
+        # Sync the pipeline stage to match the inferred lead status (board reflects agent progress)
+        try:
+            _sync_stage_from_status(db, self.company_id, self.contact_id, new_status)
+        except Exception:
+            pass
 
         # Find an associated ticket for ai_decision_logs (required not null)
         ticket_row = db.execute(
