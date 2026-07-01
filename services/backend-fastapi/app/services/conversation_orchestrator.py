@@ -25,6 +25,9 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.services.knowledge_base import get_ai_agent_config, get_kb_documents, COMPANY_PROFILE, SOCIAL_MEDIA
 from app.services.rag_service import RAGService, get_kb_context_for_prompt
+from app.services.geocoding import geocode, haversine_km
+
+NEAR_RADIUS_KM = 5
 
 
 # ==================== OPENAI CLIENT ====================
@@ -103,7 +106,8 @@ FUNCTIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {"type": "string", "description": "Zona o barrio (ej: 'palermo', 'belgrano', 'recoleta', 'caballito', 'villa crespo', 'centro')"},
+                    "location": {"type": "string", "description": "SOLO nombre de barrio/zona genérico y conocido (ej: 'palermo', 'belgrano', 'recoleta', 'caballito', 'villa crespo', 'centro'). NUNCA usar este campo para plazas, hospitales, universidades, estaciones, monumentos, shoppings ni calles con altura — para eso usar 'near'."},
+                    "near": {"type": "string", "description": "OBLIGATORIO usar este campo (no 'location') cuando el cliente menciona un lugar puntual con nombre propio: plaza, hospital, universidad, estación de tren/subte, monumento, shopping, iglesia, o una calle con altura (ej: 'Hospital Austral', 'Plaza San Martín', 'Estación Pilar', 'Universidad Austral', 'Av. Cabildo 2000'). CRÍTICO: incluí SIEMPRE la ciudad o zona si el cliente la menciona en el mismo mensaje, porque hay lugares con el mismo nombre en distintas ciudades de Argentina (ej: casi todas las ciudades tienen una 'Plaza San Martín'). Si el cliente dice 'cerca de la Plaza San Martín de Rosario' -> near='Plaza San Martín, Rosario' (nunca solo 'Plaza San Martín' sin la ciudad). El sistema geolocaliza este lugar y busca propiedades en un radio cercano, ordenadas por distancia real."},
                     "price_max": {"type": "integer", "description": "Precio máximo en USD (ej: 200000 para USD 200,000)"},
                     "price_min": {"type": "integer", "description": "Precio mínimo en USD (ej: 100000 para USD 100,000). Usar cuando el cliente da un rango."},
                     "property_type": {"type": "string", "description": "Tipo: 'apartment', 'house', 'store', 'office', 'land'"},
@@ -674,6 +678,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
@@ -767,6 +780,8 @@ def _map_tokko_property(p: dict) -> dict:
         "has_sale": has_sale,
         "operation_types": op_types,
         "_raw_operations": p.get("operations", []),
+        "geo_lat": _safe_float(p.get("geo_lat")),
+        "geo_long": _safe_float(p.get("geo_long")),
     }
 
 
@@ -808,6 +823,10 @@ def _render_property_results(items: list[dict], limit: int = 3) -> str:
         loc_full = (prop.get("location") or "Sin zona")
         loc_parts = [p.strip() for p in loc_full.replace(" | ", ",").split(",") if p.strip()]
         location = ", ".join(loc_parts[-2:]) if len(loc_parts) >= 2 else loc_full
+        distance_km = prop.get("_distance_km")
+        near_label = prop.get("_near_label") or ""
+        if distance_km is not None:
+            location = f"{location} (a {distance_km:.1f} km de {near_label})" if near_label else f"{location} (a {distance_km:.1f} km)"
         price = prop.get("price") or "Consultar"
         if 0 < _safe_int(prop.get("price_value", 0), 0) < 100:
             price = "Consultar"
@@ -1026,6 +1045,34 @@ async def execute_tool(
             mapped = [p for p in mapped if not (0 < _safe_int(p.get("price_value"), 0) < 100)]
             _tokko_log("mapping", total_raw=len(properties), total_mapped=len(mapped), args=tool_args, currency=requested_currency)
 
+            # "near": geocode a client-mentioned landmark and filter to properties within
+            # NEAR_RADIUS_KM, sorted by distance. Any failure (unresolvable place, no coords
+            # on the property) degrades gracefully — falls through to the existing
+            # location/type/budget cascade below instead of breaking the search.
+            requested_near = (tool_args.get("near") or "").strip()
+            near_meta = {"near_requested": bool(requested_near), "near_resolved": False, "near_matches": 0}
+            if requested_near and db is not None:
+                near_coords = await geocode(requested_near, db)
+                if near_coords:
+                    near_meta["near_resolved"] = True
+                    near_meta["near_display_name"] = near_coords.get("display_name", "")
+                    near_label = requested_near
+                    for m in mapped:
+                        if m.get("geo_lat") is not None and m.get("geo_long") is not None:
+                            m["_distance_km"] = haversine_km(
+                                near_coords["lat"], near_coords["lon"], m["geo_lat"], m["geo_long"]
+                            )
+                            m["_near_label"] = near_label
+                        else:
+                            m["_distance_km"] = None
+                    near_matches = sorted(
+                        (m for m in mapped if m.get("_distance_km") is not None and m["_distance_km"] <= NEAR_RADIUS_KM),
+                        key=lambda m: m["_distance_km"],
+                    )
+                    near_meta["near_matches"] = len(near_matches)
+                    mapped = near_matches
+                _tokko_log("near_filter", **near_meta)
+
             def _passes(prop, loc=True, rooms=True, type_filter=True):
                 if loc and requested_location and requested_location not in _normalize_text(prop.get("location")):
                     return False
@@ -1072,9 +1119,9 @@ async def execute_tool(
             strict = _apply_display(_dedupe_properties([p for p in mapped if _passes(p, loc=True, rooms=True)]))
             if strict:
                 _tokko_log("results", stage="strict", count=len(strict))
-                return {"ok": True, "results": strict, "meta": {"fallback_used": False, "requested": tool_args}}
+                return {"ok": True, "results": strict, "meta": {"fallback_used": False, "requested": tool_args, **near_meta}}
 
-            fallback_meta = {"fallback_used": True, "requested": tool_args, "strategies": []}
+            fallback_meta = {"fallback_used": True, "requested": tool_args, "strategies": [], **near_meta}
 
             # Fallback 1: relax rooms (keep location + type + budget)
             if requested_rooms:
@@ -1842,12 +1889,16 @@ class ConversationOrchestrator:
                     return False
                 args = tc.get("args") or {}
                 a_zone = _normalize_text(args.get("location"))
+                a_near = bool((args.get("near") or "").strip())
                 a_type = _canonical_property_type(args.get("property_type"))
                 a_budget = _safe_int(args.get("price_max"), 0)
                 a_budget_min = _safe_int(args.get("price_min"), 0)
                 c_budget = _safe_int(budget, 0)
                 c_budget_min = _safe_int(budget_min, 0)
-                zone_ok = (not zone) or (a_zone == _normalize_text(zone))
+                # A "near" (geo-radius) search is a more specific location filter than the
+                # zone slot's barrio match — treat it as satisfying zone_ok so a successful
+                # near-search isn't discarded and re-run as a broader zone-only search.
+                zone_ok = (not zone) or (a_zone == _normalize_text(zone)) or a_near
                 type_ok = (not ptype) or (a_type == _canonical_property_type(ptype))
                 budget_ok = (not c_budget) or (a_budget == c_budget)
                 # If user set a minimum price, search must also filter by it
@@ -2161,12 +2212,13 @@ BASE DE CONOCIMIENTO:
         def _score(tc: dict) -> int:
             args = tc.get('args') or {}
             a_zone = _normalize_text(args.get('location'))
+            a_near = bool((args.get('near') or '').strip())
             a_type = _canonical_property_type(args.get('property_type'))
             a_price_min = _safe_int(args.get('price_min'), 0)
             score = 0
             if current_type and a_type == current_type:
                 score += 3
-            if current_zone and a_zone == current_zone:
+            if current_zone and (a_zone == current_zone or a_near):
                 score += 2
             if (not current_type) and (not current_zone):
                 score += 1
@@ -2175,8 +2227,19 @@ BASE DE CONOCIMIENTO:
                 score += 2
             return score
 
-        # Pick the call that best matches current filters (avoid leakage from prior topic)
-        selected_call = sorted(search_calls, key=_score)[-1]
+        # A successful "near" (geo-radius) search directly answers what the client asked for
+        # ("cerca de X") and is more specific than a plain zone search — always prefer it over
+        # any broader fallback call from the same turn, even if the fallback scores higher on
+        # zone/type/budget alone.
+        near_calls_with_results = [
+            tc for tc in search_calls
+            if (tc.get('args') or {}).get('near') and (tc.get('result', {}).get('results') or [])
+        ]
+        if near_calls_with_results:
+            selected_call = near_calls_with_results[-1]
+        else:
+            # Pick the call that best matches current filters (avoid leakage from prior topic)
+            selected_call = sorted(search_calls, key=_score)[-1]
 
         selected_payload = selected_call.get('result', {})
         normalized = _dedupe_properties(_normalize_search_results(selected_payload))
