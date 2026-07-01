@@ -1052,7 +1052,14 @@ async def execute_tool(
             requested_near = (tool_args.get("near") or "").strip()
             near_meta = {"near_requested": bool(requested_near), "near_resolved": False, "near_matches": 0}
             if requested_near and db is not None:
-                near_coords = await geocode(requested_near, db)
+                # Bias the geocoder toward where THIS company actually has stock, so an
+                # ambiguous landmark (many cities share names like "Plaza San Martín")
+                # resolves to the agency's working region instead of the most famous one.
+                _pcoords = [(m["geo_lat"], m["geo_long"]) for m in mapped
+                            if m.get("geo_lat") is not None and m.get("geo_long") is not None]
+                _bias_lat = sum(c[0] for c in _pcoords) / len(_pcoords) if _pcoords else None
+                _bias_lon = sum(c[1] for c in _pcoords) / len(_pcoords) if _pcoords else None
+                near_coords = await geocode(requested_near, db, _bias_lat, _bias_lon)
                 if near_coords:
                     near_meta["near_resolved"] = True
                     near_meta["near_display_name"] = near_coords.get("display_name", "")
