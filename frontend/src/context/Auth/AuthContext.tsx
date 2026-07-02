@@ -13,7 +13,8 @@ interface AuthContextData {
     user: User | null;
     isAuth: boolean;
     loading: boolean;
-    handleLogin: (email: string, password: string) => Promise<void>;
+    handleLogin: (email: string, password: string) => Promise<{ requires2fa: boolean; mfaToken?: string }>;
+    handleVerify2FA: (mfaToken: string, code: string) => Promise<void>;
     handleLogout: () => void;
 }
 
@@ -74,15 +75,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         bootstrapAuth();
     }, []);
 
-    const handleLogin = async (email: string, password: string) => {
-        const { data } = await api.post('/auth/login', { email, password });
-        // Primary auth: HttpOnly cookie. Fallback: bearer token in localStorage (for restrictive browser cookie settings).
+    const finalizeSession = (data: any) => {
+        // Primary auth: HttpOnly cookie. Fallback: bearer token in localStorage.
         if (data?.token) {
             localStorage.setItem('authToken', data.token);
         }
         localStorage.setItem('user', JSON.stringify(data.user));
         setUser(data.user);
         setHasSession(true);
+    };
+
+    const handleLogin = async (email: string, password: string) => {
+        const { data } = await api.post('/auth/login', { email, password });
+        if (data?.requires_2fa) {
+            return { requires2fa: true, mfaToken: data.mfa_token as string };
+        }
+        finalizeSession(data);
+        return { requires2fa: false };
+    };
+
+    const handleVerify2FA = async (mfaToken: string, code: string) => {
+        const { data } = await api.post('/auth/2fa/verify', { mfa_token: mfaToken, code });
+        finalizeSession(data);
     };
 
     const handleLogout = async () => {
@@ -105,6 +119,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 isAuth: !!user || hasSession,
                 loading,
                 handleLogin,
+                handleVerify2FA,
                 handleLogout,
             }}
         >

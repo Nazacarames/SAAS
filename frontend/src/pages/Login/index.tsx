@@ -22,15 +22,33 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { handleLogin } = useAuth();
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [otpCode, setOtpCode] = useState('');
+  const { handleLogin, handleVerify2FA } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await handleLogin(email, password);
+      const res = await handleLogin(email, password);
+      if (res?.requires2fa && res.mfaToken) {
+        setMfaToken(res.mfaToken);
+      }
     } catch (error: any) {
-      toast.error(error.response?.data?.error || 'Credenciales incorrectas');
+      toast.error(error.response?.data?.detail || error.response?.data?.error || 'Credenciales incorrectas');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOtpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaToken) return;
+    setLoading(true);
+    try {
+      await handleVerify2FA(mfaToken, otpCode.trim());
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Código inválido');
     } finally {
       setLoading(false);
     }
@@ -125,6 +143,8 @@ const Login = () => {
             <Typography sx={{ fontSize: '0.875rem', color: 'rgba(255,255,255,0.38)', mb: 3.5 }}>Ingresa a tu panel de operaciones</Typography>
           </Box>
 
+          {!mfaToken ? (
+          <>
           <form onSubmit={handleSubmit}>
             <Stack spacing={2} className="anim-fade-up anim-fade-up-1">
               <TextField fullWidth label="Correo electronico" type="email" autoComplete="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} required />
@@ -160,6 +180,34 @@ const Login = () => {
             No tenes cuenta?{' '}
             <Link to="/register" style={{ color: '#E8A020', textDecoration: 'none', fontWeight: 600 }}>Crear cuenta</Link>
           </Typography>
+          </>
+          ) : (
+          <form onSubmit={handleOtpSubmit}>
+            <Stack spacing={2} className="anim-fade-up">
+              <Typography sx={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.55)', textAlign: 'center' }}>
+                Ingresá el código de 6 dígitos de tu app de autenticación
+              </Typography>
+              <TextField
+                fullWidth
+                label="Código de verificación"
+                autoFocus
+                value={otpCode}
+                onChange={(e) => setOtpCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+                inputProps={{ inputMode: 'numeric', maxLength: 6, style: { textAlign: 'center', letterSpacing: '0.5em', fontSize: '1.2rem' } }}
+                required
+              />
+              <Button type="submit" fullWidth variant="contained" size="large" disabled={loading || otpCode.length < 6} sx={{ py: 1.4, fontSize: '0.9rem' }}>
+                {loading ? <CircularProgress size={20} sx={{ color: '#0C0E12' }} /> : 'Verificar'}
+              </Button>
+              <Typography
+                onClick={() => { setMfaToken(null); setOtpCode(''); }}
+                sx={{ textAlign: 'center', fontSize: '0.8rem', color: 'rgba(255,255,255,0.38)', cursor: 'pointer' }}
+              >
+                Volver
+              </Typography>
+            </Stack>
+          </form>
+          )}
         </Box>
       </Box>
     </Box>

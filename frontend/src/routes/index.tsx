@@ -19,6 +19,7 @@ import Funnel from '../pages/Funnel';
 import Templates from '../pages/Templates';
 import Reports from '../pages/Reports';
 import Billing from '../pages/Billing';
+import Security from '../pages/Security';
 import LandingB from '../pages/LandingB';
 import MainLayout from '../layout/MainLayout';
 
@@ -69,6 +70,7 @@ const Routes = () => {
         <Route path='templates' element={<Templates />} />
         <Route path='reports' element={<Reports />} />
         <Route path='billing' element={<Billing />} />
+        <Route path='security' element={<Security />} />
       </Route>
 
       <Route path='*' element={<Navigate to='/' />} />

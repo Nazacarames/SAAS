@@ -35,6 +35,7 @@ const menuItems = [
   { text: 'Templates',       icon: <TextSnippetIcon />, path: '/templates',     section: 'config', adminOnly: true },
   { text: 'Usuarios',        icon: <PeopleIcon />,      path: '/users',         section: 'config', adminOnly: true },
   { text: 'Integraciones',   icon: <SettingsIcon />,    path: '/integrations',  section: 'config', adminOnly: true },
+  { text: 'Seguridad',       icon: <SettingsIcon />,    path: '/security',      section: 'config' },
   { text: 'Configuracion',   icon: <SettingsIcon />,    path: '/settings',      section: 'config', adminOnly: true }
 ];
 
