@@ -18,7 +18,6 @@ import re
 
 from app.core.db import get_db
 from app.core.config import settings
-from app.services.ai_agent_service import generate_reply
 from app.services.contacts_service import get_contact_by_phone, create_contact
 from app.services.messages_service import get_conversation_messages
 from app.services.conversation_orchestrator import orchestrate_reply

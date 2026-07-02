@@ -2,13 +2,14 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   Box, Typography, Stack, Button, Chip, IconButton, Dialog, DialogTitle,
   DialogContent, DialogActions, TextField, Select, MenuItem, FormControl,
-  InputLabel, CircularProgress, InputAdornment, Paper, Tooltip,
+  InputLabel, CircularProgress, InputAdornment, Paper, Tooltip, Checkbox,
+  Alert,
 } from '@mui/material';
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon,
   ContentCopy as CopyIcon, CheckCircle as CheckIcon,
   Cancel as CancelIcon, Refresh as TestIcon,
-  Visibility, VisibilityOff,
+  Visibility, VisibilityOff, Bolt as BoltIcon,
 } from '@mui/icons-material';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
@@ -37,12 +38,30 @@ interface Channel {
   created_at: string;
 }
 
+// Assets discovered by POST /channels/discover
+interface DiscoveredAssets {
+  token_info: { type: string; expires_at: number; never_expires: boolean };
+  whatsapp: { id: string; display_phone_number: string; verified_name: string; quality_rating: string; waba_name: string; already_connected: boolean }[];
+  instagram: { id: string; username: string; page_name: string; access_token: string; already_connected: boolean }[];
+  messenger: { id: string; name: string; access_token: string; already_connected: boolean }[];
+  warnings: string[];
+}
+
 const Connections = () => {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [testResults, setTestResults] = useState<Record<number, { ok: boolean; data?: any; error?: string }>>({});
+
+  // Assisted "Conectar con Meta" wizard
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizToken, setWizToken] = useState('');
+  const [wizShowToken, setWizShowToken] = useState(false);
+  const [wizDiscovering, setWizDiscovering] = useState(false);
+  const [wizAssets, setWizAssets] = useState<DiscoveredAssets | null>(null);
+  const [wizSelected, setWizSelected] = useState<Set<string>>(new Set());
+  const [wizConnecting, setWizConnecting] = useState(false);
 
   const [formType, setFormType] = useState('whatsapp');
   const [formName, setFormName] = useState('');
@@ -99,7 +118,7 @@ const Connections = () => {
         });
         toast.success('Canal actualizado');
       } else {
-        await api.post('/channels', {
+        const { data } = await api.post('/channels', {
           channel_type: formType,
           name: formName || CHANNEL_META[formType]?.label || formType,
           external_id: formExternalId,
@@ -107,6 +126,7 @@ const Connections = () => {
           app_secret: formAppSecret,
         });
         toast.success('Canal creado');
+        if (data?.channel?.id) handleTest(data.channel as Channel); // verificación inmediata
       }
       setDialogOpen(false);
       await load();
@@ -143,6 +163,95 @@ const Connections = () => {
 
   const meta = (type: string) => CHANNEL_META[type] || { label: type, color: '#888', icon: '?', fields: [] };
 
+  // ── Wizard "Conectar con Meta" ──────────────────────────────────────
+  const openWizard = () => {
+    setWizToken('');
+    setWizAssets(null);
+    setWizSelected(new Set());
+    setWizardOpen(true);
+  };
+
+  const wizDiscover = async () => {
+    if (!wizToken.trim()) return;
+    setWizDiscovering(true);
+    setWizAssets(null);
+    try {
+      const { data } = await api.post('/channels/discover', { access_token: wizToken.trim() });
+      if (!data.ok) {
+        toast.error(data.error || 'Token inválido');
+        return;
+      }
+      setWizAssets(data);
+      // Pre-select everything not yet connected
+      const pre = new Set<string>();
+      data.whatsapp.forEach((w: any) => { if (!w.already_connected) pre.add(`whatsapp:${w.id}`); });
+      data.instagram.forEach((i: any) => { if (!i.already_connected) pre.add(`instagram:${i.id}`); });
+      data.messenger.forEach((p: any) => { if (!p.already_connected) pre.add(`messenger:${p.id}`); });
+      setWizSelected(pre);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al detectar activos');
+    } finally {
+      setWizDiscovering(false);
+    }
+  };
+
+  const wizToggle = (key: string) => {
+    setWizSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const wizConnect = async () => {
+    if (!wizAssets || wizSelected.size === 0) return;
+    setWizConnecting(true);
+    let created = 0, failed = 0;
+    const jobs: { channel_type: string; name: string; external_id: string; access_token: string }[] = [];
+    wizAssets.whatsapp.forEach(w => {
+      if (wizSelected.has(`whatsapp:${w.id}`)) jobs.push({
+        channel_type: 'whatsapp',
+        name: w.verified_name || w.display_phone_number || 'WhatsApp',
+        external_id: w.id,
+        access_token: wizToken.trim(),
+      });
+    });
+    wizAssets.instagram.forEach(i => {
+      if (wizSelected.has(`instagram:${i.id}`)) jobs.push({
+        channel_type: 'instagram',
+        name: i.username ? `@${i.username}` : 'Instagram',
+        external_id: i.id,
+        access_token: i.access_token || wizToken.trim(), // page token: mejor para mensajería
+      });
+    });
+    wizAssets.messenger.forEach(p => {
+      if (wizSelected.has(`messenger:${p.id}`)) jobs.push({
+        channel_type: 'messenger',
+        name: p.name || 'Messenger',
+        external_id: p.id,
+        access_token: p.access_token || wizToken.trim(),
+      });
+    });
+    for (const job of jobs) {
+      try {
+        const { data } = await api.post('/channels', job);
+        created++;
+        if (data?.channel?.id) handleTest(data.channel as Channel); // verificación inmediata
+      } catch (e: any) {
+        failed++;
+        toast.error(`${job.name}: ${e?.response?.data?.detail || 'error al crear'}`);
+      }
+    }
+    setWizConnecting(false);
+    if (created > 0) {
+      toast.success(`${created} canal${created > 1 ? 'es' : ''} conectado${created > 1 ? 's' : ''}`);
+      setWizardOpen(false);
+      await load();
+    } else if (failed === 0) {
+      toast.info('No seleccionaste ningún activo');
+    }
+  };
+
   if (loading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress sx={{ color: '#E8A020' }} /></Box>;
   }
@@ -158,9 +267,14 @@ const Connections = () => {
             WhatsApp, Instagram y Messenger conectados a tu CRM
           </Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
-          Agregar canal
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button variant="outlined" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
+            Carga manual
+          </Button>
+          <Button variant="contained" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
+            Conectar con Meta
+          </Button>
+        </Stack>
       </Stack>
 
       {/* Webhook panel */}
@@ -198,7 +312,7 @@ const Connections = () => {
       {channels.length === 0 ? (
         <Paper sx={{ p: 4, textAlign: 'center', borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
           <Typography sx={{ color: 'rgba(255,255,255,0.4)', mb: 2 }}>No hay canales configurados</Typography>
-          <Button variant="outlined" onClick={openCreate}>Agregar primer canal</Button>
+          <Button variant="contained" startIcon={<BoltIcon />} onClick={openWizard}>Conectar con Meta</Button>
         </Paper>
       ) : (
         <Stack spacing={1.5}>
@@ -278,6 +392,130 @@ const Connections = () => {
           })}
         </Stack>
       )}
+
+      {/* Wizard "Conectar con Meta" */}
+      <Dialog open={wizardOpen} onClose={() => !wizConnecting && setWizardOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700 }}>
+          Conectar con Meta
+        </DialogTitle>
+        <DialogContent>
+          {!wizAssets ? (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              <Typography sx={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.55)' }}>
+                Pegá un access token de Meta (ideal: token de usuario del sistema, no vence) y detectamos
+                automáticamente todos tus números de WhatsApp, cuentas de Instagram y páginas de Facebook.
+                Sin buscar IDs a mano.
+              </Typography>
+              <TextField
+                size="small" fullWidth autoFocus
+                label="Access Token de Meta"
+                type={wizShowToken ? 'text' : 'password'}
+                value={wizToken}
+                onChange={e => setWizToken(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') wizDiscover(); }}
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton size="small" onClick={() => setWizShowToken(!wizShowToken)}>
+                        {wizShowToken ? <VisibilityOff sx={{ fontSize: 16 }} /> : <Visibility sx={{ fontSize: 16 }} />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
+                helperText="Business Manager → Configuración del negocio → Usuarios del sistema → Generar token"
+              />
+            </Stack>
+          ) : (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip
+                  size="small"
+                  icon={<CheckIcon sx={{ fontSize: '13px !important' }} />}
+                  label={`Token válido (${wizAssets.token_info.type === 'SYSTEM_USER' ? 'usuario del sistema' : wizAssets.token_info.type.toLowerCase()})`}
+                  sx={{ backgroundColor: 'rgba(52,211,153,0.12)', color: '#34D399', fontWeight: 600 }}
+                />
+                <Chip
+                  size="small"
+                  label={wizAssets.token_info.never_expires ? 'No vence' : `Vence: ${new Date(wizAssets.token_info.expires_at * 1000).toLocaleDateString()}`}
+                  sx={{
+                    backgroundColor: wizAssets.token_info.never_expires ? 'rgba(255,255,255,0.06)' : 'rgba(232,160,32,0.12)',
+                    color: wizAssets.token_info.never_expires ? 'rgba(255,255,255,0.5)' : '#E8A020',
+                  }}
+                />
+              </Stack>
+
+              {wizAssets.warnings.map((w, i) => (
+                <Alert key={i} severity="warning" sx={{ py: 0, fontSize: '0.78rem' }}>{w}</Alert>
+              ))}
+
+              {([
+                { type: 'whatsapp', title: 'WhatsApp', items: wizAssets.whatsapp.map(w => ({ id: w.id, primary: w.verified_name || w.display_phone_number, secondary: `${w.display_phone_number} · ${w.waba_name}`, already: w.already_connected })) },
+                { type: 'instagram', title: 'Instagram', items: wizAssets.instagram.map(i2 => ({ id: i2.id, primary: `@${i2.username}`, secondary: `Página: ${i2.page_name}`, already: i2.already_connected })) },
+                { type: 'messenger', title: 'Messenger', items: wizAssets.messenger.map(p => ({ id: p.id, primary: p.name, secondary: `Página ${p.id}`, already: p.already_connected })) },
+              ] as const).map(group => group.items.length > 0 && (
+                <Box key={group.type}>
+                  <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: CHANNEL_META[group.type].color, textTransform: 'uppercase', letterSpacing: 0.5, mb: 0.5 }}>
+                    {group.title}
+                  </Typography>
+                  <Stack spacing={0.5}>
+                    {group.items.map(item => {
+                      const key = `${group.type}:${item.id}`;
+                      return (
+                        <Paper
+                          key={key}
+                          onClick={() => !item.already && wizToggle(key)}
+                          sx={{
+                            p: 1, px: 1.5, borderRadius: '8px', display: 'flex', alignItems: 'center',
+                            cursor: item.already ? 'default' : 'pointer',
+                            background: 'rgba(255,255,255,0.02)',
+                            border: `1px solid ${wizSelected.has(key) ? `${CHANNEL_META[group.type].color}55` : 'rgba(255,255,255,0.06)'}`,
+                            opacity: item.already ? 0.55 : 1,
+                            transition: 'border-color 150ms ease',
+                          }}
+                        >
+                          <Checkbox size="small" checked={wizSelected.has(key)} disabled={item.already} sx={{ p: 0.5, mr: 1 }} />
+                          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                            <Typography sx={{ fontSize: '0.85rem', fontWeight: 600, color: '#E8EBF2' }}>{item.primary}</Typography>
+                            <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.35)', fontFamily: '"JetBrains Mono", monospace' }} noWrap>
+                              {item.secondary}
+                            </Typography>
+                          </Box>
+                          {item.already && (
+                            <Chip size="small" label="Ya conectado" sx={{ height: 20, fontSize: '0.62rem', backgroundColor: 'rgba(52,211,153,0.12)', color: '#34D399' }} />
+                          )}
+                        </Paper>
+                      );
+                    })}
+                  </Stack>
+                </Box>
+              ))}
+
+              {wizAssets.whatsapp.length + wizAssets.instagram.length + wizAssets.messenger.length === 0 && (
+                <Alert severity="info" sx={{ fontSize: '0.8rem' }}>
+                  El token es válido pero no da acceso a ningún activo. Revisá que el usuario del sistema tenga activos asignados en Business Manager.
+                </Alert>
+              )}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setWizardOpen(false)} disabled={wizConnecting}>Cancelar</Button>
+          {wizAssets && (
+            <Button onClick={() => { setWizAssets(null); setWizSelected(new Set()); }} disabled={wizConnecting}>
+              Cambiar token
+            </Button>
+          )}
+          {!wizAssets ? (
+            <Button variant="contained" onClick={wizDiscover} disabled={wizDiscovering || !wizToken.trim()}>
+              {wizDiscovering ? <CircularProgress size={18} /> : 'Detectar activos'}
+            </Button>
+          ) : (
+            <Button variant="contained" onClick={wizConnect} disabled={wizConnecting || wizSelected.size === 0}>
+              {wizConnecting ? <CircularProgress size={18} /> : `Conectar ${wizSelected.size || ''}`}
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
 
       {/* Create/Edit Dialog */}
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>

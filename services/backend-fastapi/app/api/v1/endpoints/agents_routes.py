@@ -177,65 +177,53 @@ class AgentTestChatRequest(BaseModel):
 
 
 @router.post("/agents/test-chat")
-def agent_test_chat(
+async def agent_test_chat(
     body: AgentTestChatRequest,
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
 ):
     """Preview how the active agent replies, without touching contacts,
-    messages, WhatsApp, or traces. Lets non-technical users validate their
-    persona/config before going live."""
+    messages, WhatsApp, or traces. Runs the SAME orchestrator pipeline as
+    production (intents, slots, Tokko search, geo, guardrails) in dry_run
+    mode, so what the user tests here is exactly what clients get."""
     company_id = payload.get("companyId")
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message es requerido")
 
-    from app.services.knowledge_base import get_ai_agent_config
-    from app.services.rag_service import get_kb_context_for_prompt
     from app.core.config import settings as app_settings
-
-    cfg = get_ai_agent_config(company_id)
-
-    kb_text = ""
-    try:
-        kb_text, _cits = get_kb_context_for_prompt(query=message, company_id=company_id, max_chars=2500, top_k=4)
-    except Exception:
-        pass
-
-    persona = (cfg.get("persona") or "Sos un asistente comercial. Respondé claro y breve.").strip()
-    system_prompt = persona
-    if kb_text:
-        system_prompt += f"\n\nCONTEXTO DE LA BASE DE CONOCIMIENTO:\n{kb_text}"
-
-    msgs = [{"role": "system", "content": system_prompt}]
-    for h in (body.history or [])[-10:]:
-        role = "assistant" if h.get("fromMe") else "user"
-        content = str(h.get("body") or "").strip()
-        if content:
-            msgs.append({"role": role, "content": content})
-    msgs.append({"role": "user", "content": message})
-
     if not app_settings.openai_api_key:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY no configurada en el servidor")
 
+    from app.services.conversation_orchestrator import orchestrate_reply
+    from app.services.knowledge_base import get_ai_agent_config
+
+    history = [
+        {"fromMe": bool(h.get("fromMe")), "body": str(h.get("body") or "").strip()}
+        for h in (body.history or [])[-10:]
+        if str(h.get("body") or "").strip()
+    ]
+
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=app_settings.openai_api_key)
-        resp = client.chat.completions.create(
-            model=cfg.get("model") or "gpt-4o-mini",
-            messages=msgs,
-            max_tokens=int(cfg.get("max_tokens") or 600),
-            temperature=float(cfg.get("temperature") or 0.3),
+        result = await orchestrate_reply(
+            text=message,
+            conversation_history=history,
+            company_id=company_id,
+            dry_run=True,
         )
-        reply = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Error del modelo: {str(e)[:200]}")
 
+    cfg = get_ai_agent_config(company_id)
     return {
-        "reply": reply,
-        "model": cfg.get("model") or "gpt-4o-mini",
+        "reply": (result.get("reply") or "").strip(),
+        "model": result.get("model") or cfg.get("model") or "gpt-4o-mini",
         "agentName": cfg.get("name") or "",
-        "usedKb": bool(kb_text),
+        "usedKb": bool(result.get("citations")),
+        "toolCalls": [
+            {"tool": t.get("tool"), "success": t.get("success")}
+            for t in (result.get("tool_calls") or [])
+        ],
     }
 
 

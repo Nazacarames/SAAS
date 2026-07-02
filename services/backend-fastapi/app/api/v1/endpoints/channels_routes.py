@@ -258,6 +258,120 @@ def delete_channel(
     return {"ok": True}
 
 
+class DiscoverRequest(BaseModel):
+    access_token: str
+
+
+GRAPH = "https://graph.facebook.com/v21.0"
+
+
+@router.post("/discover")
+async def discover_assets(
+    body: DiscoverRequest,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Assisted connection: given ONE Meta token, enumerate every connectable
+    asset (WhatsApp phone numbers, Instagram accounts, Facebook pages) so the
+    user picks from a list instead of hunting IDs in Meta Developers."""
+    require_admin(payload)
+    token = body.access_token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="access_token es requerido")
+
+    warnings: list[str] = []
+    async with httpx.AsyncClient(timeout=15) as client:
+        # 1. Validate the token
+        try:
+            resp = await client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
+            dbg = resp.json().get("data", {}) if resp.status_code == 200 else {}
+        except Exception as e:
+            return {"ok": False, "error": f"No se pudo contactar a Meta: {str(e)[:120]}"}
+        if not dbg.get("is_valid"):
+            err = (resp.json().get("error") or {}).get("message") or "Token inválido o vencido"
+            return {"ok": False, "error": err}
+
+        expires_at = dbg.get("expires_at") or 0
+        token_info = {
+            "type": dbg.get("type") or "",
+            "expires_at": expires_at,  # 0 = never (system user)
+            "never_expires": expires_at == 0,
+            "app_id": dbg.get("app_id") or "",
+        }
+
+        # 2. Pages (Messenger) + linked Instagram accounts + per-page tokens
+        pages, instagram = [], []
+        try:
+            resp = await client.get(
+                f"{GRAPH}/me/accounts",
+                params={"access_token": token, "limit": 100,
+                        "fields": "id,name,access_token,instagram_business_account{id,username}"},
+            )
+            for p in (resp.json().get("data") or []) if resp.status_code == 200 else []:
+                pages.append({"id": p["id"], "name": p.get("name") or "", "access_token": p.get("access_token") or ""})
+                ig = p.get("instagram_business_account")
+                if ig:
+                    instagram.append({
+                        "id": ig["id"], "username": ig.get("username") or "",
+                        "page_name": p.get("name") or "", "access_token": p.get("access_token") or "",
+                    })
+            if resp.status_code != 200:
+                warnings.append("No se pudieron listar páginas de Facebook")
+        except Exception:
+            warnings.append("No se pudieron listar páginas de Facebook")
+
+        # 3. WhatsApp numbers: page → business → owned WABAs → phone_numbers
+        whatsapp = []
+        seen_biz, seen_phone = set(), set()
+        for p in pages:
+            try:
+                resp = await client.get(f"{GRAPH}/{p['id']}", params={"access_token": token, "fields": "business"})
+                biz = (resp.json().get("business") or {}).get("id") if resp.status_code == 200 else None
+                if not biz or biz in seen_biz:
+                    continue
+                seen_biz.add(biz)
+                resp = await client.get(
+                    f"{GRAPH}/{biz}/owned_whatsapp_business_accounts",
+                    params={"access_token": token, "limit": 50, "fields": "id,name"},
+                )
+                for waba in (resp.json().get("data") or []) if resp.status_code == 200 else []:
+                    resp2 = await client.get(
+                        f"{GRAPH}/{waba['id']}/phone_numbers",
+                        params={"access_token": token,
+                                "fields": "id,display_phone_number,verified_name,quality_rating"},
+                    )
+                    for num in (resp2.json().get("data") or []) if resp2.status_code == 200 else []:
+                        if num["id"] in seen_phone:
+                            continue
+                        seen_phone.add(num["id"])
+                        whatsapp.append({
+                            "id": num["id"],
+                            "display_phone_number": num.get("display_phone_number") or "",
+                            "verified_name": num.get("verified_name") or "",
+                            "quality_rating": num.get("quality_rating") or "",
+                            "waba_name": waba.get("name") or "",
+                        })
+            except Exception:
+                continue
+        if pages and not whatsapp:
+            warnings.append("El token no da acceso a números de WhatsApp (revisá permisos whatsapp_business_management)")
+
+    # 4. Flag assets already registered as channels
+    existing = {
+        (r["channel_type"], r["external_id"])
+        for r in db.execute(text("SELECT channel_type, external_id FROM channels WHERE status = 'active'")).mappings()
+    }
+    for w in whatsapp:
+        w["already_connected"] = ("whatsapp", w["id"]) in existing
+    for ig in instagram:
+        ig["already_connected"] = ("instagram", ig["id"]) in existing
+    for p in pages:
+        p["already_connected"] = ("messenger", p["id"]) in existing
+
+    return {"ok": True, "token_info": token_info, "whatsapp": whatsapp,
+            "instagram": instagram, "messenger": pages, "warnings": warnings}
+
+
 @router.post("/{channel_id}/test")
 async def test_channel(
     channel_id: int,

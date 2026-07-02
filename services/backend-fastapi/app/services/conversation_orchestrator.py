@@ -917,10 +917,20 @@ async def execute_tool(
     tool_args: dict,
     company_id: int = None,
     db: Session = None,
+    dry_run: bool = False,
 ) -> dict:
-    """Execute a tool and return results."""
+    """Execute a tool and return results. With dry_run=True, write-tools
+    (upsert_contact, agendar_cita) return a simulated success without touching
+    the DB; read-tools run normally."""
     if company_id is None or int(company_id) <= 0:
         raise ValueError("company_id is required (multi-tenant safety)")
+
+    if dry_run and tool_name == "upsert_contact":
+        return {"ok": True, "dry_run": True, "contact_id": 0,
+                "detail": "simulado (test chat): no se guardó el contacto"}
+    if dry_run and tool_name == "agendar_cita":
+        return {"ok": True, "dry_run": True, "appointment_id": 0,
+                "detail": "simulado (test chat): no se agendó la cita"}
 
     if tool_name == "search_properties":
         # Check if company is a real estate company (inmobiliaria)
@@ -1344,12 +1354,16 @@ class ConversationOrchestrator:
         conversation_state: str = "new",
         previous_slots: dict = None,
         phone_number: str = "",
+        dry_run: bool = False,
     ):
         if company_id is None or int(company_id) <= 0:
             raise ValueError("company_id is required (multi-tenant safety)")
         self.company_id = company_id
         self.conversation_id = conversation_id
         self.contact_id = contact_id
+        # dry_run: run the FULL pipeline (intents, slots, tools, guardrails) but
+        # persist nothing — used by the panel's test chat so preview == production.
+        self.dry_run = bool(dry_run)
         self.phone_number = phone_number or ''
         # Coerce to string (API may pass dict/None from old clients)
         if not isinstance(conversation_state, str) or not conversation_state:
@@ -1806,6 +1820,7 @@ class ConversationOrchestrator:
                         tool_args=function_args,
                         company_id=self.company_id,
                         db=db,
+                        dry_run=self.dry_run,
                     )
 
                     self.tool_calls.append({
@@ -1938,6 +1953,7 @@ class ConversationOrchestrator:
                     tool_args=forced_args,
                     company_id=self.company_id,
                     db=db,
+                    dry_run=self.dry_run,
                 )
                 self.tool_calls.append({
                     "tool": "search_properties",
@@ -2353,6 +2369,8 @@ BASE DE CONOCIMIENTO:
         db: Session,
     ) -> None:
         """Persist turn traces to ai_turns, ai_tool_calls, ai_conversations."""
+        if self.dry_run:
+            return  # test chat: full pipeline, zero persistence
         latency_ms = round(time_module.time() * 1000 - self._turn_start_ms, 1)
         tokens_in = len(json.dumps({"text": user_text, "history": conversation_history[-10:]})) // 4
         tokens_out = len(reply) // 4
@@ -2626,6 +2644,7 @@ async def orchestrate_reply(
     conversation_state: str = "new",
     previous_slots: dict = None,
     phone_number: str = "",
+    dry_run: bool = False,
 ) -> dict:
     """
     Convenience function that wraps ConversationOrchestrator.
@@ -2640,6 +2659,7 @@ async def orchestrate_reply(
         conversation_state=conversation_state,
         previous_slots=previous_slots or {},
         phone_number=phone_number,
+        dry_run=dry_run,
     )
     try:
         return await orchestrator.orchestrate(text=text, conversation_history=conversation_history)
