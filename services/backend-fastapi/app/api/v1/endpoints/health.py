@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+from app.services.crypto import decrypt
 
 router = APIRouter()
 log = logging.getLogger("app.health")
@@ -62,7 +63,7 @@ def check_whatsapp_tokens(db: Session = Depends(get_db)):
         except Exception:
             cfg = {}
 
-        token = r.get("mc_token") or cfg.get("waCloudAccessToken") or ""
+        token = decrypt(r.get("mc_token")) or cfg.get("waCloudAccessToken") or ""
         external_id = r["external_id"]
         ctype = r["channel_type"]
 

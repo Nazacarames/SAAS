@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # MercadoPago
     mp_access_token: str = ""
     mp_webhook_secret: str = ""
+    encryption_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

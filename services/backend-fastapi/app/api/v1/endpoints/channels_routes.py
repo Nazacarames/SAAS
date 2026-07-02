@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user_payload, require_admin
 from app.core.db import get_db
+from app.services.crypto import decrypt, encrypt
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 log = logging.getLogger("app.channels.routes")
@@ -129,7 +130,7 @@ def create_channel(
             ),
             {
                 "cid": company_id,
-                "token": body.access_token.strip(),
+                "token": encrypt(body.access_token.strip()),
                 "phone": body.external_id.strip() if body.channel_type == "whatsapp" else "",
                 "page": body.external_id.strip() if body.channel_type in ("messenger", "instagram") else "",
             },
@@ -202,7 +203,7 @@ def update_channel(
         if mc_id:
             db.execute(
                 text("UPDATE meta_connections SET access_token = :token, updated_at = NOW() WHERE id = :mcid"),
-                {"token": body.access_token.strip(), "mcid": mc_id},
+                {"token": encrypt(body.access_token.strip()), "mcid": mc_id},
             )
         else:
             result = db.execute(
@@ -212,7 +213,7 @@ def update_channel(
                 ),
                 {
                     "cid": company_id,
-                    "token": body.access_token.strip(),
+                    "token": encrypt(body.access_token.strip()),
                     "phone": ch["external_id"] if ch["channel_type"] == "whatsapp" else "",
                     "page": ch["external_id"] if ch["channel_type"] in ("messenger", "instagram") else "",
                 },
@@ -277,7 +278,7 @@ async def test_channel(
         raise HTTPException(status_code=404, detail="Canal no encontrado")
 
     cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else {}
-    token = ch.get("mc_token") or cfg.get("waCloudAccessToken") or ""
+    token = decrypt(ch.get("mc_token")) or cfg.get("waCloudAccessToken") or ""
     external_id = ch["external_id"]
 
     if not token:
@@ -335,7 +336,7 @@ async def channels_health(
             cfg = json.loads(r["config_json"]) if isinstance(r["config_json"], str) else (r["config_json"] or {})
         except Exception:
             cfg = {}
-        token = r.get("mc_token") or cfg.get("waCloudAccessToken") or ""
+        token = decrypt(r.get("mc_token")) or cfg.get("waCloudAccessToken") or ""
         external_id = r["external_id"]
         ctype = r["channel_type"]
         base = {"companyId": r["company_id"], "name": r["name"], "channel_type": ctype, "external_id": external_id}

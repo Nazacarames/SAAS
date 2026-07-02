@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from app.services.crypto import decrypt
 from typing import Optional
 
 from sqlalchemy import text
@@ -68,7 +69,7 @@ def resolve_channel_by_id(db: Session, channel_id: int) -> Optional[dict]:
 
 def get_send_config(channel: dict) -> dict:
     cfg = channel.get("_config", {})
-    token = channel.get("mc_token") or cfg.get("waCloudAccessToken") or ""
+    token = decrypt(channel.get("mc_token")) or cfg.get("waCloudAccessToken") or ""
     return {
         "phoneId": channel["external_id"],
         "external_id": channel["external_id"],

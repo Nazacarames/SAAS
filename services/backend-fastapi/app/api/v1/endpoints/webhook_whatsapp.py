@@ -28,6 +28,7 @@ from app.services.channels.whatsapp import (
     get_whatsapp_config as _channel_get_wa_cfg,
 )
 from app.services.billing_service import increment_usage, check_conversation_limit, check_subscription_active
+from app.services.crypto import decrypt
 
 router = APIRouter(prefix="/whatsapp-cloud", tags=["whatsapp-webhook"])
 
@@ -214,7 +215,7 @@ def get_whatsapp_config(db: Session, company_id: int, phone_number_id: str = Non
             {"cid": company_id, "pid": phone_number_id},
         ).mappings().first()
         if ch:
-            return {"phoneId": ch["external_id"], "token": ch["access_token"]}
+            return {"phoneId": ch["external_id"], "token": decrypt(ch["access_token"])}
 
     ch = db.execute(
         text("SELECT c.external_id, mc.access_token FROM channels c "
@@ -224,7 +225,7 @@ def get_whatsapp_config(db: Session, company_id: int, phone_number_id: str = Non
         {"cid": company_id},
     ).mappings().first()
     if ch and ch["external_id"] and ch["access_token"]:
-        return {"phoneId": ch["external_id"], "token": ch["access_token"]}
+        return {"phoneId": ch["external_id"], "token": decrypt(ch["access_token"])}
 
     # 2) Legacy fallback: company_runtime_settings blob
     row = db.execute(
