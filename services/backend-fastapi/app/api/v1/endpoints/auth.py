@@ -23,6 +23,18 @@ from app.schemas.auth import (
     RegisterRequest,
     RegisterResponse,
     ResetPasswordRequest,
+    TwoFactorVerifyRequest,
+    TwoFactorCodeRequest,
+    TwoFactorSetupResponse,
+    TwoFactorStatusResponse,
+)
+from app.services.crypto import encrypt, decrypt
+from app.services.two_factor import (
+    generate_secret,
+    provisioning_uri,
+    verify_code,
+    create_mfa_token,
+    decode_mfa_token,
 )
 from app.services.auth_service import (
     create_access_token,
@@ -101,6 +113,15 @@ def login(
     if not user or not verify_password(body.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
+    # If the user has 2FA enabled, don't issue the session token yet — return a
+    # short-lived mfa_token that the client exchanges via /auth/2fa/verify.
+    tf = db.execute(
+        text("SELECT totp_enabled FROM users WHERE id = :id LIMIT 1"),
+        {"id": user["id"]},
+    ).mappings().first()
+    if tf and tf["totp_enabled"]:
+        return {"requires_2fa": True, "mfa_token": create_mfa_token(user["id"])}
+
     access = create_access_token(dict(user))
     refresh = create_refresh_token(dict(user))
     store_refresh_token(db, refresh, user["id"])
@@ -117,6 +138,104 @@ def login(
         },
         "token": access,
     }
+
+
+# ── POST /api/auth/2fa/verify ────────────────────────────────────
+@router.post("/2fa/verify", response_model=LoginResponse)
+def two_factor_verify(
+    body: TwoFactorVerifyRequest,
+    response: Response,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not check_rate_limit(db, f"2fa:{client_ip(request)}", 10, 900):
+        raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
+    user_id = decode_mfa_token(body.mfa_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Sesión de verificación expirada. Inicá sesión de nuevo.")
+
+    row = db.execute(
+        text('SELECT id, name, email, profile, "companyId", totp_secret, totp_enabled FROM users WHERE id = :id LIMIT 1'),
+        {"id": user_id},
+    ).mappings().first()
+    if not row or not row["totp_enabled"]:
+        raise HTTPException(status_code=401, detail="2FA no está activo")
+    if not verify_code(decrypt(row["totp_secret"]), body.code):
+        raise HTTPException(status_code=401, detail="Código inválido")
+
+    user = dict(row)
+    access = create_access_token(user)
+    refresh = create_refresh_token(user)
+    store_refresh_token(db, refresh, user["id"])
+    _set_auth_cookies(response, access, refresh)
+    return {
+        "user": {"id": user["id"], "name": user["name"], "email": user["email"],
+                 "profile": user["profile"], "companyId": user["companyId"]},
+        "token": access,
+    }
+
+
+# ── 2FA management (authenticated) ───────────────────────────────
+@router.get("/2fa/status", response_model=TwoFactorStatusResponse)
+def two_factor_status(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    row = db.execute(text("SELECT totp_enabled FROM users WHERE id = :id"), {"id": payload.get("id")}).mappings().first()
+    return {"enabled": bool(row and row["totp_enabled"])}
+
+
+@router.post("/2fa/setup", response_model=TwoFactorSetupResponse)
+def two_factor_setup(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    uid = payload.get("id")
+    row = db.execute(text('SELECT email FROM users WHERE id = :id'), {"id": uid}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    secret = generate_secret()
+    # Store (encrypted) but not yet enabled — user must confirm a code via /2fa/enable
+    db.execute(
+        text("UPDATE users SET totp_secret = :s, totp_enabled = false, \"updatedAt\" = NOW() WHERE id = :id"),
+        {"s": encrypt(secret), "id": uid},
+    )
+    db.commit()
+    return {"ok": True, "otpauth_uri": provisioning_uri(secret, row["email"]), "secret": secret}
+
+
+@router.post("/2fa/enable", response_model=GenericOkResponse)
+def two_factor_enable(
+    body: TwoFactorCodeRequest,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    uid = payload.get("id")
+    row = db.execute(text("SELECT totp_secret FROM users WHERE id = :id"), {"id": uid}).mappings().first()
+    if not row or not row["totp_secret"]:
+        raise HTTPException(status_code=400, detail="Primero generá el código QR (setup)")
+    if not verify_code(decrypt(row["totp_secret"]), body.code):
+        raise HTTPException(status_code=400, detail="Código inválido. Revisá la app.")
+    db.execute(text("UPDATE users SET totp_enabled = true, \"updatedAt\" = NOW() WHERE id = :id"), {"id": uid})
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/2fa/disable", response_model=GenericOkResponse)
+def two_factor_disable(
+    body: TwoFactorCodeRequest,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    uid = payload.get("id")
+    row = db.execute(text("SELECT totp_secret, totp_enabled FROM users WHERE id = :id"), {"id": uid}).mappings().first()
+    if not row or not row["totp_enabled"]:
+        return {"ok": True}
+    if not verify_code(decrypt(row["totp_secret"]), body.code):
+        raise HTTPException(status_code=400, detail="Código inválido")
+    db.execute(text("UPDATE users SET totp_enabled = false, totp_secret = NULL, \"updatedAt\" = NOW() WHERE id = :id"), {"id": uid})
+    db.commit()
+    return {"ok": True}
 
 
 # ── POST /api/auth/refresh ───────────────────────────────────────

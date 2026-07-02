@@ -19,8 +19,31 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    user: UserOut
-    token: str
+    # When 2FA is enabled, user/token are omitted and requires_2fa + mfa_token are returned;
+    # the client then calls /auth/2fa/verify with the TOTP code to obtain the session token.
+    user: UserOut | None = None
+    token: str | None = None
+    requires_2fa: bool = False
+    mfa_token: str | None = None
+
+
+class TwoFactorVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class TwoFactorCodeRequest(BaseModel):
+    code: str
+
+
+class TwoFactorSetupResponse(BaseModel):
+    ok: bool = True
+    otpauth_uri: str
+    secret: str
+
+
+class TwoFactorStatusResponse(BaseModel):
+    enabled: bool
 
 
 class RefreshRequest(BaseModel):
