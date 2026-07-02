@@ -10,6 +10,18 @@ from app.core.db import get_db
 
 # ==================== AI AGENT CONFIG ====================
 
+def _safe_json(raw, default):
+    """Parse a JSON column defensively: bad JSON in one field must not
+    nuke the whole agent config back to defaults."""
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, type(default)) else default
+    except Exception:
+        return default
+
+
 def get_ai_agent_config(company_id: int = None) -> Dict:
     if company_id is None or int(company_id) <= 0:
         raise ValueError("company_id is required (multi-tenant safety)")
@@ -50,16 +62,17 @@ def get_ai_agent_config(company_id: int = None) -> Dict:
             "name": row["name"] or "Asesor Virtual",
             "persona": row["persona"] or "",
             "model": row["model"] or "gpt-4o-mini",
-            "temperature": float(row["temperature"]) if row["temperature"] else 0.3,
+            "temperature": float(row["temperature"]) if row["temperature"] is not None else 0.3,
             "max_tokens": row["max_tokens"] or 600,
             "welcome_msg": row["welcome_msg"] or "",
             "offhours_msg": row["offhours_msg"] or "",
             "farewell_msg": row["farewell_msg"] or "",
-            "business_hours": json.loads(row["business_hours_json"]) if row["business_hours_json"] else {},
-            "funnel_stages": json.loads(row["funnel_stages_json"]) if row["funnel_stages_json"] else [],
+            "business_hours": _safe_json(row["business_hours_json"], {}),
+            "funnel_stages": _safe_json(row["funnel_stages_json"], []),
             "base_model": row["base_model"] or "gpt-4o-mini",
             "ft_system_prompt": row["ft_system_prompt"] or "",
             "search_wait_msg": _ai_cfg.get("search_wait_msg", ""),
+            "rent_requirements_msg": _ai_cfg.get("rent_requirements_msg", ""),
             "country": (row.get("country") or "AR"),
             "zone_keywords": (row.get("zone_keywords") or []),
             "budget_floor_rent": row.get("budget_floor_rent"),

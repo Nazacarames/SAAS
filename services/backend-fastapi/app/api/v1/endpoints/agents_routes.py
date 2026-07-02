@@ -174,6 +174,10 @@ def delete_agent(
 class AgentTestChatRequest(BaseModel):
     message: str
     history: list[dict[str, Any]] = []
+    # Round-trip: el frontend reenvía lo que devolvió el turno anterior para
+    # que los slots persistan entre mensajes, igual que en producción.
+    slots: dict[str, Any] = {}
+    conversationState: str = "new"
 
 
 @router.post("/agents/test-chat")
@@ -209,6 +213,8 @@ async def agent_test_chat(
             text=message,
             conversation_history=history,
             company_id=company_id,
+            conversation_state=body.conversationState or "new",
+            previous_slots=body.slots or {},
             dry_run=True,
         )
     except Exception as e:
@@ -224,6 +230,8 @@ async def agent_test_chat(
             {"tool": t.get("tool"), "success": t.get("success")}
             for t in (result.get("tool_calls") or [])
         ],
+        "slots": result.get("slots") or {},
+        "conversationState": result.get("conversation_state") or "new",
     }
 
 

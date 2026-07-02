@@ -20,7 +20,7 @@ def get_openai_client() -> Optional[OpenAI]:
     if not settings.openai_api_key:
         return None
     try:
-        return OpenAI(api_key=settings.openai_api_key)
+        return OpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
     except Exception:
         return None
 

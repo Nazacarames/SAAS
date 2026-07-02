@@ -87,10 +87,13 @@ const AIAgents = () => {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
 
-  // Test chat
+  // Test chat — slots/state round-trip para que el multi-turno se comporte
+  // igual que producción (los slots persisten entre mensajes)
   const [testMessages, setTestMessages] = useState<TestMsg[]>([]);
   const [testInput, setTestInput] = useState('');
   const [testSending, setTestSending] = useState(false);
+  const [testSlots, setTestSlots] = useState<any>({});
+  const [testState, setTestState] = useState('new');
   const testEndRef = useRef<HTMLDivElement | null>(null);
 
   const fetchAgents = async () => {
@@ -174,18 +177,18 @@ const AIAgents = () => {
       const payload = {
         name,
         persona,
-        language: 'es',
-        model: 'gpt-4o-mini',
         welcomeMsg,
         offhoursMsg,
         farewellMsg,
         businessHoursJson: buildBusinessHoursJson()
       };
       if (editingId) {
+        // Sin model/language: un PUT no debe pisar el modelo configurado
+        // (ej: fine-tuned ft:...) con el default.
         await api.put(`/ai/agents/${editingId}`, payload);
         toast.success('Agente IA actualizado');
       } else {
-        await api.post('/ai/agents', { ...payload, isActive: true });
+        await api.post('/ai/agents', { ...payload, language: 'es', model: 'gpt-4o-mini', isActive: true });
         toast.success('Agente IA guardado y activado');
       }
       resetForm();
@@ -250,8 +253,12 @@ const AIAgents = () => {
     const history = [...testMessages];
     setTestMessages((prev) => [...prev, { fromMe: false, body: msg }]);
     try {
-      const { data } = await api.post('/ai/agents/test-chat', { message: msg, history });
+      const { data } = await api.post('/ai/agents/test-chat', {
+        message: msg, history, slots: testSlots, conversationState: testState,
+      });
       setTestMessages((prev) => [...prev, { fromMe: true, body: data?.reply || '(sin respuesta)' }]);
+      if (data?.slots) setTestSlots(data.slots);
+      if (data?.conversationState) setTestState(data.conversationState);
     } catch (e: any) {
       const detail = e?.response?.data?.detail || 'Error al probar el agente';
       setTestMessages((prev) => [...prev, { fromMe: true, body: `⚠ ${detail}` }]);
@@ -378,7 +385,7 @@ const AIAgents = () => {
             <Stack direction='row' justifyContent='space-between' alignItems='center'>
               <Typography variant='h6'>Probar el agente</Typography>
               {testMessages.length > 0 && (
-                <Button size='small' onClick={() => setTestMessages([])}>Limpiar</Button>
+                <Button size='small' onClick={() => { setTestMessages([]); setTestSlots({}); setTestState('new'); }}>Limpiar</Button>
               )}
             </Stack>
             <Typography variant='caption' color='text.secondary'>

@@ -11,6 +11,7 @@ Handles the full conversation lifecycle:
 
 Main entry point: orchestrate()
 """
+import asyncio
 import json
 import re
 import time as time_module
@@ -79,7 +80,9 @@ def get_openai_client() -> Optional[OpenAI]:
     if not settings.openai_api_key:
         return None
     try:
-        return OpenAI(api_key=settings.openai_api_key)
+        # Explicit timeout: SDK default is ~10 min with 2 retries — a stuck
+        # OpenAI call would hold a WhatsApp webhook (and its worker) hostage.
+        return OpenAI(api_key=settings.openai_api_key, timeout=45.0, max_retries=1)
     except Exception:
         return None
 
@@ -1325,17 +1328,6 @@ def _strip_redundant_criteria_ask(reply_text: str, conversation_history: list) -
 
 # ==================== MAIN ORCHESTRATOR ====================
 
-DUNOD_COMPANY_ID = 7
-DUNOD_RENT_REQUIREMENTS = (
-    "Claro, te cuento los requisitos principales para alquilar con nosotros:\n"
-    "• Tener ingresos comprobables.\n"
-    "• Abonar el primer mes de alquiler y el depósito.\n"
-    "• Deberá ofrecer al menos dos de las siguientes categorías de garantías:\n"
-    "  a) Título de propiedad inmueble.\n"
-    "  b) Garantía de fianza; o fiador solidario (Locativa, Celsus).\n"
-    "  c) Garantía personal del locatario (ingresos). En caso de ser más de un locatario, pueden sumarse los ingresos de cada uno de ellos.\n\n"
-)
-
 
 class ConversationOrchestrator:
     """
@@ -1495,17 +1487,18 @@ class ConversationOrchestrator:
                 self.slots.pop('_results_cache', None)
                 self.slots.pop('_results_offset', None)
                 self.slots.pop('_results_exhausted', None)
-                self.slots.pop('_rent_req_sent', None)  # allow Dunod prepend to re-fire if sale→rent
+                self.slots.pop('_rent_req_sent', None)  # allow rent-requirements prepend to re-fire if sale→rent
                 self._op_flipped = True
                 print(f'[orchestrator] Operation flipped {_pre_operation}→{_post_op_now}: cleared budget+cache')
             else:
                 self._op_flipped = False
 
-            # Dunod rent requirements: first transition to operation='rent' → prepend requisitos
+            # Rent requirements (per-company config ai_config_json.rent_requirements_msg):
+            # first transition to operation='rent' → prepend requisitos
             # Skip prepend for intents that are not search-related
             _skip_prepend_intents = ('knowledge_query', 'contact_info', 'goodbye', 'schedule_appointment', 'not_interested')
             if (
-                self.company_id == DUNOD_COMPANY_ID
+                self.ai_config.get('rent_requirements_msg')
                 and self.slots.get('operation') == 'rent'
                 and _pre_operation != 'rent'
                 and not self.slots.get('_rent_req_sent')
@@ -1774,13 +1767,17 @@ class ConversationOrchestrator:
 
             _call_model = self._model
             try:
-                response = self.openai_client.chat.completions.create(
-                    model=_call_model,
-                    messages=messages,
-                    tools=_available_tools,
-                    tool_choice="auto",
-                    **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
-                    **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.3)),
+                # to_thread: the sync OpenAI client would otherwise block the
+                # uvicorn event loop for the whole multi-second LLM call.
+                response = await asyncio.to_thread(
+                    lambda: self.openai_client.chat.completions.create(
+                        model=_call_model,
+                        messages=messages,
+                        tools=_available_tools,
+                        tool_choice="auto",
+                        **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
+                        **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.3)),
+                    )
                 )
             except Exception as _ft_err:
                 _base = self.ai_config.get("base_model", "gpt-4o-mini")
@@ -1788,13 +1785,15 @@ class ConversationOrchestrator:
                     print(f"[orchestrator] FT model error ({type(_ft_err).__name__}), falling back to {_base}")
                     self._model = _base
                     self.is_fine_tuned = False
-                    response = self.openai_client.chat.completions.create(
-                        model=_base,
-                        messages=messages,
-                        tools=_available_tools,
-                        tool_choice="auto",
-                        **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
-                        **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.3)),
+                    response = await asyncio.to_thread(
+                        lambda: self.openai_client.chat.completions.create(
+                            model=_base,
+                            messages=messages,
+                            tools=_available_tools,
+                            tool_choice="auto",
+                            **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
+                            **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.3)),
+                        )
                     )
                 else:
                     raise
@@ -1893,11 +1892,13 @@ class ConversationOrchestrator:
                 if _all_search:
                     reply_text = ""  # let _force_property_results_reply render deterministically
                 else:
-                    response2 = self.openai_client.chat.completions.create(
-                        model=self._model,
-                        messages=messages,
-                        **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
-                        **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.7)),
+                    response2 = await asyncio.to_thread(
+                        lambda: self.openai_client.chat.completions.create(
+                            model=self._model,
+                            messages=messages,
+                            **_tokens_kwarg(self._model, self.ai_config.get("max_tokens", 1000)),
+                            **_temperature_kwarg(self._model, self.ai_config.get("temperature", 0.7)),
+                        )
                     )
                     reply_text = response2.choices[0].message.content or reply_text
 
@@ -1983,7 +1984,7 @@ class ConversationOrchestrator:
             # Apply guardrails
             reply_text = apply_guardrails(reply_text, conversation_history, self.intent)
 
-            # Prepend Dunod rent requirements on first rent-intent turn
+            # Prepend rent requirements on first rent-intent turn (per-company config)
             if getattr(self, '_rent_req_prepend', False):
                 # Soften LLM's typical "¡Genial!"/"¡Perfecto!" opener — redundant after requisitos
                 _rt = (reply_text or "").lstrip()
@@ -1991,7 +1992,8 @@ class ConversationOrchestrator:
                     _nxt = m.group(2) or ""
                     return "Ahora, " + (_nxt[:1].lower() + _nxt[1:] if _nxt else "")
                 _rt = re.sub(r'^(¡?\s*(?:Genial|Perfecto|Excelente|Buen[íi]simo|Dale|Ok)\s*!?\s*)(\S*)', _lower_next, _rt, count=1, flags=re.IGNORECASE)
-                reply_text = DUNOD_RENT_REQUIREMENTS + _rt
+                _req = self.ai_config.get('rent_requirements_msg', '').rstrip() + "\n\n"
+                reply_text = _req + _rt
 
             # Step 9: Fallback if empty
             if not reply_text or not reply_text.strip():
