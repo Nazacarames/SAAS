@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     frontend_url: str = "https://crm.lmtmas.com"
     # MercadoPago
     mp_access_token: str = ""
+    mp_webhook_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

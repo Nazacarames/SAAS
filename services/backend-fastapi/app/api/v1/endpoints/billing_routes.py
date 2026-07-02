@@ -293,6 +293,22 @@ async def mp_webhook(request: Request, db: Session = Depends(get_db)):
     if not mp_token:
         return {"ok": True}
 
+    # Validate MercadoPago webhook signature (x-signature: ts=..,v1=..) when a
+    # webhook secret is configured. Manifest: id:<data.id>;request-id:<x-req-id>;ts:<ts>;
+    mp_secret = getattr(settings, "mp_webhook_secret", "") or ""
+    if mp_secret:
+        import hmac as _hmac, hashlib as _hashlib
+        _sig_header = request.headers.get("x-signature", "")
+        _req_id = request.headers.get("x-request-id", "")
+        _parts = dict(p.split("=", 1) for p in _sig_header.split(",") if "=" in p)
+        _ts = _parts.get("ts", "").strip()
+        _v1 = _parts.get("v1", "").strip()
+        _data_id = str(request.query_params.get("data.id") or "")
+        _manifest = f"id:{_data_id};request-id:{_req_id};ts:{_ts};"
+        _expected = _hmac.new(mp_secret.encode(), _manifest.encode(), _hashlib.sha256).hexdigest()
+        if not (_v1 and _hmac.compare_digest(_expected, _v1)):
+            raise HTTPException(status_code=401, detail="Invalid MercadoPago signature")
+
     body = await request.json()
     log.info("MercadoPago webhook: %s", json.dumps(body)[:500])
 
