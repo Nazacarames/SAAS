@@ -687,8 +687,30 @@ async def meta_leads_webhook(
     db: Session = Depends(get_db),
 ):
     _ensure_meta_lead_tables(db)
+    # SECURITY: this legacy webhook path must reject unsigned/forged payloads.
+    # Validate the Meta HMAC signature against the per-company app secret (falling
+    # back to the global META_APP_SECRET) before processing anything.
+    from app.api.v1.endpoints.meta_webhook_routes import verify_meta_signature
+    _raw = await request.body()
+    _sig = request.headers.get("x-hub-signature-256", "")
+    _cid_for_sig = getattr(request.state, "company_id", None)
+    _app_secret = ""
+    if _cid_for_sig:
+        try:
+            _crs = db.execute(text("SELECT settings_json FROM company_runtime_settings WHERE company_id = :cid LIMIT 1"), {"cid": int(_cid_for_sig)}).mappings().first()
+            if _crs and _crs["settings_json"]:
+                _sj = _crs["settings_json"]
+                if isinstance(_sj, str):
+                    _sj = json.loads(_sj)
+                _app_secret = _sj.get("metaLeadAdsAppSecret") or _sj.get("waCloudAppSecret") or ""
+                if str(_app_secret).startswith(("EAA", "EAF")):
+                    _app_secret = ""
+        except Exception:
+            _app_secret = ""
+    if not verify_meta_signature(_raw, _sig, _app_secret):
+        raise HTTPException(status_code=401, detail="Invalid signature")
     try:
-        body = await request.json()
+        body = json.loads(_raw) if _raw else {}
     except Exception:
         body = {}
 

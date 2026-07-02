@@ -5,8 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-import threading
-import time
+
+from app.services.rate_limit import check_rate_limit, client_ip
 
 from app.api.deps import get_current_user_payload
 from app.core.config import settings
@@ -88,25 +88,6 @@ def me(
 
 
 # ── POST /api/auth/login ─────────────────────────────────────────
-# Login rate limiter: 10 attempts per 15 min per IP
-_login_buckets: dict[str, dict] = {}
-_login_buckets_lock = threading.Lock()
-_LOGIN_WINDOW_MS = 15 * 60 * 1000
-_LOGIN_MAX_PER_WINDOW = 10
-
-def _check_login_rate_limit(ip: str) -> bool:
-    now = int(time.time() * 1000)
-    with _login_buckets_lock:
-        bucket = _login_buckets.get(ip)
-        if bucket and bucket["resetAt"] > now and bucket["count"] >= _LOGIN_MAX_PER_WINDOW:
-            return False
-        if not bucket or bucket["resetAt"] <= now:
-            _login_buckets[ip] = {"count": 1, "resetAt": now + _LOGIN_WINDOW_MS}
-        else:
-            bucket["count"] += 1
-        return True
-
-
 @router.post("/login", response_model=LoginResponse)
 def login(
     body: LoginRequest,
@@ -114,9 +95,7 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    _xff = request.headers.get("x-forwarded-for", "")
-    _ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
-    if not _check_login_rate_limit(_ip):
+    if not check_rate_limit(db, f"login:{client_ip(request)}", 10, 900):
         raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
     user = get_user_by_email(db, body.email)
     if not user or not verify_password(body.password, user["passwordHash"]):
@@ -186,25 +165,6 @@ def logout(
 
 
 # ── POST /api/auth/register ──────────────────────────────────────
-# Rate limiter: 5 attempts per 15 minutes per IP (thread-safe)
-_register_buckets: dict[str, dict] = {}
-_register_buckets_lock = threading.Lock()
-_REGISTER_WINDOW_MS = 15 * 60 * 1000
-_REGISTER_MAX_PER_WINDOW = 5
-
-
-def _check_register_rate_limit(ip: str) -> bool:
-    """Returns True if request should be allowed, False if rate limited (thread-safe)."""
-    now = int(time.time() * 1000)
-    with _register_buckets_lock:
-        bucket = _register_buckets.get(ip)
-        if bucket and bucket["resetAt"] > now and bucket["count"] >= _REGISTER_MAX_PER_WINDOW:
-            return False
-        if not bucket or bucket["resetAt"] <= now:
-            _register_buckets[ip] = {"count": 1, "resetAt": now + _REGISTER_WINDOW_MS}
-        else:
-            bucket["count"] += 1
-        return True
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=201)
@@ -214,11 +174,8 @@ def register(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    # Rate limiting — use real client IP (X-Forwarded-For from nginx, fallback to direct)
-    _xff = request.headers.get("x-forwarded-for", "")
-    ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
-
-    if not _check_register_rate_limit(ip):
+    # Rate limiting — DB-backed, shared across workers
+    if not check_rate_limit(db, f"register:{client_ip(request)}", 5, 900):
         raise HTTPException(
             status_code=429,
             detail="Demasiados intentos de registro. Intente más tarde.",
@@ -271,34 +228,13 @@ def register(
 
 
 # ── POST /api/auth/forgot-password ───────────────────────────────
-_forgot_buckets: dict[str, dict] = {}
-_forgot_buckets_lock = threading.Lock()
-_FORGOT_WINDOW_MS = 15 * 60 * 1000
-_FORGOT_MAX_PER_WINDOW = 5
-
-
-def _check_forgot_rate_limit(ip: str) -> bool:
-    now = int(time.time() * 1000)
-    with _forgot_buckets_lock:
-        bucket = _forgot_buckets.get(ip)
-        if bucket and bucket["resetAt"] > now and bucket["count"] >= _FORGOT_MAX_PER_WINDOW:
-            return False
-        if not bucket or bucket["resetAt"] <= now:
-            _forgot_buckets[ip] = {"count": 1, "resetAt": now + _FORGOT_WINDOW_MS}
-        else:
-            bucket["count"] += 1
-        return True
-
-
 @router.post("/forgot-password", response_model=GenericOkResponse)
 def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    _xff = request.headers.get("x-forwarded-for", "")
-    ip = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "unknown")
-    if not _check_forgot_rate_limit(ip):
+    if not check_rate_limit(db, f"forgot:{client_ip(request)}", 5, 900):
         raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
 
     user = get_user_by_email(db, body.email.strip().lower())
@@ -324,8 +260,12 @@ def forgot_password(
 @router.post("/reset-password", response_model=GenericOkResponse)
 def reset_password(
     body: ResetPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    # Rate limit token-guessing attempts (defense in depth; token entropy is high already)
+    if not check_rate_limit(db, f"reset:{client_ip(request)}", 15, 900):
+        raise HTTPException(status_code=429, detail="Demasiados intentos. Intente más tarde.")
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
 
