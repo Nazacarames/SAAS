@@ -34,6 +34,11 @@ const processQueue = (error: any) => {
 api.interceptors.response.use(
     (response) => response,
     async (error) => {
+        // Suscripción vencida: el backend responde 402 en todo el panel salvo billing
+        if (error.response?.status === 402 && !window.location.pathname.startsWith('/billing')) {
+            window.location.href = '/billing?expired=1';
+            return Promise.reject(error);
+        }
         const originalRequest = error.config || {};
         const reqUrl = String(originalRequest?.url || "");
         const isAuthBootstrapCall = reqUrl.includes('/auth/me');

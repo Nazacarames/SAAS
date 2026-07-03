@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     mp_webhook_secret: str = ""
     encryption_key: str = ""
 
+    # ARCA (ex AFIP) facturación electrónica
+    arca_env: str = "homo"        # homo | prod
+    arca_cuit: str = ""
+    arca_cert_path: str = ""
+    arca_key_path: str = ""
+    arca_pto_vta: int = 1
+    arca_cbte_tipo: int = 11       # 11 = Factura C (monotributo)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

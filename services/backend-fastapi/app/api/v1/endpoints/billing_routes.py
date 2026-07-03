@@ -71,20 +71,41 @@ def _ensure_billing_tables(db: Session) -> None:
         )
     )
 
-    db.execute(
-        text(
-            """INSERT INTO billing_plans (code, name, monthly_price_usd, limits_json, features_json)
-            VALUES
-                ('starter', 'Starter', 29990, '{"conversations":1500,"users":2,"ai_replies":3000}', '["whatsapp","meta_leads"]'),
-                ('pro', 'Pro', 49990, '{"conversations":6000,"users":5,"ai_replies":15000}', '["whatsapp","meta_leads","ai_rag","advanced_reports","appointments"]'),
-                ('scale', 'Scale', 89990, '{"conversations":15000,"users":10,"ai_replies":50000}', '["whatsapp","meta_leads","ai_rag","advanced_reports","appointments","api_access"]')
-            ON CONFLICT (code) DO UPDATE SET
-                monthly_price_usd = EXCLUDED.monthly_price_usd,
-                limits_json = EXCLUDED.limits_json,
-                features_json = EXCLUDED.features_json,
-                updated_at = NOW()"""
+    # Prices in ARS (column name is legacy). 'setup' is a one-time install fee.
+    # JSON passed as bind params: literal {"x":1} inside text() would be
+    # parsed by SQLAlchemy as a :1 bind parameter.
+    _plans_seed = [
+        ("starter", "Starter", 45000,
+         {"conversations": 1500, "users": 2, "ai_replies": 3000, "channels": 1},
+         ["whatsapp", "meta_leads", "pipeline", "agenda"]),
+        ("pro", "Pro", 85000,
+         {"conversations": 6000, "users": 5, "ai_replies": 15000, "channels": 3},
+         ["whatsapp", "instagram", "messenger", "meta_leads", "ai_rag", "geo_search", "advanced_reports", "appointments"]),
+        ("agencia", "Agencia", 160000,
+         {"conversations": 15000, "users": 10, "ai_replies": 50000, "channels": 99},
+         ["whatsapp", "instagram", "messenger", "meta_leads", "ai_rag", "geo_search", "advanced_reports", "appointments", "api_access", "priority_support"]),
+        ("setup", "Instalación asistida", 120000,
+         {"one_time": True},
+         ["conexion_meta", "conexion_tokko", "entrenamiento_agente", "migracion_contactos", "capacitacion"]),
+    ]
+    for _code, _name, _price, _limits, _features in _plans_seed:
+        db.execute(
+            text(
+                """INSERT INTO billing_plans (code, name, monthly_price_usd, limits_json, features_json)
+                VALUES (:code, :name, :price, :limits, :features)
+                ON CONFLICT (code) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    monthly_price_usd = EXCLUDED.monthly_price_usd,
+                    limits_json = EXCLUDED.limits_json,
+                    features_json = EXCLUDED.features_json,
+                    updated_at = NOW()"""
+            ),
+            {"code": _code, "name": _name, "price": _price,
+             "limits": json.dumps(_limits), "features": json.dumps(_features)},
         )
-    )
+    # 'scale' replaced by 'agencia'
+    db.execute(text("UPDATE billing_plans SET active = false WHERE code = 'scale'"))
+    db.execute(text("UPDATE company_subscriptions SET plan_code = 'agencia' WHERE plan_code = 'scale'"))
 
     db.commit()
     _billing_tables_ready = True
@@ -104,7 +125,7 @@ class UpdatePlanRequest(BaseModel):
 
 
 # ── GET /api/billing/plans ────────────────────────────────────────
-@router.get("/api/billing/plans")
+@router.get("/billing/plans")
 def list_plans(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
@@ -121,7 +142,7 @@ def list_plans(
 
 
 # ── GET /api/billing/current ──────────────────────────────────────
-@router.get("/api/billing/current")
+@router.get("/billing/current")
 def get_current_plan(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
@@ -160,7 +181,7 @@ def get_current_plan(
 
 
 # ── GET /api/billing/usage ───────────────────────────────────────
-@router.get("/api/billing/usage")
+@router.get("/billing/usage")
 def get_usage(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
@@ -178,7 +199,7 @@ def get_usage(
 
 
 # ── PUT /api/billing/current ─────────────────────────────────────
-@router.put("/api/billing/current")
+@router.put("/billing/current")
 def update_current_plan(
     body: UpdatePlanRequest,
     payload: dict = Depends(get_current_user_payload),
@@ -212,7 +233,7 @@ def update_current_plan(
 
 
 # ── POST /api/billing/checkout ────────────────────────────────────
-@router.post("/api/billing/checkout")
+@router.post("/billing/checkout")
 def create_checkout(
     body: UpdatePlanRequest,
     payload: dict = Depends(get_current_user_payload),
@@ -238,10 +259,11 @@ def create_checkout(
 
     import requests as http_requests
 
+    is_one_time = "one_time" in (plan.get("limits_json") or "")
     preference = {
         "items": [
             {
-                "title": f"LMTM CRM — Plan {plan['name']}",
+                "title": f"LMTM CRM — {plan['name']}" + ("" if is_one_time else " (mensual)"),
                 "quantity": 1,
                 "unit_price": float(plan["monthly_price_usd"]),
                 "currency_id": "ARS",
@@ -254,7 +276,7 @@ def create_checkout(
         },
         "auto_return": "approved",
         "external_reference": f"company_{company_id}_plan_{plan_code}",
-        "notification_url": f"{settings.frontend_url.replace('https://login.charlott.ai', 'https://api.charlott.ai')}/api/billing/mp-webhook",
+        "notification_url": f"{settings.frontend_url}/api/billing/mp-webhook",
     }
 
     resp = http_requests.post(
@@ -287,7 +309,7 @@ def create_checkout(
 
 
 # ── POST /api/billing/mp-webhook ──────────────────────────────────
-@router.post("/api/billing/mp-webhook")
+@router.post("/billing/mp-webhook")
 async def mp_webhook(request: Request, db: Session = Depends(get_db)):
     mp_token = getattr(settings, "mp_access_token", "") or ""
     if not mp_token:
@@ -348,7 +370,8 @@ async def mp_webhook(request: Request, db: Session = Depends(get_db)):
     if status == "approved":
         db.execute(
             text(
-                """UPDATE company_subscriptions SET status = 'active', updated_at = NOW()
+                """UPDATE company_subscriptions SET status = 'active',
+                   period_start = NOW(), period_end = NOW() + INTERVAL '31 days', updated_at = NOW()
                    WHERE company_id = :cid"""
             ),
             {"cid": company_id},
@@ -356,18 +379,38 @@ async def mp_webhook(request: Request, db: Session = Depends(get_db)):
         db.execute(
             text(
                 """UPDATE subscriptions SET status = 'active', "updatedAt" = NOW()
-                   WHERE "companyId" = :cid AND status IN ('trialing', 'pending_payment')"""
+                   WHERE "companyId" = :cid AND status IN ('trialing', 'pending_payment', 'expired', 'past_due')"""
             ),
             {"cid": company_id},
         )
         db.commit()
         log.info("Payment approved for company %d, plan %s", company_id, plan_code)
 
+        # Fresh payment → the cached "subscription expired" verdict is stale
+        try:
+            from app.services.cache import invalidate
+            invalidate(f"sub_active:{company_id}")
+        except Exception:
+            pass
+
+        # Factura electrónica ARCA (best-effort: nunca rompe el webhook)
+        try:
+            from app.services.arca import emit_invoice
+            amount = float(payment.get("transaction_amount") or 0)
+            if amount > 0:
+                emit_invoice(
+                    db, company_id, amount,
+                    description=f"LMTM CRM — plan {plan_code}",
+                    mp_payment_id=str(payment_id),
+                )
+        except Exception as e:
+            log.error("ARCA post-payment invoice failed: %s", e)
+
     return {"ok": True}
 
 
 # ── GET /api/billing/status (legacy compat) ───────────────────────
-@router.get("/api/billing/status")
+@router.get("/billing/status")
 def billing_status_compat(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),

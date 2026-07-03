@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import (
-    ai_routes, auth, billing_routes, contacts, conversations, health,
+    admin_routes, ai_routes, auth, billing_routes, contacts, conversations, health,
     messages, settings_routes, saved_replies_routes, users,
     webhook_whatsapp, whatsapp_routes, tags_routes,
     channels_routes, integration_routes, meta_webhook_routes, pipeline_routes, webhook_meta, webhooks_routes,
@@ -37,6 +37,57 @@ async def _raise_thread_limit():
 
 setup_logging()
 app.add_middleware(CorrelationIdMiddleware)
+
+
+# ── Subscription enforcement ─────────────────────────────────────────
+# Expired trial / inactive subscription → HTTP 402 on panel API calls.
+# Auth, billing (so the user can pay), webhooks and health stay open.
+_BILLING_OPEN_PREFIXES = (
+    "/health", "/api/auth", "/api/billing", "/webhooks",
+    "/api/webhooks", "/api/ai/meta-leads/webhook", "/socket.io",
+)
+
+
+@app.middleware("http")
+async def _enforce_subscription(request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith("/api") or path.startswith(_BILLING_OPEN_PREFIXES):
+        return await call_next(request)
+
+    token = ""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:]
+    if not token:
+        token = request.cookies.get("token", "")
+    if not token:
+        return await call_next(request)  # unauthenticated → endpoint's own 401
+
+    try:
+        from jose import jwt as _jwt
+        payload = _jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        company_id = int(payload.get("companyId") or 0)
+    except Exception:
+        return await call_next(request)
+    if not company_id:
+        return await call_next(request)
+
+    from app.services.cache import get_or_set
+
+    def _check():
+        from app.core.db import SessionLocal
+        from app.services.billing_service import check_subscription_active
+        db = SessionLocal()
+        try:
+            return check_subscription_active(db, company_id)
+        finally:
+            db.close()
+
+    ok, msg = get_or_set(f"sub_active:{company_id}", 60, _check)
+    if not ok:
+        from starlette.responses import JSONResponse
+        return JSONResponse(status_code=402, content={"detail": msg, "code": "subscription_required"})
+    return await call_next(request)
 
 # CORS middleware - restrict origins in production
 _is_prod = settings.environment == "production"
@@ -83,6 +134,7 @@ app.include_router(training.router)
 # Settings & Billing
 app.include_router(settings_routes.router, prefix=settings.api_prefix)
 app.include_router(billing_routes.router, prefix=settings.api_prefix)
+app.include_router(admin_routes.router, prefix=settings.api_prefix)
 app.include_router(channels_routes.router, prefix=settings.api_prefix)
 app.include_router(pipeline_routes.router, prefix=settings.api_prefix)
 

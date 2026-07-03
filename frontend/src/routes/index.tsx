@@ -20,6 +20,7 @@ import Templates from '../pages/Templates';
 import Reports from '../pages/Reports';
 import Billing from '../pages/Billing';
 import Security from '../pages/Security';
+import Admin from '../pages/Admin';
 import LandingB from '../pages/LandingB';
 import MainLayout from '../layout/MainLayout';
 
@@ -72,6 +73,7 @@ const Routes = () => {
         <Route path='reports' element={<Reports />} />
         <Route path='billing' element={<Billing />} />
         <Route path='security' element={<Security />} />
+        <Route path='admin' element={<Admin />} />
       </Route>
 
       <Route path='*' element={<Navigate to='/' />} />

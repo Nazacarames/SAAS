@@ -9,6 +9,7 @@ import {
   WhatsApp as WhatsAppIcon,
   People as PeopleIcon,
   Settings as SettingsIcon,
+  AdminPanelSettings as AdminPanelSettingsIcon,
   SmartToy as SmartToyIcon,
   Logout as LogoutIcon,
   AutoStories as AutoStoriesIcon,
@@ -36,7 +37,8 @@ const menuItems = [
   { text: 'Usuarios',        icon: <PeopleIcon />,      path: '/users',         section: 'config', adminOnly: true },
   { text: 'Integraciones',   icon: <SettingsIcon />,    path: '/integrations',  section: 'config', adminOnly: true },
   { text: 'Seguridad',       icon: <SettingsIcon />,    path: '/security',      section: 'config' },
-  { text: 'Configuracion',   icon: <SettingsIcon />,    path: '/settings',      section: 'config', adminOnly: true }
+  { text: 'Configuracion',   icon: <SettingsIcon />,    path: '/settings',      section: 'config', adminOnly: true },
+  { text: 'Admin',           icon: <AdminPanelSettingsIcon />, path: '/admin',   section: 'config', superOnly: true }
 ];
 
 const SectionLabel = ({ children }: { children: React.ReactNode }) => (
@@ -62,9 +64,10 @@ const Sidebar = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { handleLogout, user } = useAuth();
-  const isAdmin = user?.profile === 'admin';
+  const isAdmin = user?.profile === 'admin' || user?.profile === 'super';
+  const isSuper = user?.profile === 'super';
 
-  const visible = menuItems.filter((i: any) => isAdmin || !i.adminOnly);
+  const visible = menuItems.filter((i: any) => (i.superOnly ? isSuper : (isAdmin || !i.adminOnly)));
   const mainItems   = visible.filter(i => i.section === 'main');
   const opsItems    = visible.filter(i => i.section === 'ops');
   const configItems = visible.filter(i => i.section === 'config');

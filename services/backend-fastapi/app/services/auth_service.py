@@ -197,6 +197,20 @@ def create_user_with_company(
             },
         )
 
+    # Billing limits during trial: Pro-level features so the prospect sees the
+    # full product. company_subscriptions drives get_company_limits().
+    try:
+        db.execute(
+            text(
+                """INSERT INTO company_subscriptions (company_id, plan_code, status, period_start, period_end, updated_at)
+                   VALUES (:cid, 'pro', 'trialing', NOW(), NOW() + INTERVAL '30 days', NOW())
+                   ON CONFLICT (company_id) DO NOTHING"""
+            ),
+            {"cid": company_id},
+        )
+    except Exception:
+        pass  # billing tables may not exist yet on a fresh install
+
     # Seed default KB templates for new company
     _kb_defaults = [
         ("Información de la empresa", "empresa", "Nombre de la empresa: [COMPLETAR]\nDirección de la oficina: [COMPLETAR]\nTeléfono / WhatsApp: [COMPLETAR]\nEmail de contacto: [COMPLETAR]\nSitio web: [COMPLETAR]"),

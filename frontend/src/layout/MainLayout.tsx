@@ -2,6 +2,7 @@ import { Outlet } from 'react-router-dom';
 import { Box, Toolbar, AppBar, Typography, Stack } from '@mui/material';
 import Sidebar from '../components/Sidebar';
 import HealthAlert from '../components/HealthAlert';
+import TrialBanner from '../components/TrialBanner';
 
 const drawerWidth = 224;
 
@@ -46,6 +47,7 @@ const MainLayout = () => {
         <Toolbar sx={{ minHeight: '52px !important' }} />
         <HealthAlert />
         <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, width: "100%" }} className="page-enter">
+          <TrialBanner />
           <Outlet />
         </Box>
       </Box>

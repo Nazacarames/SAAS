@@ -49,10 +49,15 @@ def get_company_limits(db: Session, company_id: int) -> dict:
     if not row:
         return {"conversations": 500, "users": 2, "plan_code": "free", "status": "active"}
 
+    # Valid JSON first; the replace() dance only rescues a legacy unquoted
+    # format ({conversations:1500}) and CORRUPTS valid JSON if run on it.
     try:
-        limits = json.loads(row["limits_json"].replace("{", '{"').replace(":", '":').replace(",", ',"'))
-    except (json.JSONDecodeError, AttributeError):
-        limits = {"conversations": 1500, "users": 2}
+        limits = json.loads(row["limits_json"])
+    except (json.JSONDecodeError, TypeError):
+        try:
+            limits = json.loads(row["limits_json"].replace("{", '{"').replace(":", '":').replace(",", ',"'))
+        except (json.JSONDecodeError, AttributeError):
+            limits = {"conversations": 1500, "users": 2}
 
     limits["plan_code"] = row["plan_code"]
     limits["status"] = row["status"]
