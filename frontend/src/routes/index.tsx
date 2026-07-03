@@ -30,7 +30,8 @@ const PrivateRoute = ({ children }: { children: JSX.Element }) => {
     return <div>Cargando...</div>;
   }
 
-  return isAuth ? children : <Navigate to='/login' />;
+  // Anonymous visitors on the root domain land on the marketing page, not the login form.
+  return isAuth ? children : <Navigate to='/landing' />;
 };
 
 const Routes = () => {
