@@ -87,18 +87,20 @@ def _ensure_billing_tables(db: Session) -> None:
         ("setup", "Instalación asistida", 120000,
          {"one_time": True},
          ["conexion_meta", "conexion_tokko", "entrenamiento_agente", "migracion_contactos", "capacitacion"]),
+        # Enterprise: a medida, sólo asignable desde el panel admin (hidden
+        # lo excluye del checkout self-service). Precio/límites editables ahí.
+        ("enterprise", "Enterprise", 0,
+         {"conversations": 100000, "users": 50, "ai_replies": 500000, "channels": 99, "hidden": True},
+         ["todo_incluido", "canales_ilimitados", "api_access", "priority_support", "onboarding_dedicado", "sla"]),
     ]
+    # DO NOTHING: plans are editable from the super-admin panel; the seed must
+    # never overwrite those edits on process start.
     for _code, _name, _price, _limits, _features in _plans_seed:
         db.execute(
             text(
                 """INSERT INTO billing_plans (code, name, monthly_price_usd, limits_json, features_json)
                 VALUES (:code, :name, :price, :limits, :features)
-                ON CONFLICT (code) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    monthly_price_usd = EXCLUDED.monthly_price_usd,
-                    limits_json = EXCLUDED.limits_json,
-                    features_json = EXCLUDED.features_json,
-                    updated_at = NOW()"""
+                ON CONFLICT (code) DO NOTHING"""
             ),
             {"code": _code, "name": _name, "price": _price,
              "limits": json.dumps(_limits), "features": json.dumps(_features)},
@@ -138,7 +140,16 @@ def list_plans(
                ORDER BY monthly_price_usd ASC"""
         )
     ).mappings().all()
-    return {"ok": True, "plans": [dict(row) for row in rows]}
+    # hidden plans (e.g. enterprise) are admin-assigned only, not self-service
+    plans = []
+    for r in rows:
+        try:
+            if json.loads(r["limits_json"] or "{}").get("hidden"):
+                continue
+        except Exception:
+            pass
+        plans.append(dict(r))
+    return {"ok": True, "plans": plans}
 
 
 # ── GET /api/billing/current ──────────────────────────────────────

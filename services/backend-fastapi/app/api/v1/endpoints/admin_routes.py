@@ -143,6 +143,95 @@ def toggle_company(
     return {"ok": True, "active": active}
 
 
+# ── Plans (full CRUD from the panel; enterprise & custom plans) ──────
+
+class PlanUpsert(BaseModel):
+    code: str | None = None          # required on create
+    name: str | None = None
+    monthlyPriceArs: float | None = None
+    limitsJson: str | None = None    # JSON object as string
+    featuresJson: str | None = None  # JSON array as string
+    active: bool | None = None
+
+
+def _validate_plan_json(body: PlanUpsert) -> None:
+    if body.limitsJson is not None:
+        try:
+            if not isinstance(json.loads(body.limitsJson), dict):
+                raise ValueError
+        except Exception:
+            raise HTTPException(status_code=400, detail="limitsJson debe ser un objeto JSON válido")
+    if body.featuresJson is not None:
+        try:
+            if not isinstance(json.loads(body.featuresJson), list):
+                raise ValueError
+        except Exception:
+            raise HTTPException(status_code=400, detail="featuresJson debe ser una lista JSON válida")
+
+
+@router.get("/plans")
+def admin_list_plans(payload: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
+    require_super(payload)
+    rows = db.execute(text(
+        """SELECT bp.code, bp.name, bp.monthly_price_usd, bp.limits_json, bp.features_json, bp.active,
+                  (SELECT COUNT(*) FROM company_subscriptions cs WHERE cs.plan_code = bp.code) AS companies
+           FROM billing_plans bp ORDER BY bp.monthly_price_usd ASC"""
+    )).mappings().all()
+    return {"ok": True, "plans": [dict(r) for r in rows]}
+
+
+@router.post("/plans")
+def admin_create_plan(
+    body: PlanUpsert,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_super(payload)
+    code = (body.code or "").strip().lower().replace(" ", "_")[:30]
+    if not code or not code.replace("_", "").isalnum():
+        raise HTTPException(status_code=400, detail="code inválido (letras/números/guión bajo)")
+    if db.execute(text("SELECT 1 FROM billing_plans WHERE code = :c"), {"c": code}).first():
+        raise HTTPException(status_code=409, detail="Ya existe un plan con ese code")
+    _validate_plan_json(body)
+    db.execute(text(
+        """INSERT INTO billing_plans (code, name, monthly_price_usd, limits_json, features_json, active)
+           VALUES (:c, :n, :p, :l, :f, true)"""
+    ), {"c": code, "n": (body.name or code)[:60], "p": body.monthlyPriceArs or 0,
+        "l": body.limitsJson or "{}", "f": body.featuresJson or "[]"})
+    db.commit()
+    return {"ok": True, "code": code}
+
+
+@router.put("/plans/{code}")
+def admin_update_plan(
+    code: str,
+    body: PlanUpsert,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_super(payload)
+    if not db.execute(text("SELECT 1 FROM billing_plans WHERE code = :c"), {"c": code}).first():
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+    _validate_plan_json(body)
+
+    updates, params = [], {"c": code}
+    if body.name is not None:
+        updates.append("name = :n"); params["n"] = body.name[:60]
+    if body.monthlyPriceArs is not None:
+        updates.append("monthly_price_usd = :p"); params["p"] = body.monthlyPriceArs
+    if body.limitsJson is not None:
+        updates.append("limits_json = :l"); params["l"] = body.limitsJson
+    if body.featuresJson is not None:
+        updates.append("features_json = :f"); params["f"] = body.featuresJson
+    if body.active is not None:
+        updates.append("active = :a"); params["a"] = body.active
+    if updates:
+        updates.append("updated_at = NOW()")
+        db.execute(text(f"UPDATE billing_plans SET {', '.join(updates)} WHERE code = :c"), params)
+        db.commit()
+    return {"ok": True}
+
+
 @router.get("/invoices")
 def list_invoices(payload: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
     require_super(payload)

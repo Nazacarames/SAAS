@@ -31,19 +31,86 @@ const Admin = () => {
   const [arcaConfigured, setArcaConfigured] = useState(false);
   const [arcaTesting, setArcaTesting] = useState(false);
 
-  // dialog
+  // dialog empresa
   const [target, setTarget] = useState<any>(null);
   const [dlgPlan, setDlgPlan] = useState('');
   const [dlgStatus, setDlgStatus] = useState('');
   const [dlgExtend, setDlgExtend] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // dialog plan (crear/editar — enterprise y a medida)
+  const [planTarget, setPlanTarget] = useState<any>(null); // {} = crear
+  const [pCode, setPCode] = useState('');
+  const [pName, setPName] = useState('');
+  const [pPrice, setPPrice] = useState('');
+  const [pLimits, setPLimits] = useState<any>({ conversations: '', users: '', ai_replies: '', channels: '' });
+  const [pHidden, setPHidden] = useState(false);
+  const [pActive, setPActive] = useState(true);
+  const [pFeatures, setPFeatures] = useState('');
+  const [pLimitsExtra, setPLimitsExtra] = useState<any>({});
+  const [pSaving, setPSaving] = useState(false);
+
+  const openPlanDialog = (p: any | null) => {
+    if (p) {
+      let lim: any = {};
+      try { lim = JSON.parse(p.limits_json || '{}'); } catch { /* noop */ }
+      let feats: string[] = [];
+      try { feats = JSON.parse(p.features_json || '[]'); } catch { /* noop */ }
+      const { conversations, users, ai_replies, channels, hidden, ...extra } = lim;
+      setPCode(p.code); setPName(p.name); setPPrice(String(Number(p.monthly_price_usd)));
+      setPLimits({ conversations: conversations ?? '', users: users ?? '', ai_replies: ai_replies ?? '', channels: channels ?? '' });
+      setPHidden(!!hidden); setPActive(!!p.active);
+      setPFeatures(feats.join(', '));
+      setPLimitsExtra(extra);
+      setPlanTarget(p);
+    } else {
+      setPCode(''); setPName(''); setPPrice('');
+      setPLimits({ conversations: '', users: '', ai_replies: '', channels: '' });
+      setPHidden(true); setPActive(true); setPFeatures(''); setPLimitsExtra({});
+      setPlanTarget({});
+    }
+  };
+
+  const savePlan = async () => {
+    setPSaving(true);
+    try {
+      const limits: any = { ...pLimitsExtra };
+      (['conversations', 'users', 'ai_replies', 'channels'] as const).forEach(k => {
+        const v = String(pLimits[k]).trim();
+        if (v !== '') limits[k] = parseInt(v);
+      });
+      if (pHidden) limits.hidden = true;
+      const features = pFeatures.split(',').map(s => s.trim()).filter(Boolean);
+      const body = {
+        code: pCode.trim(),
+        name: pName.trim() || pCode.trim(),
+        monthlyPriceArs: parseFloat(pPrice || '0'),
+        limitsJson: JSON.stringify(limits),
+        featuresJson: JSON.stringify(features),
+        active: pActive,
+      };
+      if (planTarget?.code) {
+        await api.put(`/admin/plans/${planTarget.code}`, body);
+        toast.success(`Plan ${planTarget.code} actualizado`);
+      } else {
+        await api.post('/admin/plans', body);
+        toast.success('Plan creado');
+      }
+      setPlanTarget(null);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al guardar plan');
+    } finally {
+      setPSaving(false);
+    }
+  };
+
   const load = useCallback(async () => {
     try {
       const [ov, comp, pl] = await Promise.all([
         api.get('/admin/overview'),
         api.get('/admin/companies'),
-        api.get('/billing/plans'),
+        api.get('/admin/plans'),
       ]);
       setOverview(ov.data);
       setCompanies(comp.data.companies || []);
@@ -157,6 +224,7 @@ const Admin = () => {
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
         <Tab label="Empresas" />
+        <Tab label="Planes" />
         <Tab label={`Facturas ARCA (${invoices.length})`} />
       </Tabs>
 
@@ -215,6 +283,54 @@ const Admin = () => {
 
       {tab === 1 && (
         <Box>
+          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
+            <Button variant="contained" size="small" onClick={() => openPlanDialog(null)}>Crear plan</Button>
+          </Stack>
+          <Paper sx={{ borderRadius: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', overflow: 'auto' }}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  {['Code', 'Nombre', 'Precio/mes', 'Límites', 'Empresas', 'Visibilidad', 'Acciones'].map(h => (
+                    <TableCell key={h} sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.45)', fontWeight: 700 }}>{h}</TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {plans.map(p => {
+                  let lim: any = {};
+                  try { lim = JSON.parse(p.limits_json || '{}'); } catch { /* noop */ }
+                  return (
+                    <TableRow key={p.code} sx={{ opacity: p.active ? 1 : 0.45 }}>
+                      <TableCell sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.75rem' }}>{p.code}</TableCell>
+                      <TableCell sx={{ fontSize: '0.85rem', fontWeight: 600 }}>{p.name}</TableCell>
+                      <TableCell sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.8rem' }}>
+                        {lim.one_time ? `${fmtARS(p.monthly_price_usd)} (única vez)` : Number(p.monthly_price_usd) > 0 ? `${fmtARS(p.monthly_price_usd)}` : 'a medida'}
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.55)' }}>
+                        {lim.one_time ? '—' : `${lim.conversations ?? '∞'} conv · ${lim.users ?? '∞'} users · ${lim.ai_replies ?? '∞'} IA · ${lim.channels ?? '∞'} canales`}
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>{p.companies}</TableCell>
+                      <TableCell>
+                        <Chip size="small" label={!p.active ? 'inactivo' : lim.hidden ? 'solo admin' : 'público'} sx={{
+                          height: 20, fontSize: '0.66rem', fontWeight: 700,
+                          backgroundColor: !p.active ? 'rgba(255,255,255,0.08)' : lim.hidden ? 'rgba(232,160,32,0.12)' : 'rgba(52,211,153,0.12)',
+                          color: !p.active ? 'rgba(255,255,255,0.5)' : lim.hidden ? '#E8A020' : '#34D399',
+                        }} />
+                      </TableCell>
+                      <TableCell>
+                        <Button size="small" variant="outlined" sx={{ fontSize: '0.68rem', py: 0.2 }} onClick={() => openPlanDialog(p)}>Editar</Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </Paper>
+        </Box>
+      )}
+
+      {tab === 2 && (
+        <Box>
           <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 2 }}>
             <Chip
               size="small"
@@ -264,6 +380,54 @@ const Admin = () => {
         </Box>
       )}
 
+      {/* Dialog crear/editar plan */}
+      <Dialog open={!!planTarget} onClose={() => setPlanTarget(null)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ fontFamily: '"Sora", sans-serif', fontWeight: 700 }}>
+          {planTarget?.code ? `Editar plan: ${planTarget.name}` : 'Crear plan'}
+        </DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Stack direction="row" spacing={1.5}>
+              <TextField size="small" label="Code" value={pCode} onChange={e => setPCode(e.target.value)}
+                disabled={!!planTarget?.code} sx={{ width: 160 }}
+                helperText={planTarget?.code ? 'No editable' : 'ej: enterprise_dunod'} />
+              <TextField size="small" fullWidth label="Nombre" value={pName} onChange={e => setPName(e.target.value)} />
+            </Stack>
+            <TextField size="small" label="Precio mensual (ARS)" type="number" value={pPrice}
+              onChange={e => setPPrice(e.target.value)} sx={{ width: 220 }}
+              helperText="0 = precio a medida (se cobra por fuera o vía checkout manual)" />
+            <Typography sx={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.45)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Límites mensuales (vacío = sin límite)
+            </Typography>
+            <Stack direction="row" spacing={1.5}>
+              {([['conversations', 'Conversaciones'], ['users', 'Usuarios'], ['ai_replies', 'Respuestas IA'], ['channels', 'Canales']] as const).map(([k, label]) => (
+                <TextField key={k} size="small" label={label} type="number" value={pLimits[k]}
+                  onChange={e => setPLimits((prev: any) => ({ ...prev, [k]: e.target.value }))} />
+              ))}
+            </Stack>
+            <TextField size="small" fullWidth label="Features (separadas por coma)" value={pFeatures}
+              onChange={e => setPFeatures(e.target.value)}
+              helperText="ej: todo_incluido, api_access, priority_support, onboarding_dedicado, sla" />
+            <Stack direction="row" spacing={3}>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <Switch size="small" checked={pHidden} onChange={e => setPHidden(e.target.checked)} />
+                <Typography sx={{ fontSize: '0.8rem' }}>Solo admin (no aparece en el checkout de clientes)</Typography>
+              </Stack>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <Switch size="small" checked={pActive} onChange={e => setPActive(e.target.checked)} />
+                <Typography sx={{ fontSize: '0.8rem' }}>Activo</Typography>
+              </Stack>
+            </Stack>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPlanTarget(null)}>Cancelar</Button>
+          <Button variant="contained" onClick={savePlan} disabled={pSaving || (!planTarget?.code && !pCode.trim())}>
+            {pSaving ? <CircularProgress size={18} /> : 'Guardar'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Dialog gestionar suscripción */}
       <Dialog open={!!target} onClose={() => setTarget(null)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontFamily: '"Sora", sans-serif', fontWeight: 700 }}>
@@ -274,8 +438,10 @@ const Admin = () => {
             <FormControl fullWidth size="small">
               <InputLabel>Plan</InputLabel>
               <Select value={dlgPlan} label="Plan" onChange={e => setDlgPlan(e.target.value)}>
-                {plans.filter(p => !String(p.limits_json).includes('one_time')).map(p => (
-                  <MenuItem key={p.code} value={p.code}>{p.name} — {fmtARS(p.monthly_price_usd)}/mes</MenuItem>
+                {plans.filter(p => p.active && !String(p.limits_json).includes('one_time')).map(p => (
+                  <MenuItem key={p.code} value={p.code}>
+                    {p.name} — {Number(p.monthly_price_usd) > 0 ? `${fmtARS(p.monthly_price_usd)}/mes` : 'a medida'}
+                  </MenuItem>
                 ))}
               </Select>
             </FormControl>
