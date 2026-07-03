@@ -46,6 +46,11 @@ def _get_company_verify_token(db: Session, company_id: int) -> str:
     return ""
 
 
+def _invalidate_channels_cache(company_id: int) -> None:
+    from app.services.cache import invalidate
+    invalidate(f"channels_health:{company_id}")
+
+
 class ChannelCreate(BaseModel):
     channel_type: str
     name: str
@@ -165,6 +170,7 @@ def create_channel(
         {"cid": company_id, "ct": body.channel_type, "eid": body.external_id.strip()},
     ).mappings().first()
 
+    _invalidate_channels_cache(company_id)
     return {"ok": True, "channel": dict(row) if row else None}
 
 
@@ -235,6 +241,7 @@ def update_channel(
         db.execute(text(f"UPDATE channels SET {', '.join(updates)} WHERE id = :id"), params)
         db.commit()
 
+    _invalidate_channels_cache(company_id)
     return {"ok": True}
 
 
@@ -255,6 +262,7 @@ def delete_channel(
 
     db.execute(text("UPDATE channels SET status = 'disabled', updated_at = NOW() WHERE id = :id"), {"id": channel_id})
     db.commit()
+    _invalidate_channels_cache(company_id)
     return {"ok": True}
 
 
@@ -430,8 +438,16 @@ async def channels_health(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
 ):
-    """Token health for THIS company's channels only (scoped — never leaks other tenants)."""
+    """Token health for THIS company's channels only (scoped — never leaks other tenants).
+    Cached 60s per company: every check hits the Meta Graph API per channel."""
     company_id = payload.get("companyId")
+
+    from app.services.cache import peek, put
+    _ck = f"channels_health:{company_id}"
+    _hit = peek(_ck)
+    if _hit is not None:
+        return _hit
+
     rows = db.execute(
         text(
             """SELECT c.id, c.name, c.company_id, c.channel_type, c.external_id,
@@ -473,4 +489,6 @@ async def channels_health(
             results.append({**base, "status": "unreachable", "detail": str(e)[:120]})
 
     all_valid = all(r["status"] == "valid" for r in results) if results else True
-    return {"status": "ok" if all_valid else "warning", "tokens": results}
+    resp = {"status": "ok" if all_valid else "warning", "tokens": results}
+    put(_ck, 60, resp)
+    return resp

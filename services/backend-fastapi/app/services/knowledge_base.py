@@ -25,7 +25,13 @@ def _safe_json(raw, default):
 def get_ai_agent_config(company_id: int = None) -> Dict:
     if company_id is None or int(company_id) <= 0:
         raise ValueError("company_id is required (multi-tenant safety)")
-    """Get AI agent configuration from database"""
+    """Get AI agent configuration from database (20s in-process cache: this is
+    called several times per LLM turn and on every panel poll)."""
+    from app.services.cache import get_or_set
+    return dict(get_or_set(f"agent_cfg:{int(company_id)}", 20, lambda: _load_ai_agent_config(int(company_id))))
+
+
+def _load_ai_agent_config(company_id: int) -> Dict:
     try:
         db_gen = get_db()
         db = next(db_gen)

@@ -26,6 +26,15 @@ async def _start_appointment_reminders():
     _reminder_task = asyncio.create_task(reminder_loop())
 
 
+@app.on_event("startup")
+async def _raise_thread_limit():
+    # Sync (def) endpoints run in anyio's threadpool (default 40 threads).
+    # Under concurrent panel load that queue becomes the bottleneck before
+    # the DB does; 80 matches the DB pool ceiling per worker.
+    import anyio
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 80
+
+
 setup_logging()
 app.add_middleware(CorrelationIdMiddleware)
 

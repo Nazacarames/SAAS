@@ -35,6 +35,11 @@ def _validate_json_field(value: Optional[str], field_name: str, expect: type) ->
         raise HTTPException(status_code=400, detail=f"{field_name} debe ser un {kind} JSON")
 
 
+def _invalidate_agent_cache(company_id: int) -> None:
+    from app.services.cache import invalidate
+    invalidate(f"agent_cfg:{company_id}")
+
+
 def _deactivate_other_agents(db: Session, company_id: int, keep_id: Optional[int] = None) -> None:
     """Enforce a single active agent per company so the orchestrator's
     is_active lookup is deterministic."""
@@ -93,6 +98,7 @@ def create_agent(
     ).mappings().first()
 
     db.commit()
+    _invalidate_agent_cache(company_id)
     return dict(row) if row else None
 
 
@@ -148,6 +154,7 @@ def update_agent(
     ).mappings().first()
 
     db.commit()
+    _invalidate_agent_cache(company_id)
     return dict(agent) if agent else None
 
 
@@ -164,6 +171,7 @@ def delete_agent(
         {"id": agent_id, "companyId": company_id},
     ).mappings().first()
     db.commit()
+    _invalidate_agent_cache(company_id)
     if not row:
         raise HTTPException(status_code=404, detail="agente no encontrado")
     return {"ok": True, "deletedId": agent_id}
