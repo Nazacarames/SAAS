@@ -101,6 +101,69 @@ const BTN_GHOST: React.CSSProperties = {
   border: `1px solid rgba(255,255,255,0.14)`,
 };
 
+// ── Carrusel de marcas/tecnologías del stack ─────────────────────────
+const BRANDS = [
+  { name: 'WhatsApp Business', color: GREEN },
+  { name: 'Instagram', color: IG },
+  { name: 'Messenger', color: MSN },
+  { name: 'Meta Lead Ads', color: '#1877F2' },
+  { name: 'OpenAI', color: '#8B9EFF' },
+  { name: 'Tokko Broker', color: AMBER },
+  { name: 'Mercado Pago', color: '#00B1EA' },
+  { name: 'ARCA Facturación', color: EMERALD },
+  { name: 'PostgreSQL', color: '#6FA8DC' },
+  { name: 'OpenStreetMap', color: '#A5C88C' },
+];
+
+function BrandMarquee() {
+  const items = [...BRANDS, ...BRANDS]; // duplicado = loop perfecto (-50%)
+  return (
+    <section aria-label="Tecnologías integradas" style={{ borderTop: `1px solid ${BORDER}`, borderBottom: `1px solid ${BORDER}`, background: 'rgba(255,255,255,0.015)', overflow: 'hidden', padding: '18px 0', position: 'relative' }}>
+      {/* fades laterales */}
+      <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: 120, background: `linear-gradient(90deg, ${CHARCOAL}, transparent)`, zIndex: 1, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: 0, bottom: 0, right: 0, width: 120, background: `linear-gradient(270deg, ${CHARCOAL}, transparent)`, zIndex: 1, pointerEvents: 'none' }} />
+      <div className="lp-marquee">
+        {items.map((b, i) => (
+          <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 9, whiteSpace: 'nowrap' }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: b.color, display: 'inline-block', boxShadow: `0 0 8px ${b.color}66` }} />
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'rgba(232,235,242,0.55)', letterSpacing: 0.2 }}>{b.name}</span>
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ── Interacción de mouse: spotlight en cards (CSS vars, sin re-render) ─
+function spotTrack(e: React.MouseEvent<HTMLElement>) {
+  const el = e.currentTarget as HTMLElement;
+  const r = el.getBoundingClientRect();
+  el.style.setProperty('--mx', `${e.clientX - r.left}px`);
+  el.style.setProperty('--my', `${e.clientY - r.top}px`);
+}
+
+// ── Scroll: barra de progreso + parallax de los orbs del hero ────────
+function useScrollFx(orbA: React.RefObject<HTMLDivElement>, orbB: React.RefObject<HTMLDivElement>, bar: React.RefObject<HTMLDivElement>) {
+  useEffect(() => {
+    if (prefersReduced()) return;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const y = window.scrollY;
+        const total = document.documentElement.scrollHeight - window.innerHeight;
+        if (bar.current) bar.current.style.transform = `scaleX(${total > 0 ? y / total : 0})`;
+        if (orbA.current) orbA.current.style.transform = `translateY(${y * 0.18}px)`;
+        if (orbB.current) orbB.current.style.transform = `translateY(${y * -0.12}px)`;
+      });
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => { window.removeEventListener('scroll', onScroll); if (raf) cancelAnimationFrame(raf); };
+  }, [orbA, orbB, bar]);
+}
+
 // ── Simulación 1: chat WhatsApp vivo ─────────────────────────────────
 type ChatMsg = { from: 'user' | 'bot'; text?: string; card?: boolean };
 const SCRIPT: ChatMsg[] = [
@@ -289,6 +352,20 @@ export default function LandingB() {
   const testi = useReveal(0.25);
   const cta = useReveal(0.3);
 
+  // scroll fx: barra de progreso + parallax de orbs
+  const orbA = useRef<HTMLDivElement>(null);
+  const orbB = useRef<HTMLDivElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
+  useScrollFx(orbA, orbB, progressRef);
+
+  // glow del hero que sigue el mouse (DOM directo, sin re-render)
+  const heroGlowRef = useRef<HTMLDivElement>(null);
+  const onHeroMouse = (e: React.MouseEvent) => {
+    if (prefersReduced() || !heroGlowRef.current) return;
+    heroGlowRef.current.style.background =
+      `radial-gradient(520px circle at ${e.clientX}px ${e.clientY}px, rgba(232,160,32,0.07), transparent 70%)`;
+  };
+
   const goDemo = () => document.getElementById('demo-kanban')?.scrollIntoView({ behavior: prefersReduced() ? 'auto' : 'smooth' });
 
   const FEATURES = [
@@ -315,8 +392,19 @@ export default function LandingB() {
         .lp-btn:active { transform: scale(0.97); }
         .lp-card:hover { transform: translateY(-4px); border-color: rgba(232,160,32,0.3) !important; }
         .lp-grid-bg { background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 56px 56px; }
+        .lp-marquee { display: flex; gap: 48px; width: max-content; animation: lpMarquee 36s linear infinite; }
+        .lp-marquee:hover { animation-play-state: paused; }
+        @keyframes lpMarquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
+        .lp-spot { position: relative; overflow: hidden; }
+        .lp-spot::before {
+          content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+          background: radial-gradient(220px circle at var(--mx, 50%) var(--my, 50%), rgba(232,160,32,0.10), transparent 65%);
+          opacity: 0; transition: opacity 250ms ${EASE};
+        }
+        .lp-spot:hover::before { opacity: 1; }
         @media (prefers-reduced-motion: reduce) {
-          .lp-msg, .lp-pulse, .lp-float, .lp-dot { animation: none !important; }
+          .lp-msg, .lp-pulse, .lp-float, .lp-dot, .lp-marquee { animation: none !important; }
+          .lp-spot::before { display: none; }
         }
         @media (max-width: 900px) {
           .lp-hero { grid-template-columns: 1fr !important; }
@@ -326,6 +414,13 @@ export default function LandingB() {
           .lp-testis { grid-template-columns: 1fr !important; }
         }
       `}</style>
+
+      {/* ── Barra de progreso de scroll ── */}
+      <div ref={progressRef} style={{
+        position: 'fixed', top: 0, left: 0, right: 0, height: 2.5, zIndex: 200,
+        background: `linear-gradient(90deg, #F5B840, ${AMBER})`,
+        transform: 'scaleX(0)', transformOrigin: 'left', pointerEvents: 'none',
+      }} />
 
       {/* ── Nav ── */}
       <nav style={{
@@ -348,9 +443,11 @@ export default function LandingB() {
       </nav>
 
       {/* ── Hero ── */}
-      <header className="lp-grid-bg" style={{ position: 'relative', minHeight: '100dvh', display: 'flex', alignItems: 'center', padding: '120px clamp(20px, 5vw, 56px) 72px' }}>
-        <div style={{ position: 'absolute', top: '-15%', left: '-10%', width: 640, height: 640, borderRadius: '50%', background: 'radial-gradient(circle, rgba(232,160,32,0.10) 0%, transparent 62%)', pointerEvents: 'none' }} />
-        <div style={{ position: 'absolute', bottom: '-20%', right: '-8%', width: 520, height: 520, borderRadius: '50%', background: 'radial-gradient(circle, rgba(37,211,102,0.06) 0%, transparent 65%)', pointerEvents: 'none' }} />
+      <header className="lp-grid-bg" onMouseMove={onHeroMouse} style={{ position: 'relative', minHeight: '100dvh', display: 'flex', alignItems: 'center', padding: '120px clamp(20px, 5vw, 56px) 72px', overflow: 'hidden' }}>
+        <div ref={orbA} style={{ position: 'absolute', top: '-15%', left: '-10%', width: 640, height: 640, borderRadius: '50%', background: 'radial-gradient(circle, rgba(232,160,32,0.10) 0%, transparent 62%)', pointerEvents: 'none', willChange: 'transform' }} />
+        <div ref={orbB} style={{ position: 'absolute', bottom: '-20%', right: '-8%', width: 520, height: 520, borderRadius: '50%', background: 'radial-gradient(circle, rgba(37,211,102,0.06) 0%, transparent 65%)', pointerEvents: 'none', willChange: 'transform' }} />
+        {/* glow que sigue el cursor */}
+        <div ref={heroGlowRef} style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0 }} />
 
         <div className="lp-hero" style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.9fr', gap: 'clamp(32px, 6vw, 80px)', alignItems: 'center', maxWidth: 1240, margin: '0 auto', width: '100%' }}>
           <div>
@@ -394,8 +491,11 @@ export default function LandingB() {
         </div>
       </header>
 
+      {/* ── Carrusel de marcas ── */}
+      <BrandMarquee />
+
       {/* ── Stats count-up ── */}
-      <section ref={stats.ref} style={{ padding: '76px clamp(20px, 5vw, 56px)', borderTop: `1px solid ${BORDER}`, borderBottom: `1px solid ${BORDER}`, background: SURFACE }}>
+      <section ref={stats.ref} style={{ padding: '76px clamp(20px, 5vw, 56px)', borderBottom: `1px solid ${BORDER}`, background: SURFACE }}>
         <div className="lp-stats" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, maxWidth: 1100, margin: '0 auto' }}>
           <Stat value={7} suffix=" seg" label="respuesta promedio de la IA" visible={stats.visible} delay={0} />
           <Stat value={24} suffix="/7" label="atención sin francos ni feriados" visible={stats.visible} delay={100} />
@@ -414,7 +514,7 @@ export default function LandingB() {
         </div>
         <div className="lp-feats" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 18 }}>
           {FEATURES.map((f, i) => (
-            <div key={f.title} className="lp-card" style={{
+            <div key={f.title} className="lp-card lp-spot" onMouseMove={spotTrack} style={{
               padding: '28px 26px', borderRadius: 16, background: SURFACE,
               border: `1px solid ${BORDER}`, transition: `transform 220ms ${EASE}, border-color 220ms ${EASE}`,
               ...reveal(feat.visible, 120 + i * 90, f.dir),
@@ -461,7 +561,7 @@ export default function LandingB() {
             { n: '02', t: 'Entrená tu asistente', d: 'Elegí una plantilla, ajustá el tono, conectá tu cartera de Tokko y probalo en el simulador antes de salir en vivo.' },
             { n: '03', t: 'Mirá entrar los leads', d: 'La IA atiende, el pipeline se ordena, la agenda se llena. Vos y tu equipo cierran las ventas.' },
           ].map((s, i) => (
-            <div key={s.n} style={{ position: 'relative', padding: '30px 26px', borderRadius: 16, background: SURFACE, border: `1px solid ${BORDER}`, ...reveal(how.visible, 120 + i * 130, i === 0 ? 'left' : i === 2 ? 'right' : 'up') }}>
+            <div key={s.n} className="lp-card lp-spot" onMouseMove={spotTrack} style={{ position: 'relative', padding: '30px 26px', borderRadius: 16, background: SURFACE, border: `1px solid ${BORDER}`, transition: `transform 220ms ${EASE}, border-color 220ms ${EASE}`, ...reveal(how.visible, 120 + i * 130, i === 0 ? 'left' : i === 2 ? 'right' : 'up') }}>
               <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: AMBER, marginBottom: 14 }}>{s.n}</div>
               <h3 style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, margin: '0 0 10px' }}>{s.t}</h3>
               <p style={{ fontSize: 14, lineHeight: 1.7, color: MUTED, margin: 0 }}>{s.d}</p>
@@ -477,7 +577,7 @@ export default function LandingB() {
             { q: 'Antes perdíamos las consultas del fin de semana. Ahora el lunes tengo visitas agendadas que la IA coordinó sola el sábado a la noche.', a: 'Inmobiliaria en Rosario', dir: 'left' as Dir },
             { q: 'El tablero se ordena solo. Abro el CRM y ya sé a quién llamar primero: el que tiene score alto y visita pedida.', a: 'Equipo comercial, zona norte GBA', dir: 'right' as Dir },
           ].map((t) => (
-            <div key={t.a} style={{ padding: '30px 28px', borderRadius: 16, background: CHARCOAL, border: `1px solid ${BORDER}`, ...reveal(testi.visible, 100, t.dir) }}>
+            <div key={t.a} className="lp-spot" onMouseMove={spotTrack} style={{ padding: '30px 28px', borderRadius: 16, background: CHARCOAL, border: `1px solid ${BORDER}`, ...reveal(testi.visible, 100, t.dir) }}>
               <div style={{ color: AMBER, fontSize: 22, fontFamily: DISPLAY, lineHeight: 1, marginBottom: 14 }}>&ldquo;</div>
               <p style={{ fontSize: 15.5, lineHeight: 1.75, color: TEXT, margin: '0 0 18px' }}>{t.q}</p>
               <div style={{ fontSize: 12.5, fontFamily: MONO, color: MUTED }}>— {t.a}</div>
@@ -504,14 +604,41 @@ export default function LandingB() {
       </section>
 
       {/* ── Footer ── */}
-      <footer style={{ padding: '36px clamp(20px, 5vw, 56px)', borderTop: `1px solid ${BORDER}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 26, height: 26, borderRadius: 7, background: `linear-gradient(135deg, #F5B840, #C07818)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: SYNE, fontWeight: 800, fontSize: 12, color: CHARCOAL }}>L</div>
-          <span style={{ fontSize: 13, color: MUTED }}>© 2026 LMTM CRM · crm.lmtmas.com</span>
+      <footer style={{ borderTop: `1px solid ${BORDER}`, padding: '44px clamp(20px, 5vw, 56px) 30px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 28, maxWidth: 1240, margin: '0 auto' }}>
+          <div style={{ maxWidth: 300 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg, #F5B840, #C07818)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: SYNE, fontWeight: 800, fontSize: 13, color: CHARCOAL }}>L</div>
+              <span style={{ fontFamily: SYNE, fontWeight: 700, fontSize: 15, color: TEXT }}>LMTM CRM</span>
+            </div>
+            <p style={{ fontSize: 13, lineHeight: 1.7, color: MUTED, margin: 0 }}>
+              CRM inmobiliario con IA para WhatsApp, Instagram y Messenger. Hecho en Argentina.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 'clamp(32px, 6vw, 80px)', flexWrap: 'wrap' }}>
+            {[
+              { title: 'Producto', links: [{ t: 'Ingresar', h: '/login' }, { t: 'Crear cuenta', h: '/register' }, { t: 'Planes', h: '/register' }] },
+              { title: 'Legal', links: [{ t: 'Política de privacidad', h: '/privacidad' }, { t: 'Términos y condiciones', h: '/terminos' }] },
+              { title: 'Contacto', links: [{ t: 'grow@bylmtm.com', h: 'mailto:grow@bylmtm.com' }] },
+            ].map(col => (
+              <div key={col.title}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>{col.title}</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                  {col.links.map(l => (
+                    <a key={l.t} href={l.h} style={{ fontSize: 13.5, color: MUTED, textDecoration: 'none', transition: `color 180ms ${EASE}` }}
+                      onMouseEnter={e => (e.currentTarget.style.color = AMBER)}
+                      onMouseLeave={e => (e.currentTarget.style.color = MUTED as string)}>
+                      {l.t}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: 20, fontSize: 13 }}>
-          <a href="/login" style={{ color: MUTED, textDecoration: 'none' }}>Ingresar</a>
-          <a href="/register" style={{ color: AMBER, textDecoration: 'none', fontWeight: 600 }}>Crear cuenta</a>
+        <div style={{ maxWidth: 1240, margin: '30px auto 0', paddingTop: 20, borderTop: `1px solid ${BORDER}`, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }}>© 2026 LMTM · crm.lmtmas.com</span>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }}>Datos cifrados · 2FA · Facturación electrónica ARCA</span>
         </div>
       </footer>
     </div>

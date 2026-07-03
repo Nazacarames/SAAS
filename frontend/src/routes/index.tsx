@@ -22,6 +22,7 @@ import Billing from '../pages/Billing';
 import Security from '../pages/Security';
 import Admin from '../pages/Admin';
 import LandingB from '../pages/LandingB';
+import Legal from '../pages/Legal';
 import MainLayout from '../layout/MainLayout';
 
 const PrivateRoute = ({ children }: { children: JSX.Element }) => {
@@ -41,6 +42,8 @@ const Routes = () => {
   return (
     <RouterRoutes>
       <Route path='/landing' element={<LandingB />} />
+      <Route path='/privacidad' element={<Legal />} />
+      <Route path='/terminos' element={<Legal />} />
       <Route path='/login' element={isAuth ? <Navigate to='/' /> : <Login />} />
       <Route path='/register' element={isAuth ? <Navigate to='/' /> : <Register />} />
       <Route path='/forgot-password' element={isAuth ? <Navigate to='/' /> : <ForgotPassword />} />
