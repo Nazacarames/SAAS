@@ -15,7 +15,8 @@ const EMERALD = '#34D399';
 const IG = '#E1306C';
 const MSN = '#0084FF';
 const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
-const SYNE = '"Syne", sans-serif';
+const SYNE = '"Syne", sans-serif'; // solo logo (identidad de marca)
+const DISPLAY = '"Sora", "Plus Jakarta Sans", "DM Sans", sans-serif'; // titulares
 const MONO = '"JetBrains Mono", monospace';
 
 // ── Hooks ────────────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ const ICONS = {
 const BTN: React.CSSProperties = {
   display: 'inline-flex', alignItems: 'center', gap: 10, padding: '15px 30px',
   background: `linear-gradient(135deg, #F5B840 0%, ${AMBER} 60%, #C07818 100%)`,
-  color: CHARCOAL, border: 'none', borderRadius: 10, fontFamily: SYNE,
+  color: CHARCOAL, border: 'none', borderRadius: 10, fontFamily: DISPLAY,
   fontWeight: 700, fontSize: 15.5, cursor: 'pointer', letterSpacing: '0.01em',
   boxShadow: '0 8px 32px rgba(232,160,32,0.25)',
   transition: `transform 160ms ${EASE}, box-shadow 220ms ${EASE}`,
@@ -260,7 +261,7 @@ function Stat({ value, prefix = '', suffix = '', label, visible, delay }: {
   const n = useCountUp(value, visible);
   return (
     <div style={{ textAlign: 'center', ...reveal(visible, delay) }}>
-      <div style={{ fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(2rem, 4.5vw, 3.1rem)', color: TEXT, fontVariantNumeric: 'tabular-nums' }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(2rem, 4.5vw, 3.1rem)', color: TEXT, fontVariantNumeric: 'tabular-nums' }}>
         {prefix}<span style={{ color: AMBER }}>{n.toLocaleString('es-AR')}</span>{suffix}
       </div>
       <div style={{ fontSize: 13, color: MUTED, marginTop: 6, letterSpacing: 0.2 }}>{label}</div>
@@ -362,7 +363,7 @@ export default function LandingB() {
               WhatsApp · Instagram · Messenger — con IA propia
             </div>
 
-            <h1 style={{ ...reveal(heroIn, 90), fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(2.4rem, 5.2vw, 4rem)', lineHeight: 1.06, letterSpacing: '-0.02em', margin: 0 }}>
+            <h1 style={{ ...reveal(heroIn, 90), fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(2.4rem, 5.2vw, 4rem)', lineHeight: 1.06, letterSpacing: '-0.02em', margin: 0 }}>
               Tu equipo duerme.<br />
               <span style={{ color: AMBER }}>Tu CRM no.</span>
             </h1>
@@ -407,7 +408,7 @@ export default function LandingB() {
       <section ref={feat.ref} style={{ padding: '110px clamp(20px, 5vw, 56px)', maxWidth: 1240, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 64, ...reveal(feat.visible) }}>
           <div style={{ fontFamily: MONO, fontSize: 12, color: AMBER, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 14 }}>Todo el ciclo, automático</div>
-          <h2 style={{ fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(1.8rem, 3.6vw, 2.7rem)', letterSpacing: '-0.02em', margin: 0 }}>
+          <h2 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(1.8rem, 3.6vw, 2.7rem)', letterSpacing: '-0.02em', margin: 0 }}>
             De "hola, ¿está disponible?"<br />a visita agendada. <span style={{ color: AMBER }}>Sin tocar nada.</span>
           </h2>
         </div>
@@ -421,7 +422,7 @@ export default function LandingB() {
               <div style={{ width: 46, height: 46, borderRadius: 12, background: AMBER_SOFT, border: `1px solid rgba(232,160,32,0.2)`, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 18 }}>
                 <Icon d={f.icon} />
               </div>
-              <h3 style={{ fontFamily: SYNE, fontWeight: 700, fontSize: 17.5, margin: '0 0 10px' }}>{f.title}</h3>
+              <h3 style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17.5, margin: '0 0 10px' }}>{f.title}</h3>
               <p style={{ fontSize: 14, lineHeight: 1.7, color: MUTED, margin: 0 }}>{f.desc}</p>
             </div>
           ))}
@@ -433,7 +434,7 @@ export default function LandingB() {
         <div style={{ maxWidth: 1100, margin: '0 auto', display: 'grid', gridTemplateColumns: '1fr', gap: 44 }}>
           <div style={{ textAlign: 'center', ...reveal(kanban.visible) }}>
             <div style={{ fontFamily: MONO, fontSize: 12, color: AMBER, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 14 }}>Mirá tu pipeline trabajar</div>
-            <h2 style={{ fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(1.7rem, 3.2vw, 2.4rem)', letterSpacing: '-0.02em', margin: '0 0 12px' }}>
+            <h2 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(1.7rem, 3.2vw, 2.4rem)', letterSpacing: '-0.02em', margin: '0 0 12px' }}>
               Cada conversación mueve el lead <span style={{ color: AMBER }}>por sí sola</span>
             </h2>
             <p style={{ color: MUTED, fontSize: 15, maxWidth: '58ch', margin: '0 auto', lineHeight: 1.7 }}>
@@ -450,7 +451,7 @@ export default function LandingB() {
       {/* ── Cómo funciona ── */}
       <section ref={how.ref} style={{ padding: '110px clamp(20px, 5vw, 56px)', maxWidth: 1100, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 60, ...reveal(how.visible) }}>
-          <h2 style={{ fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(1.8rem, 3.4vw, 2.5rem)', letterSpacing: '-0.02em', margin: 0 }}>
+          <h2 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(1.8rem, 3.4vw, 2.5rem)', letterSpacing: '-0.02em', margin: 0 }}>
             Funcionando <span style={{ color: AMBER }}>hoy mismo</span>
           </h2>
         </div>
@@ -462,7 +463,7 @@ export default function LandingB() {
           ].map((s, i) => (
             <div key={s.n} style={{ position: 'relative', padding: '30px 26px', borderRadius: 16, background: SURFACE, border: `1px solid ${BORDER}`, ...reveal(how.visible, 120 + i * 130, i === 0 ? 'left' : i === 2 ? 'right' : 'up') }}>
               <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: AMBER, marginBottom: 14 }}>{s.n}</div>
-              <h3 style={{ fontFamily: SYNE, fontWeight: 700, fontSize: 17, margin: '0 0 10px' }}>{s.t}</h3>
+              <h3 style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, margin: '0 0 10px' }}>{s.t}</h3>
               <p style={{ fontSize: 14, lineHeight: 1.7, color: MUTED, margin: 0 }}>{s.d}</p>
             </div>
           ))}
@@ -477,7 +478,7 @@ export default function LandingB() {
             { q: 'El tablero se ordena solo. Abro el CRM y ya sé a quién llamar primero: el que tiene score alto y visita pedida.', a: 'Equipo comercial, zona norte GBA', dir: 'right' as Dir },
           ].map((t) => (
             <div key={t.a} style={{ padding: '30px 28px', borderRadius: 16, background: CHARCOAL, border: `1px solid ${BORDER}`, ...reveal(testi.visible, 100, t.dir) }}>
-              <div style={{ color: AMBER, fontSize: 22, fontFamily: SYNE, lineHeight: 1, marginBottom: 14 }}>&ldquo;</div>
+              <div style={{ color: AMBER, fontSize: 22, fontFamily: DISPLAY, lineHeight: 1, marginBottom: 14 }}>&ldquo;</div>
               <p style={{ fontSize: 15.5, lineHeight: 1.75, color: TEXT, margin: '0 0 18px' }}>{t.q}</p>
               <div style={{ fontSize: 12.5, fontFamily: MONO, color: MUTED }}>— {t.a}</div>
             </div>
@@ -489,7 +490,7 @@ export default function LandingB() {
       <section ref={cta.ref} style={{ padding: '130px clamp(20px, 5vw, 56px)', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 760, height: 760, borderRadius: '50%', background: 'radial-gradient(circle, rgba(232,160,32,0.09) 0%, transparent 60%)', pointerEvents: 'none' }} />
         <div style={{ position: 'relative', ...reveal(cta.visible) }}>
-          <h2 style={{ fontFamily: SYNE, fontWeight: 800, fontSize: 'clamp(2rem, 4.4vw, 3.2rem)', letterSpacing: '-0.02em', margin: '0 0 18px', lineHeight: 1.1 }}>
+          <h2 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 'clamp(2rem, 4.4vw, 3.2rem)', letterSpacing: '-0.02em', margin: '0 0 18px', lineHeight: 1.1 }}>
             La próxima consulta que entre,<br /><span style={{ color: AMBER }}>respondela con IA.</span>
           </h2>
           <p style={{ color: MUTED, fontSize: 16, margin: '0 0 36px' }}>Configuralo en 15 minutos. Sin tarjeta de crédito.</p>
