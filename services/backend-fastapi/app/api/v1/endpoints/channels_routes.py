@@ -380,6 +380,188 @@ async def discover_assets(
             "instagram": instagram, "messenger": pages, "warnings": warnings}
 
 
+# ── Templates de WhatsApp (Meta message_templates) ───────────────────
+# La página Templates del panel gestiona directamente los templates del
+# WABA: crear, editar (vuelve a revisión de Meta), borrar y ver estado.
+
+def _wa_channel_creds(db: Session, company_id: int) -> dict | None:
+    """Token + phone_number_id + waba_id del canal WhatsApp activo.
+    El waba_id se resuelve una vez (phone → business → WABAs) y se cachea
+    en channels.config_json."""
+    ch = db.execute(
+        text("""SELECT c.id, c.external_id, c.config_json, mc.access_token AS mc_token
+                FROM channels c LEFT JOIN meta_connections mc ON mc.id = c.meta_connection_id
+                WHERE c.company_id = :cid AND c.channel_type = 'whatsapp' AND c.status = 'active'
+                ORDER BY c.id LIMIT 1"""),
+        {"cid": company_id},
+    ).mappings().first()
+    if not ch:
+        return None
+    token = decrypt(ch.get("mc_token")) or ""
+    if not token:
+        return None
+    cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else (ch["config_json"] or {})
+    waba_id = cfg.get("wabaId", "")
+
+    if not waba_id:
+        try:
+            with httpx.Client(timeout=15) as client:
+                pages = client.get(f"{GRAPH}/me/accounts", params={"access_token": token, "fields": "id", "limit": 50}).json().get("data", [])
+                seen_biz = set()
+                for p in pages:
+                    biz = (client.get(f"{GRAPH}/{p['id']}", params={"access_token": token, "fields": "business"}).json().get("business") or {}).get("id")
+                    if not biz or biz in seen_biz:
+                        continue
+                    seen_biz.add(biz)
+                    for waba in client.get(f"{GRAPH}/{biz}/owned_whatsapp_business_accounts", params={"access_token": token, "fields": "id", "limit": 50}).json().get("data", []):
+                        nums = client.get(f"{GRAPH}/{waba['id']}/phone_numbers", params={"access_token": token, "fields": "id"}).json().get("data", [])
+                        if any(n["id"] == ch["external_id"] for n in nums):
+                            waba_id = waba["id"]
+                            break
+                    if waba_id:
+                        break
+        except Exception:
+            pass
+        if waba_id:
+            cfg["wabaId"] = waba_id
+            db.execute(text("UPDATE channels SET config_json = :cfg, updated_at = NOW() WHERE id = :id"),
+                       {"cfg": json.dumps(cfg), "id": ch["id"]})
+            db.commit()
+
+    if not waba_id:
+        return None
+    return {"token": token, "phone_number_id": ch["external_id"], "waba_id": waba_id}
+
+
+class WabaTemplateBody(BaseModel):
+    name: str = ""              # requerido al crear; slug minúsculas/guión bajo
+    category: str = "MARKETING"  # MARKETING | UTILITY
+    language: str = "es_AR"
+    body: str = ""               # texto con variables {{1}}, {{2}}...
+    footer: str = ""
+    example_params: list[str] = []  # un ejemplo por variable (Meta lo exige para aprobar)
+
+
+def _components(body: WabaTemplateBody) -> list:
+    comp: list = [{"type": "BODY", "text": body.body}]
+    if body.example_params:
+        comp[0]["example"] = {"body_text": [body.example_params]}
+    if body.footer.strip():
+        comp.append({"type": "FOOTER", "text": body.footer.strip()})
+    return comp
+
+
+@router.get("/waba-templates")
+def waba_templates_list(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = payload.get("companyId")
+    creds = _wa_channel_creds(db, company_id)
+    if not creds:
+        return {"ok": False, "error": "No hay canal de WhatsApp activo con token válido"}
+    resp = httpx.get(
+        f"{GRAPH}/{creds['waba_id']}/message_templates",
+        params={"access_token": creds["token"], "fields": "id,name,status,category,language,components,rejected_reason", "limit": 100},
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        return {"ok": False, "error": resp.json().get("error", {}).get("message", "")[:200]}
+    out = []
+    for t in resp.json().get("data", []):
+        body_txt, footer_txt = "", ""
+        for c in t.get("components", []):
+            if c.get("type") == "BODY":
+                body_txt = c.get("text", "")
+            elif c.get("type") == "FOOTER":
+                footer_txt = c.get("text", "")
+        out.append({
+            "id": t.get("id"), "name": t.get("name"), "status": t.get("status"),
+            "category": t.get("category"), "language": t.get("language"),
+            "body": body_txt, "footer": footer_txt,
+            "rejected_reason": t.get("rejected_reason") or "",
+        })
+    return {"ok": True, "waba_id": creds["waba_id"], "templates": out}
+
+
+@router.post("/waba-templates")
+def waba_templates_create(
+    body: WabaTemplateBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    name = body.name.strip().lower().replace(" ", "_")
+    if not name or not body.body.strip():
+        raise HTTPException(status_code=400, detail="name y body son requeridos")
+    if body.category not in ("MARKETING", "UTILITY"):
+        raise HTTPException(status_code=400, detail="category debe ser MARKETING o UTILITY")
+    creds = _wa_channel_creds(db, company_id)
+    if not creds:
+        raise HTTPException(status_code=400, detail="No hay canal de WhatsApp activo")
+    resp = httpx.post(
+        f"{GRAPH}/{creds['waba_id']}/message_templates",
+        params={"access_token": creds["token"]},
+        json={"name": name, "language": body.language, "category": body.category, "components": _components(body)},
+        timeout=25,
+    )
+    data = resp.json()
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=data.get("error", {}).get("message", "Meta rechazó la creación")[:250])
+    return {"ok": True, "id": data.get("id"), "status": data.get("status", "PENDING"), "name": name}
+
+
+@router.put("/waba-templates/{template_id}")
+def waba_templates_update(
+    template_id: str,
+    body: WabaTemplateBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Editar un template existente. Meta no permite editar PENDING; un
+    APPROVED editado vuelve a revisión."""
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    if not body.body.strip():
+        raise HTTPException(status_code=400, detail="body es requerido")
+    creds = _wa_channel_creds(db, company_id)
+    if not creds:
+        raise HTTPException(status_code=400, detail="No hay canal de WhatsApp activo")
+    resp = httpx.post(
+        f"{GRAPH}/{template_id}",
+        params={"access_token": creds["token"]},
+        json={"components": _components(body)},
+        timeout=25,
+    )
+    data = resp.json()
+    if resp.status_code != 200 or not data.get("success"):
+        raise HTTPException(status_code=400, detail=data.get("error", {}).get("message", "Meta rechazó la edición")[:250])
+    return {"ok": True}
+
+
+@router.delete("/waba-templates/{name}")
+def waba_templates_delete(
+    name: str,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    creds = _wa_channel_creds(db, company_id)
+    if not creds:
+        raise HTTPException(status_code=400, detail="No hay canal de WhatsApp activo")
+    resp = httpx.delete(
+        f"{GRAPH}/{creds['waba_id']}/message_templates",
+        params={"access_token": creds["token"], "name": name},
+        timeout=20,
+    )
+    data = resp.json()
+    if resp.status_code != 200 or not data.get("success"):
+        raise HTTPException(status_code=400, detail=data.get("error", {}).get("message", "Meta rechazó el borrado")[:250])
+    return {"ok": True}
+
+
 @router.post("/{channel_id}/test")
 async def test_channel(
     channel_id: int,
