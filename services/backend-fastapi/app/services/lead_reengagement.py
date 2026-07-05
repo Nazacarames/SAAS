@@ -82,7 +82,65 @@ def _candidates(db, company_id: int, days: int, max_wait_days: int) -> list:
     ).mappings().all()
 
 
-def _send_template(wa: dict, to_number: str, template: str, lang: str, first_name: str) -> tuple[bool, int, str]:
+def _agent_hook_text(db, company_id: int, lead: dict, days: int) -> str:
+    """El AGENTE escribe la frase de reenganche, personalizada con la búsqueda
+    del lead y su conversación. Viaja como variable {{2}} del template (Meta
+    no permite texto libre fuera de la ventana de 24 h). Fallback determinístico
+    si el modelo no está disponible."""
+    needs = str(lead.get("needs") or "").strip()
+    fallback = (
+        f"Estuviste consultando por propiedades ({needs}) y quedamos a tu disposición. "
+        "Esta semana entraron opciones nuevas que te pueden interesar. ¿Seguís buscando?"
+        if needs else
+        "Hace unos días estuviste consultando por propiedades y quedamos a tu disposición. "
+        "Esta semana entraron opciones nuevas. ¿Seguís buscando?"
+    )
+    try:
+        from app.core.config import settings
+        if not settings.openai_api_key:
+            return fallback
+        from app.services.knowledge_base import get_ai_agent_config
+
+        msgs = db.execute(
+            text('SELECT body, "fromMe" FROM messages WHERE "contactId" = :cid ORDER BY id DESC LIMIT 6'),
+            {"cid": int(lead["id"])},
+        ).mappings().all()
+        history = "\n".join(
+            f"{'Asistente' if m['fromMe'] else 'Cliente'}: {str(m['body'])[:160]}"
+            for m in reversed(msgs) if m["body"] and not str(m["body"]).startswith("[")
+        )
+        persona = (get_ai_agent_config(company_id).get("persona") or "")[:400]
+
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.openai_api_key, timeout=25.0, max_retries=1)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Sos el asistente comercial de una inmobiliaria argentina.\n"
+                    f"Tu estilo: {persona}\n\n"
+                    f"El cliente {lead.get('name') or ''} dejó de responder hace {days} días.\n"
+                    f"Su búsqueda registrada: {needs or '(sin datos)'}\n"
+                    f"Últimos mensajes:\n{history or '(sin historial)'}\n\n"
+                    "Escribí UNA sola frase de reenganche (máximo 220 caracteres, sin saltos de línea, "
+                    "sin emojis) para retomar el contacto y motivarlo a responder. Mencioná su búsqueda "
+                    "concreta si la conocés. NO saludes ni te presentes (eso ya está en el mensaje). "
+                    "Terminá con una pregunta corta. Español argentino, cordial y directo."
+                ),
+            }],
+            max_tokens=120,
+            temperature=0.7,
+        )
+        txt = (resp.choices[0].message.content or "").strip().strip('"').replace("\n", " ")
+        # Meta rechaza parámetros con saltos de línea o >~1000 chars
+        return txt[:300] if len(txt) >= 20 else fallback
+    except Exception as e:
+        log.warning("agent hook generation failed company=%s: %s", company_id, str(e)[:120])
+        return fallback
+
+
+def _send_template(wa: dict, to_number: str, template: str, lang: str, params: list[str]) -> tuple[bool, int, str]:
     """Returns (ok, meta_error_code, error_message)."""
     payload = {
         "messaging_product": "whatsapp",
@@ -92,7 +150,7 @@ def _send_template(wa: dict, to_number: str, template: str, lang: str, first_nam
             "name": template,
             "language": {"code": lang},
             "components": [
-                {"type": "body", "parameters": [{"type": "text", "text": first_name or "!"}]}
+                {"type": "body", "parameters": [{"type": "text", "text": p or "-"} for p in params]}
             ],
         },
     }
@@ -153,13 +211,19 @@ def _run_scan() -> None:
             lang = cfg.get("template_lang", "es_AR")
             body_tpl = cfg.get("template_body", "")
 
+            agent_mode = bool(cfg.get("agent_generated", False))
             for lead in _candidates(db, cid, days, max_wait):
                 first_name = (str(lead["name"] or "").strip().split(" ") or [""])[0]
-                sent, code, err = _send_template(wa, str(lead["number"]), template, lang, first_name)
+                params = [first_name]
+                hook = ""
+                if agent_mode:
+                    hook = _agent_hook_text(db, cid, dict(lead), days)
+                    params.append(hook)
+                sent, code, err = _send_template(wa, str(lead["number"]), template, lang, params)
                 if sent:
                     _mark_fired(db, int(lead["id"]))
                     try:
-                        rendered = body_tpl.replace("{{1}}", first_name) if body_tpl else f"[plantilla {template}] Reenganche por inactividad"
+                        rendered = body_tpl.replace("{{1}}", first_name).replace("{{2}}", hook) if body_tpl else f"[plantilla {template}] Reenganche por inactividad"
                         save_message(db, int(lead["id"]), rendered, True, cid)
                         increment_usage(db, cid, "messages_sent")
                         increment_usage(db, cid, "reengagements")
