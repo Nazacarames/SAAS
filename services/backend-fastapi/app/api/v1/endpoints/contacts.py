@@ -90,3 +90,59 @@ def contacts_mark_read(
     if not result:
         raise HTTPException(status_code=404, detail="Contacto no encontrado")
     return result
+
+@router.post("/{contact_id}/message")
+async def contacts_send_message(
+    contact_id: int,
+    body: dict,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Manual send from the inbox. Supports free-form text ({body}) inside the
+    24h window and WhatsApp templates ({templateName, languageCode}) outside it."""
+    from sqlalchemy import text as _t
+    company_id = payload.get("companyId")
+    contact = db.execute(
+        _t('SELECT id, name, number FROM contacts WHERE id = :id AND "companyId" = :cid LIMIT 1'),
+        {"id": contact_id, "cid": company_id},
+    ).mappings().first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contacto no encontrado")
+    if not contact["number"]:
+        raise HTTPException(status_code=400, detail="El contacto no tiene número")
+
+    from app.api.v1.endpoints.webhook_whatsapp import get_whatsapp_config, send_whatsapp_message, save_message
+    wa = get_whatsapp_config(db, company_id)
+    if not wa:
+        raise HTTPException(status_code=400, detail="No hay canal de WhatsApp configurado")
+
+    template_name = str(body.get("templateName") or "").strip()
+    if template_name:
+        import httpx as _hx
+        lang = str(body.get("languageCode") or "es_AR")
+        resp = _hx.post(
+            f"https://graph.facebook.com/v21.0/{wa['phone_number_id']}/messages",
+            json={"messaging_product": "whatsapp", "to": str(contact["number"]),
+                  "type": "template", "template": {"name": template_name, "language": {"code": lang}}},
+            headers={"Authorization": f"Bearer {wa['access_token']}"}, timeout=20,
+        )
+        if resp.status_code != 200:
+            err = resp.json().get("error", {}).get("message", "")[:200]
+            raise HTTPException(status_code=502, detail=f"Meta rechazó el template: {err}")
+        saved_body = f"[template {template_name}]"
+    else:
+        text_body = str(body.get("body") or "").strip()
+        if not text_body:
+            raise HTTPException(status_code=400, detail="body o templateName requerido")
+        result = await send_whatsapp_message(str(contact["number"]), text_body, wa)
+        if not result.get("ok"):
+            raise HTTPException(status_code=502, detail=str(result.get("error", "Meta rechazó el mensaje"))[:250])
+        saved_body = text_body
+
+    try:
+        save_message(db, int(contact["id"]), saved_body, True, int(company_id))
+        from app.services.billing_service import increment_usage
+        increment_usage(db, company_id, "messages_sent")
+    except Exception:
+        pass
+    return {"ok": True}
