@@ -2582,6 +2582,14 @@ BASE DE CONOCIMIENTO:
         except Exception:
             pass
 
+        # Tokko: push SOLO leads que califican como potenciales clientes
+        # (score >= umbral o status warm/hot). Idempotente vía tag enviado_tokko.
+        try:
+            from app.services.tokko_leads import maybe_sync_qualified_lead
+            maybe_sync_qualified_lead(db, self.company_id, self.contact_id)
+        except Exception:
+            pass
+
         # Find an associated ticket for ai_decision_logs (required not null)
         ticket_row = db.execute(
             text('SELECT id FROM tickets WHERE "contactId" = :cid AND "companyId" = :company ORDER BY id DESC LIMIT 1'),

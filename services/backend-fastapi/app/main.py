@@ -26,6 +26,17 @@ async def _start_appointment_reminders():
     _reminder_task = asyncio.create_task(reminder_loop())
 
 
+_reengagement_task = None
+
+
+@app.on_event("startup")
+async def _start_lead_reengagement():
+    global _reengagement_task
+    import asyncio
+    from app.services.lead_reengagement import reengagement_loop
+    _reengagement_task = asyncio.create_task(reengagement_loop())
+
+
 @app.on_event("startup")
 async def _raise_thread_limit():
     # Sync (def) endpoints run in anyio's threadpool (default 40 threads).
