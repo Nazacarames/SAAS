@@ -37,6 +37,17 @@ async def _start_lead_reengagement():
     _reengagement_task = asyncio.create_task(reengagement_loop())
 
 
+_learning_task = None
+
+
+@app.on_event("startup")
+async def _start_agent_learning():
+    global _learning_task
+    import asyncio
+    from app.services.agent_learning import distill_loop
+    _learning_task = asyncio.create_task(distill_loop())
+
+
 @app.on_event("startup")
 async def _raise_thread_limit():
     # Sync (def) endpoints run in anyio's threadpool (default 40 threads).

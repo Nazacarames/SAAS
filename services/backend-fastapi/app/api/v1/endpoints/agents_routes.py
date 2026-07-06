@@ -243,6 +243,120 @@ async def agent_test_chat(
     }
 
 
+# ── Aprendizajes del agente (lecciones) ───────────────────────────────
+
+class LessonCreate(BaseModel):
+    content: str
+
+
+class LessonUpdate(BaseModel):
+    content: str | None = None
+    active: bool | None = None
+
+
+@router.get("/lessons")
+def list_lessons(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    from app.services.agent_learning import ensure_table
+    ensure_table(db)
+    company_id = payload.get("companyId")
+    rows = db.execute(
+        text("""SELECT id, content, source, active, times_used, created_at
+                FROM agent_lessons WHERE company_id = :cid ORDER BY active DESC, id DESC LIMIT 200"""),
+        {"cid": company_id},
+    ).mappings().all()
+    return {"ok": True, "lessons": [dict(r) for r in rows]}
+
+
+@router.post("/lessons", status_code=201)
+def create_lesson(
+    body: LessonCreate,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="content es requerido")
+    from app.services.agent_learning import add_lesson
+    row = add_lesson(db, company_id, body.content, source="manual", active=True)
+    if not row:
+        raise HTTPException(status_code=409, detail="Ese aprendizaje ya existe")
+    return {"ok": True, "lesson": row}
+
+
+@router.put("/lessons/{lesson_id}")
+def update_lesson(
+    lesson_id: int,
+    body: LessonUpdate,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    updates, params = [], {"id": lesson_id, "cid": company_id}
+    if body.content is not None and body.content.strip():
+        import hashlib
+        norm = " ".join(body.content.lower().split())
+        updates.append("content = :content, content_hash = :h")
+        params["content"] = body.content.strip()[:600]
+        params["h"] = hashlib.sha256(norm.encode()).hexdigest()[:40]
+    if body.active is not None:
+        updates.append("active = :active")
+        params["active"] = body.active
+    if not updates:
+        return {"ok": True}
+    row = db.execute(
+        text(f"UPDATE agent_lessons SET {', '.join(updates)}, updated_at = NOW() "
+             "WHERE id = :id AND company_id = :cid RETURNING id"),
+        params,
+    ).first()
+    db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Aprendizaje no encontrado")
+    from app.services.agent_learning import invalidate as _inv_lessons
+    _inv_lessons(company_id)
+    return {"ok": True}
+
+
+@router.delete("/lessons/{lesson_id}")
+def delete_lesson(
+    lesson_id: int,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    row = db.execute(
+        text("DELETE FROM agent_lessons WHERE id = :id AND company_id = :cid RETURNING id"),
+        {"id": lesson_id, "cid": company_id},
+    ).first()
+    db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Aprendizaje no encontrado")
+    from app.services.agent_learning import invalidate as _inv_lessons
+    _inv_lessons(company_id)
+    return {"ok": True}
+
+
+@router.post("/lessons/distill")
+def distill_lessons(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Analiza las conversaciones exitosas recientes y propone aprendizajes
+    nuevos (quedan inactivos hasta que un humano los apruebe)."""
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    from app.services.agent_learning import distill_for_company
+    created = distill_for_company(db, company_id)
+    return {"ok": True, "created": created,
+            "message": (f"{len(created)} aprendizaje(s) propuesto(s) — revisalos y activalos"
+                        if created else "Sin patrones nuevos claros en las conversaciones recientes")}
+
+
 # ── Persona Templates ─────────────────────────────────────────────────
 
 @router.get("/persona-templates")

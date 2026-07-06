@@ -83,6 +83,12 @@ const AIAgents = () => {
 
   const [personaTemplates, setPersonaTemplates] = useState<any[]>([]);
 
+  // Aprendizajes (lecciones del agente)
+  const [lessons, setLessons] = useState<any[]>([]);
+  const [newLesson, setNewLesson] = useState('');
+  const [lessonBusy, setLessonBusy] = useState(false);
+  const [distilling, setDistilling] = useState(false);
+
   const [searchQuery, setSearchQuery] = useState('precio');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
@@ -117,10 +123,58 @@ const AIAgents = () => {
     }
   };
 
+  const fetchLessons = async () => {
+    try {
+      const { data } = await api.get('/ai/lessons');
+      setLessons(data.lessons || []);
+    } catch { /* noop */ }
+  };
+
   useEffect(() => {
     fetchAgents();
     fetchTemplates();
+    fetchLessons();
   }, []);
+
+  const addLesson = async () => {
+    if (!newLesson.trim()) return;
+    setLessonBusy(true);
+    try {
+      await api.post('/ai/lessons', { content: newLesson.trim() });
+      setNewLesson('');
+      toast.success('Aprendizaje agregado — el agente ya lo aplica');
+      await fetchLessons();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudo agregar');
+    } finally { setLessonBusy(false); }
+  };
+
+  const toggleLesson = async (l: any) => {
+    try {
+      await api.put(`/ai/lessons/${l.id}`, { active: !l.active });
+      toast.success(l.active ? 'Aprendizaje desactivado' : 'Aprendizaje activado');
+      await fetchLessons();
+    } catch { toast.error('Error'); }
+  };
+
+  const deleteLesson = async (l: any) => {
+    if (!confirm('¿Eliminar este aprendizaje?')) return;
+    try {
+      await api.delete(`/ai/lessons/${l.id}`);
+      await fetchLessons();
+    } catch { toast.error('Error'); }
+  };
+
+  const distill = async () => {
+    setDistilling(true);
+    try {
+      const { data } = await api.post('/ai/lessons/distill');
+      toast.info(data.message || 'Listo');
+      await fetchLessons();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al analizar');
+    } finally { setDistilling(false); }
+  };
 
   useEffect(() => {
     testEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -462,7 +516,58 @@ const AIAgents = () => {
             )}
           </Paper>
 
-          <Paper className='anim-fade-up anim-fade-up-4' sx={{ p: 2.5 }}>
+          <Paper className='anim-fade-up anim-fade-up-4' sx={{ p: 2.5, mb: 2 }}>
+            <Stack direction='row' justifyContent='space-between' alignItems='center'>
+              <Typography variant='h6'>Aprendizajes</Typography>
+              <Button size='small' variant='outlined' onClick={distill} disabled={distilling}>
+                {distilling ? <CircularProgress size={16} /> : 'Aprender de las conversaciones'}
+              </Button>
+            </Stack>
+            <Typography variant='caption' color='text.secondary'>
+              Lecciones que el agente aplica en cada conversación: cómo son tus clientes y qué funciona para vender.
+              Las cargás vos, o el agente las propone analizando conversaciones que cerraron bien (esas quedan
+              pendientes hasta que las actives).
+            </Typography>
+
+            <Stack direction='row' spacing={1} sx={{ mt: 1.5, mb: 1.5 }}>
+              <TextField
+                fullWidth size='small'
+                placeholder='Ej: Si dudan por el precio, ofrecer opciones de financiación antes de mostrar más barato'
+                value={newLesson}
+                onChange={(e) => setNewLesson(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addLesson(); } }}
+              />
+              <Button variant='contained' onClick={addLesson} disabled={lessonBusy || !newLesson.trim()}>
+                Agregar
+              </Button>
+            </Stack>
+
+            <Stack spacing={0.8} sx={{ maxHeight: 260, overflowY: 'auto' }}>
+              {lessons.length === 0 ? (
+                <Typography variant='body2' color='text.secondary'>
+                  Sin aprendizajes todavía. Agregá el primero o generalos desde las conversaciones.
+                </Typography>
+              ) : lessons.map((l) => (
+                <Paper key={l.id} variant='outlined' sx={{ p: 1, px: 1.5, display: 'flex', alignItems: 'center', gap: 1, opacity: l.active ? 1 : 0.55 }}>
+                  <Chip
+                    size='small'
+                    label={l.source === 'auto' ? (l.active ? 'auto' : 'propuesto') : 'manual'}
+                    color={l.source === 'auto' && !l.active ? 'warning' : l.active ? 'success' : 'default'}
+                    sx={{ height: 20, fontSize: '0.65rem', flexShrink: 0 }}
+                  />
+                  <Typography variant='body2' sx={{ flexGrow: 1, fontSize: '0.82rem' }}>{l.content}</Typography>
+                  <Button size='small' onClick={() => toggleLesson(l)} sx={{ fontSize: '0.68rem', minWidth: 0 }}>
+                    {l.active ? 'Desactivar' : 'Activar'}
+                  </Button>
+                  <Button size='small' color='error' onClick={() => deleteLesson(l)} sx={{ fontSize: '0.68rem', minWidth: 0 }}>
+                    Borrar
+                  </Button>
+                </Paper>
+              ))}
+            </Stack>
+          </Paper>
+
+          <Paper className='anim-fade-up anim-fade-up-5' sx={{ p: 2.5 }}>
             <Typography variant='h6'>Búsqueda inteligente en Conocimiento</Typography>
             <Stack direction='row' spacing={1.5} sx={{ mt: 1 }}>
               <TextField fullWidth label='Probá una pregunta real del cliente' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />

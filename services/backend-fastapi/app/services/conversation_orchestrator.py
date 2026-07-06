@@ -2192,9 +2192,17 @@ BASE DE CONOCIMIENTO:
             ]
             instrucciones = instrucciones + chr(10) + chr(10) + chr(10).join(_ov_lines) + chr(10)
 
+        _lessons_block = ""
+        try:
+            from app.services.agent_learning import active_lessons_text
+            _lessons_block = active_lessons_text(self.company_id)
+        except Exception:
+            _lessons_block = ""
+
         prompt_parts = [
             identity,
             company_info,
+            (chr(10) + _lessons_block) if _lessons_block else "",
             f"\nBASE DE CONOCIMIENTO:\n{kb_text}\n" if kb_text else "",
             slots_info,
             state_info,
