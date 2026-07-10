@@ -135,8 +135,13 @@ async def meta_dispatch(req: Request, response: Response, db: Session = Depends(
             r = await _handle_whatsapp_entry(db, entry, body, req, response)
             results.append(r)
         elif obj == "instagram":
-            r = await _handle_channel_entry(db, "instagram", entry)
-            results.append(r)
+            if entry.get("messaging"):
+                r = await _handle_channel_entry(db, "instagram", entry)
+                results.append(r)
+            for change in entry.get("changes", []):
+                if change.get("field") == "comments":
+                    r = await _handle_comment(db, "instagram", entry, change)
+                    results.append(r)
         elif obj == "page":
             if "messaging" in entry:
                 r = await _handle_channel_entry(db, "messenger", entry)
@@ -145,6 +150,9 @@ async def meta_dispatch(req: Request, response: Response, db: Session = Depends(
                 for change in entry.get("changes", []):
                     if change.get("field") == "leadgen":
                         r = await _handle_leadgen(db, entry, change, body, req)
+                        results.append(r)
+                    elif change.get("field") == "feed":
+                        r = await _handle_comment(db, "messenger", entry, change)
                         results.append(r)
 
     return {"ok": True, "results": results}
@@ -452,6 +460,18 @@ def _ensure_ticket(db: Session, channel: dict, contact: dict) -> Optional[dict]:
         log.warning("ensure_ticket error: %s", e)
         db.rollback()
         return None
+
+
+# ── Comment-to-DM: comentarios en publicaciones IG/FB ─────────────
+async def _handle_comment(db: Session, channel_type: str, entry: dict, change: dict):
+    try:
+        from app.services.comment_automations import handle_comment_change
+        result = await handle_comment_change(db, channel_type, entry, change)
+        return {"channel": f"{channel_type}_comment", **(result or {})}
+    except Exception as e:
+        log.error("[%s comment] error: %s\n%s", channel_type, e, traceback.format_exc())
+        db.rollback()
+        return {"channel": f"{channel_type}_comment", "error": str(e)[:200]}
 
 
 # ── Lead Ads: delegate to existing handler ────────────────────────

@@ -17,6 +17,7 @@ import Knowledge from '../pages/Knowledge';
 import Agenda from '../pages/Agenda';
 import Funnel from '../pages/Funnel';
 import Templates from '../pages/Templates';
+import CommentAutomations from '../pages/CommentAutomations';
 import Reports from '../pages/Reports';
 import Billing from '../pages/Billing';
 import Security from '../pages/Security';
@@ -73,6 +74,7 @@ const Routes = () => {
         <Route path='funnel' element={<Funnel />} />
         <Route path='webhooks' element={<Navigate to='/integrations' replace />} />
         <Route path='templates' element={<Templates />} />
+        <Route path='comment-automations' element={<CommentAutomations />} />
         <Route path='reports' element={<Reports />} />
         <Route path='billing' element={<Billing />} />
         <Route path='security' element={<Security />} />

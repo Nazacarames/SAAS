@@ -15,6 +15,7 @@ import {
   AutoStories as AutoStoriesIcon,
   CalendarMonth as CalendarMonthIcon,
   TextSnippet as TextSnippetIcon,
+  Forum as ForumIcon,
   Analytics as AnalyticsIcon,
   CreditCard as CreditCardIcon
 } from '@mui/icons-material';
@@ -34,6 +35,7 @@ const menuItems = [
   { text: 'Agente IA',       icon: <SmartToyIcon />,    path: '/ai-agents',     section: 'config', adminOnly: true },
   { text: 'Conocimiento',    icon: <AutoStoriesIcon />, path: '/knowledge',     section: 'config', adminOnly: true },
   { text: 'Templates',       icon: <TextSnippetIcon />, path: '/templates',     section: 'config', adminOnly: true },
+  { text: 'Comentarios',     icon: <ForumIcon />,       path: '/comment-automations', section: 'config', adminOnly: true },
   { text: 'Usuarios',        icon: <PeopleIcon />,      path: '/users',         section: 'config', adminOnly: true },
   { text: 'Integraciones',   icon: <SettingsIcon />,    path: '/integrations',  section: 'config', adminOnly: true },
   { text: 'Seguridad',       icon: <SettingsIcon />,    path: '/security',      section: 'config' },
