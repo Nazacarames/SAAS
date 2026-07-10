@@ -3,6 +3,7 @@ import {
   Box, Typography, Stack, Paper, Table, TableHead, TableRow, TableCell, TableBody,
   Chip, Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField,
   Select, MenuItem, FormControl, InputLabel, CircularProgress, IconButton, Tooltip, Alert,
+  Switch,
 } from '@mui/material';
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Refresh as RefreshIcon,
@@ -35,6 +36,36 @@ const Templates = () => {
   const [error, setError] = useState('');
   const [templates, setTemplates] = useState<WabaTemplate[]>([]);
 
+  // Recaptación automática
+  const [ree, setRee] = useState<any>(null);
+  const [reeBusy, setReeBusy] = useState(false);
+
+  const loadRee = useCallback(async () => {
+    try {
+      const { data } = await api.get('/channels/reengagement');
+      setRee(data);
+    } catch { /* noop */ }
+  }, []);
+
+  const toggleRee = async () => {
+    if (!ree) return;
+    setReeBusy(true);
+    try {
+      const { data } = await api.put('/channels/reengagement', { enabled: !ree.enabled });
+      if (data.template_created) {
+        toast.info('Se creó la plantilla de reenganche y quedó en revisión de Meta — la recaptación arranca sola cuando se apruebe', { autoClose: 9000 });
+      } else {
+        toast.success(!ree.enabled ? 'Recaptación activada' : 'Recaptación desactivada');
+      }
+      await loadRee();
+      await load(true);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudo cambiar');
+    } finally {
+      setReeBusy(false);
+    }
+  };
+
   // dialog crear/editar
   const [target, setTarget] = useState<WabaTemplate | null | 'new'>(null);
   const [fName, setFName] = useState('');
@@ -58,7 +89,7 @@ const Templates = () => {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); loadRee(); }, [load, loadRee]);
 
   const openCreate = () => {
     setFName(''); setFCategory('MARKETING'); setFLanguage('es_AR');
@@ -141,6 +172,31 @@ const Templates = () => {
           </Button>
         </Stack>
       </Stack>
+
+      {/* Recaptación automática de leads */}
+      {ree && (
+        <Paper sx={{ mt: 2, p: 2, px: 2.5, borderRadius: '12px', background: 'rgba(255,255,255,0.02)', border: `1px solid ${ree.enabled ? 'rgba(52,211,153,0.25)' : 'rgba(255,255,255,0.06)'}`, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+          <Box sx={{ flexGrow: 1, minWidth: 260 }}>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography sx={{ fontWeight: 700, fontSize: '0.95rem', color: '#E8EBF2' }}>Recaptación automática de leads</Typography>
+              {ree.enabled && ree.template_status === 'PENDING' && (
+                <Chip size="small" label="plantilla en revisión de Meta" sx={{ height: 20, fontSize: '0.65rem', backgroundColor: 'rgba(232,160,32,0.12)', color: '#E8A020' }} />
+              )}
+              {ree.enabled && ree.template_status === 'APPROVED' && (
+                <Chip size="small" label="operativa" sx={{ height: 20, fontSize: '0.65rem', fontWeight: 700, backgroundColor: 'rgba(52,211,153,0.12)', color: '#34D399' }} />
+              )}
+            </Stack>
+            <Typography sx={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.45)', mt: 0.3 }}>
+              Si un lead con interés deja de responder por {ree.days} días, el agente le escribe solo un mensaje
+              personalizado para retomar la conversación (usa la plantilla aprobada de Meta; máximo un reenganche por lead).
+            </Typography>
+          </Box>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            {reeBusy && <CircularProgress size={16} />}
+            <Switch checked={!!ree.enabled} onChange={toggleRee} disabled={reeBusy} />
+          </Stack>
+        </Paper>
+      )}
 
       {error ? (
         <Alert severity="warning" sx={{ mt: 2 }}>{error}</Alert>

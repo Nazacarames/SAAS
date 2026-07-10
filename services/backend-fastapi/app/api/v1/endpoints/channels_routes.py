@@ -174,6 +174,132 @@ def create_channel(
     return {"ok": True, "channel": dict(row) if row else None}
 
 
+# ── Recaptación automática (toggle por empresa en la página Templates) ─
+
+_REENGAGE_TEMPLATE_NAME = "reenganche_agente"
+_REENGAGE_TEMPLATE_BODY = ("Hola {{1}}! Soy el asistente de la inmobiliaria. {{2}} "
+                           "Respondé este mensaje y seguimos por acá.")
+
+
+def _reengage_template_status(creds: dict) -> str:
+    """APPROVED | PENDING | REJECTED | missing"""
+    try:
+        resp = httpx.get(
+            f"{GRAPH}/{creds['waba_id']}/message_templates",
+            params={"access_token": creds["token"], "fields": "name,status", "limit": 100},
+            timeout=15,
+        )
+        for t in (resp.json().get("data") or []):
+            if t.get("name") == _REENGAGE_TEMPLATE_NAME:
+                return t.get("status", "PENDING")
+    except Exception:
+        pass
+    return "missing"
+
+
+@router.get("/reengagement")
+def reengagement_get(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = payload.get("companyId")
+    row = db.execute(
+        text("SELECT ai_config_json FROM ai_agents WHERE company_id = :cid AND is_active = true ORDER BY id DESC LIMIT 1"),
+        {"cid": company_id},
+    ).mappings().first()
+    cfg = {}
+    if row and row["ai_config_json"]:
+        try:
+            cfg = (json.loads(row["ai_config_json"]) or {}).get("reengagement") or {}
+        except Exception:
+            cfg = {}
+    creds = _wa_channel_creds(db, company_id)
+    template_status = _reengage_template_status(creds) if creds else "missing"
+    return {
+        "ok": True,
+        "enabled": bool(cfg.get("enabled")),
+        "days": int(cfg.get("days", 3)),
+        "has_agent": bool(row),
+        "has_whatsapp": bool(creds),
+        "template_status": template_status,
+    }
+
+
+class ReengagementUpdate(BaseModel):
+    enabled: bool
+    days: int | None = None
+
+
+@router.put("/reengagement")
+def reengagement_set(
+    body: ReengagementUpdate,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+
+    agent = db.execute(
+        text("SELECT id, ai_config_json FROM ai_agents WHERE company_id = :cid AND is_active = true ORDER BY id DESC LIMIT 1"),
+        {"cid": company_id},
+    ).mappings().first()
+    if not agent:
+        raise HTTPException(status_code=400, detail="Primero activá un Agente IA (sección Agente IA)")
+
+    template_created = False
+    if body.enabled:
+        creds = _wa_channel_creds(db, company_id)
+        if not creds:
+            raise HTTPException(status_code=400, detail="Necesitás un canal de WhatsApp activo para recaptar")
+        # Si la empresa no tiene la plantilla de reenganche, se crea sola
+        status = _reengage_template_status(creds)
+        if status == "missing":
+            resp = httpx.post(
+                f"{GRAPH}/{creds['waba_id']}/message_templates",
+                params={"access_token": creds["token"]},
+                json={
+                    "name": _REENGAGE_TEMPLATE_NAME, "language": "es_AR", "category": "MARKETING",
+                    "components": [{
+                        "type": "BODY", "text": _REENGAGE_TEMPLATE_BODY,
+                        "example": {"body_text": [["Martina", "Estuviste buscando un depto en alquiler y esta semana entraron opciones nuevas. ¿Seguís buscando?"]]},
+                    }],
+                },
+                timeout=25,
+            )
+            if resp.status_code != 200:
+                err = resp.json().get("error", {}).get("message", "")[:200]
+                raise HTTPException(status_code=502, detail=f"No se pudo crear la plantilla en Meta: {err}")
+            template_created = True
+            status = "PENDING"
+
+    try:
+        cfg = json.loads(agent["ai_config_json"]) if agent["ai_config_json"] else {}
+    except Exception:
+        cfg = {}
+    ree = cfg.get("reengagement") or {}
+    ree.update({
+        "enabled": body.enabled,
+        "days": max(1, min(int(body.days or ree.get("days", 3)), 30)),
+        "max_wait_days": ree.get("max_wait_days", 14),
+        "agent_generated": True,
+        "template_name": _REENGAGE_TEMPLATE_NAME,
+        "template_lang": ree.get("template_lang", "es_AR"),
+        "template_body": _REENGAGE_TEMPLATE_BODY,
+    })
+    cfg["reengagement"] = ree
+    db.execute(
+        text("UPDATE ai_agents SET ai_config_json = :c, updated_at = NOW() WHERE id = :id"),
+        {"c": json.dumps(cfg, ensure_ascii=False), "id": agent["id"]},
+    )
+    db.commit()
+    try:
+        from app.services.cache import invalidate
+        invalidate(f"agent_cfg:{company_id}")
+    except Exception:
+        pass
+    return {"ok": True, "enabled": body.enabled, "template_created": template_created}
+
+
 @router.put("/{channel_id}")
 def update_channel(
     channel_id: int,
