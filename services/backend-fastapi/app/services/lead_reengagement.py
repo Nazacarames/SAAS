@@ -36,8 +36,8 @@ SCAN_INTERVAL_SECONDS = 1800
 MAX_PER_COMPANY_PER_RUN = 15
 # Errores de Meta que NO deben reintentarse para el mismo lead
 _PERMANENT_ERROR_CODES = {131026, 131047, 131051, 100}  # destino inválido / ventana / tipo no soportado
-# Template todavía en revisión / pausado → reintentar en la próxima corrida
-_RETRY_ERROR_CODES = {132001, 132015, 132016}
+# Template en revisión / pausado / excepción interna (-1) → reintentar próxima corrida
+_RETRY_ERROR_CODES = {132001, 132015, 132016, -1}
 
 
 def _reengagement_cfg(company_id: int) -> dict:
@@ -155,10 +155,11 @@ def _send_template(wa: dict, to_number: str, template: str, lang: str, params: l
         },
     }
     try:
+        # get_whatsapp_config devuelve {"phoneId", "token"}
         resp = httpx.post(
-            f"https://graph.facebook.com/v21.0/{wa['phone_number_id']}/messages",
+            f"https://graph.facebook.com/v21.0/{wa['phoneId']}/messages",
             json=payload,
-            headers={"Authorization": f"Bearer {wa['access_token']}"},
+            headers={"Authorization": f"Bearer {wa['token']}"},
             timeout=20,
         )
         if resp.status_code == 200:
