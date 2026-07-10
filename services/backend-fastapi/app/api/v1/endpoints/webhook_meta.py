@@ -474,7 +474,41 @@ async def _handle_comment(db: Session, channel_type: str, entry: dict, change: d
         return {"channel": f"{channel_type}_comment", "error": str(e)[:200]}
 
 
-# ── Lead Ads: delegate to existing handler ────────────────────────
+# ── Lead Ads: reenvía al procesador por-empresa existente ─────────
 async def _handle_leadgen(db: Session, entry: dict, change: dict, raw_body: bytes, req: Request):
-    log.info("leadgen event from page %s", entry.get("id"))
-    return {"channel": "leadgen", "delegated": True}
+    """La suscripción del objeto 'page' apunta a este webhook unificado; los
+    leadgen se reenvían (mismo body + firma) al endpoint por-empresa que ya
+    hace el procesamiento real. Página→empresa vía metaLeadAdsPageId."""
+    page_id = str(entry.get("id", ""))
+    company_id = None
+    try:
+        rows = db.execute(text("SELECT company_id, settings_json FROM company_runtime_settings")).mappings().all()
+        for row in rows:
+            s = row["settings_json"]
+            if isinstance(s, str):
+                try:
+                    s = json.loads(s)
+                except Exception:
+                    continue
+            if str((s or {}).get("metaLeadAdsPageId", "")).strip() == page_id:
+                company_id = int(row["company_id"])
+                break
+    except Exception as e:
+        log.warning("leadgen company lookup failed: %s", e)
+    if not company_id:
+        log.info("leadgen event from page %s: no company mapped", page_id)
+        return {"channel": "leadgen", "ignored": True, "reason": "no_company_for_page"}
+
+    sig = req.headers.get("x-hub-signature-256", "")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"http://127.0.0.1:4010/api/ai/meta-leads/webhook/{company_id}",
+                content=raw_body,
+                headers={"Content-Type": "application/json", "x-hub-signature-256": sig},
+                timeout=30,
+            )
+        return {"channel": "leadgen", "forwarded_to": company_id, "status": resp.status_code}
+    except Exception as e:
+        log.error("leadgen forward failed company=%s: %s", company_id, str(e)[:150])
+        return {"channel": "leadgen", "error": str(e)[:150]}
