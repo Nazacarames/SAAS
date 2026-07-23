@@ -160,6 +160,21 @@ class WebhookResponse(BaseModel):
     ai_reply: Optional[str] = None
 
 
+def _extract_profile_name(payload: dict, wa_id: str) -> str:
+    """Nombre de perfil que sugiere WhatsApp (pushname) para el remitente."""
+    try:
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                for c in change.get("value", {}).get("contacts", []) or []:
+                    if not wa_id or str(c.get("wa_id", "")) == str(wa_id):
+                        name = str((c.get("profile") or {}).get("name") or "").strip()
+                        if name:
+                            return name[:120]
+    except Exception:
+        pass
+    return ""
+
+
 def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
     """Extract ALL message tuples (msg_id, from, text) from WhatsApp webhook payload.
     Status-only webhooks return empty list.
@@ -529,7 +544,22 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
         print(f"[webhook] company_id detection error (non-fatal): {_cid_err}")
 
     # Find or auto-create contact, scoped to the correct company
+    pushname = _extract_profile_name(payload, from_number)
     contact = get_contact_by_phone(db, from_number, company_id=_incoming_company_id)
+    if contact and pushname:
+        # Si el nombre actual nunca fue personalizado (vacío o solo el número),
+        # adoptar el nombre que sugiere WhatsApp. Nombres editados no se tocan.
+        _current = str(contact.get("name") or "").strip()
+        if (not _current or re.fullmatch(r"[\d\s+\-]+", _current)) and _current != pushname:
+            try:
+                db.execute(
+                    text('UPDATE contacts SET name = :n, "updatedAt" = NOW() WHERE id = :id'),
+                    {"n": pushname, "id": contact["id"]},
+                )
+                db.commit()
+                contact["name"] = pushname
+            except Exception:
+                db.rollback()
     if not contact:
         if not _incoming_company_id:
             # Cannot determine which tenant this message belongs to — drop it
@@ -539,7 +569,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             from app.api.v1.endpoints._ai_shared import _normalize_phone
             normalized_phone = _normalize_phone(from_number)
             contact = create_contact(db, company_id=_incoming_company_id, payload={
-                "name": normalized_phone,
+                "name": pushname or normalized_phone,
                 "number": normalized_phone,
                 "source": "whatsapp",
                 "leadStatus": "open",

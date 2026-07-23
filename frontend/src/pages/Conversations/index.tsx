@@ -325,8 +325,9 @@ const Conversations = () => {
       const contactId = t.contactId || t.contact?.id;
       if (!contactId) continue;
 
-      const name = t.contact?.name || 'Sin nombre';
-      const number = t.contact?.number || '';
+      // La API /conversations devuelve name/number planos en cada fila
+      const number = t.number || t.contact?.number || '';
+      const name = t.name || t.contact?.name || number || 'Sin nombre';
       const updatedAt = t.updatedAt || t.createdAt;
       const current = byContact.get(contactId);
       const lastMessage = t.lastMessage || current?.lastMessage || '';
