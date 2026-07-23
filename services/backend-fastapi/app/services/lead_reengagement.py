@@ -18,8 +18,10 @@ Config por empresa en ai_agents.ai_config_json:
   }
 
 Marca contacts."lastInactivityFiredAt" al enviar (o al fallar por destino
-inválido) para no repetir; si el lead vuelve a escribir, el campo queda
-detrás de su última actividad y vuelve a ser elegible más adelante.
+inválido) para no repetir. La inactividad se mide contra el último mensaje
+DEL CLIENTE (fromMe = false): nuestros propios envíos no reinician el reloj,
+así que cada lead recibe UN solo reenganche — solo vuelve a ser elegible si
+después vuelve a escribir y se queda inactivo otra vez.
 """
 import asyncio
 import json
@@ -64,7 +66,11 @@ def _candidates(db, company_id: int, days: int, max_wait_days: int) -> list:
             SELECT c.id, c.name, c.number, c.needs, c.lead_score, m.last_at
             FROM contacts c
             JOIN LATERAL (
-                SELECT MAX(msg."createdAt") AS last_at FROM messages msg WHERE msg."contactId" = c.id
+                -- solo mensajes del cliente: nuestros envíos (incluido el propio
+                -- reenganche) no cuentan como actividad, si contaran el lead
+                -- volvería a ser "inactivo hace N días" en loop eterno
+                SELECT MAX(msg."createdAt") AS last_at FROM messages msg
+                WHERE msg."contactId" = c.id AND msg."fromMe" = false
             ) m ON TRUE
             WHERE c."companyId" = :cid
               AND COALESCE(c."isGroup", false) = false
