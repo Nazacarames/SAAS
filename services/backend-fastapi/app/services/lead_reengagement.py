@@ -14,7 +14,10 @@ Config por empresa en ai_agents.ai_config_json:
     "max_wait_days": 14,           // más viejo que esto no se recontacta
     "template_name": "reenganche_lead",
     "template_lang": "es_AR",
-    "template_body": "Hola {{1}}! ..."   // para guardar el texto en la conversación
+    "template_body": "Hola {{1}}! ...",  // para guardar el texto en la conversación
+    "send_hour_start": 9,              // ventana horaria de envío (hora local)
+    "send_hour_end": 20,               // fuera de [start, end) no se envía nada
+    "timezone": "America/Argentina/Buenos_Aires"
   }
 
 Marca contacts."lastInactivityFiredAt" al enviar (o al fallar por destino
@@ -26,6 +29,8 @@ después vuelve a escribir y se queda inactivo otra vez.
 import asyncio
 import json
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import text
@@ -58,6 +63,29 @@ def _reengagement_cfg(company_id: int) -> dict:
         return raw.get("reengagement") or {}
     finally:
         db.close()
+
+
+_DEFAULT_TZ = "America/Argentina/Buenos_Aires"
+
+
+def _within_send_window(cfg: dict) -> bool:
+    """Ventana horaria de envío [start, end) en hora local de la empresa.
+    Fuera de ventana el scan saltea la empresa; el lead sale en la próxima
+    corrida dentro del horario (no se pierde, no cambia estado)."""
+    try:
+        start = int(cfg.get("send_hour_start", 9))
+        end = int(cfg.get("send_hour_end", 20))
+    except (TypeError, ValueError):
+        start, end = 9, 20
+    try:
+        hour = datetime.now(ZoneInfo(str(cfg.get("timezone") or _DEFAULT_TZ))).hour
+    except Exception:
+        hour = datetime.now(ZoneInfo(_DEFAULT_TZ)).hour
+    if start == end:
+        return True  # ventana degenerada = sin restricción
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end  # ventana que cruza medianoche
 
 
 def _candidates(db, company_id: int, days: int, max_wait_days: int) -> list:
@@ -204,6 +232,8 @@ def _run_scan() -> None:
             cid = int(row["company_id"])
             cfg = _reengagement_cfg(cid)
             if not cfg.get("enabled") or not cfg.get("template_name"):
+                continue
+            if not _within_send_window(cfg):
                 continue
             ok, _ = check_subscription_active(db, cid)
             if not ok:
