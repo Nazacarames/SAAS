@@ -73,6 +73,67 @@ const Connections = () => {
 
   const companyVerifyToken = channels.find((c) => c.verify_token)?.verify_token || '';
 
+  // Embedded Signup oficial de WhatsApp (Tech Provider): popup de Meta,
+  // el cliente elige su WABA y número, el backend canjea el code y conecta.
+  const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; ready: boolean } | null>(null);
+  const [esConnecting, setEsConnecting] = useState(false);
+  const esSession = { waba_id: '', phone_number_id: '' };
+
+  useEffect(() => {
+    api.get('/channels/embedded-signup/config').then(({ data }) => setEsConfig(data)).catch(() => {});
+    const onMsg = (event: MessageEvent) => {
+      if (!String(event.origin).includes('facebook.com')) return;
+      try {
+        const d = JSON.parse(event.data);
+        if (d.type === 'WA_EMBEDDED_SIGNUP' && d.data) {
+          esSession.waba_id = d.data.waba_id || '';
+          esSession.phone_number_id = d.data.phone_number_id || '';
+        }
+      } catch { /* mensajes no-JSON de la SDK */ }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startEmbeddedSignup = () => {
+    if (!esConfig?.ready) {
+      toast.info('Falta configurar el Embedded Signup en la app de Meta (config_id)');
+      return;
+    }
+    const launch = () => {
+      const FB = (window as any).FB;
+      FB.login((response: any) => {
+        const code = response?.authResponse?.code;
+        if (!code) { toast.info('Conexión cancelada'); return; }
+        setEsConnecting(true);
+        api.post('/channels/embedded-signup', {
+          code, waba_id: esSession.waba_id, phone_number_id: esSession.phone_number_id,
+        }).then(({ data }) => {
+          toast.success(`WhatsApp ${data.phone || ''} conectado`);
+          (data.warnings || []).forEach((w: string) => toast.warning(w, { autoClose: 10000 }));
+          load();
+        }).catch((e: any) => {
+          toast.error(e?.response?.data?.detail || 'No se pudo conectar');
+        }).finally(() => setEsConnecting(false));
+      }, {
+        config_id: esConfig.config_id,
+        response_type: 'code',
+        override_default_response_type: true,
+        extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+      });
+    };
+    if ((window as any).FB) { launch(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://connect.facebook.net/es_LA/sdk.js';
+    s.async = true;
+    s.onload = () => {
+      (window as any).FB.init({ appId: esConfig.app_id, autoLogAppEvents: true, xfbml: false, version: 'v21.0' });
+      launch();
+    };
+    document.body.appendChild(s);
+  };
+
   const load = useCallback(async () => {
     try {
       const { data } = await api.get('/channels');
@@ -271,9 +332,17 @@ const Connections = () => {
           <Button variant="outlined" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
             Carga manual
           </Button>
-          <Button variant="contained" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
-            Conectar con Meta
+          <Button variant="outlined" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
+            Conectar con token
           </Button>
+          <Tooltip title={esConfig && !esConfig.ready ? 'Pendiente de configuración en Meta (config_id)' : ''}>
+            <span>
+              <Button variant="contained" onClick={startEmbeddedSignup} disabled={esConnecting || !esConfig}
+                sx={{ fontSize: '0.82rem', bgcolor: '#25D366', '&:hover': { bgcolor: '#1DA851' } }}>
+                {esConnecting ? <CircularProgress size={18} /> : 'Conectar WhatsApp'}
+              </Button>
+            </span>
+          </Tooltip>
         </Stack>
       </Stack>
 

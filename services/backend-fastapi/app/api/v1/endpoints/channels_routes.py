@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import secrets
 from datetime import datetime, timezone
 
@@ -504,6 +505,158 @@ async def discover_assets(
 
     return {"ok": True, "token_info": token_info, "whatsapp": whatsapp,
             "instagram": instagram, "messenger": pages, "warnings": warnings}
+
+
+# ── Embedded Signup de WhatsApp (Tech Provider) ──────────────────────
+# El cliente conecta su WhatsApp con el popup oficial de Meta: el frontend
+# corre FB.login con la configuración de Embedded Signup y nos manda el
+# code + waba_id + phone_number_id. Acá canjeamos el code por el business
+# token, suscribimos la app al WABA (webhooks), registramos el número en
+# la Cloud API y dejamos el canal creado.
+
+class EmbeddedSignupBody(BaseModel):
+    code: str
+    waba_id: str = ""
+    phone_number_id: str = ""
+
+
+@router.get("/embedded-signup/config")
+def embedded_signup_config(payload: dict = Depends(get_current_user_payload)):
+    app_id = os.getenv("META_APP_ID", "").strip()
+    config_id = os.getenv("META_ES_CONFIG_ID", "").strip()
+    return {"app_id": app_id, "config_id": config_id, "ready": bool(app_id and config_id)}
+
+
+@router.post("/embedded-signup")
+async def embedded_signup_connect(
+    body: EmbeddedSignupBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    app_id = os.getenv("META_APP_ID", "").strip()
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        raise HTTPException(status_code=500, detail="Falta configurar META_APP_ID/META_APP_SECRET")
+    if not body.code.strip():
+        raise HTTPException(status_code=400, detail="Falta el code de Meta")
+
+    warnings: list[str] = []
+    async with httpx.AsyncClient(timeout=25) as client:
+        # 1. code → business token
+        resp = await client.get(f"{GRAPH}/oauth/access_token", params={
+            "client_id": app_id, "client_secret": app_secret, "code": body.code.strip(),
+        })
+        if resp.status_code != 200:
+            err = (resp.json().get("error") or {}).get("message") or resp.text[:200]
+            raise HTTPException(status_code=400, detail=f"Meta rechazó el código: {err}")
+        token = resp.json().get("access_token") or ""
+        if not token:
+            raise HTTPException(status_code=400, detail="Meta no devolvió un token")
+
+        # 2. Resolver WABA/número si el popup no los informó
+        waba_id = body.waba_id.strip()
+        phone_id = body.phone_number_id.strip()
+        if not waba_id:
+            resp = await client.get(f"{GRAPH}/me/businesses", params={"access_token": token, "limit": 5})
+            for biz in (resp.json().get("data") or []) if resp.status_code == 200 else []:
+                r2 = await client.get(f"{GRAPH}/{biz['id']}/owned_whatsapp_business_accounts",
+                                      params={"access_token": token, "limit": 5})
+                wabas = (r2.json().get("data") or []) if r2.status_code == 200 else []
+                if wabas:
+                    waba_id = wabas[0]["id"]
+                    break
+        if waba_id and not phone_id:
+            resp = await client.get(f"{GRAPH}/{waba_id}/phone_numbers", params={"access_token": token})
+            nums = (resp.json().get("data") or []) if resp.status_code == 200 else []
+            if nums:
+                phone_id = nums[0]["id"]
+        if not waba_id or not phone_id:
+            raise HTTPException(status_code=400, detail="No se pudo identificar el WABA o el número de WhatsApp")
+
+        # 3. Suscribir la app al WABA (para que lleguen los webhooks)
+        resp = await client.post(f"{GRAPH}/{waba_id}/subscribed_apps",
+                                 headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            warnings.append(f"No se pudo suscribir la app al WABA: {resp.text[:120]}")
+
+        # 4. Datos del número para nombrar el canal
+        display, verified_name = "", ""
+        resp = await client.get(f"{GRAPH}/{phone_id}",
+                                params={"access_token": token,
+                                        "fields": "display_phone_number,verified_name"})
+        if resp.status_code == 200:
+            display = resp.json().get("display_phone_number") or ""
+            verified_name = resp.json().get("verified_name") or ""
+
+        # 5. Registrar el número en la Cloud API (necesario para enviar)
+        pin = f"{secrets.randbelow(1000000):06d}"
+        resp = await client.post(f"{GRAPH}/{phone_id}/register",
+                                 headers={"Authorization": f"Bearer {token}"},
+                                 json={"messaging_product": "whatsapp", "pin": pin})
+        registered = resp.status_code == 200 and (resp.json() or {}).get("success")
+        if not registered:
+            err = (resp.json().get("error") or {}).get("message") if "json" in resp.headers.get("content-type", "") else resp.text[:120]
+            warnings.append(f"El número quedó conectado pero no se pudo registrar en la Cloud API: {err}. "
+                            "Si ya estaba registrado, ignorá este aviso.")
+
+    # 6. Canal + conexión (si ya existía para esta empresa, renovar token)
+    existing = db.execute(
+        text("SELECT id, company_id, meta_connection_id FROM channels WHERE channel_type = 'whatsapp' AND external_id = :eid"),
+        {"eid": phone_id},
+    ).mappings().first()
+    if existing and int(existing["company_id"]) != int(company_id):
+        raise HTTPException(status_code=409, detail="Ese número ya está conectado en otra cuenta")
+
+    verify_token = _get_company_verify_token(db, company_id) or secrets.token_urlsafe(32)
+    config = {"verifyToken": verify_token, "wabaId": waba_id, "registerPin": pin,
+              "connectedVia": "embedded_signup"}
+    channel_name = verified_name or display or "WhatsApp"
+
+    if existing:
+        if existing["meta_connection_id"]:
+            db.execute(text("UPDATE meta_connections SET access_token = :t, status = 'connected', updated_at = NOW() WHERE id = :id"),
+                       {"t": encrypt(token), "id": existing["meta_connection_id"]})
+        db.execute(text("UPDATE channels SET name = :n, config_json = :cfg, status = 'active' WHERE id = :id"),
+                   {"n": channel_name, "cfg": json.dumps(config), "id": existing["id"]})
+        db.commit()
+        channel_id = existing["id"]
+    else:
+        mc_id = db.execute(
+            text("""INSERT INTO meta_connections (company_id, access_token, phone_number_id, page_id, status, scopes_json, created_at, updated_at)
+                    VALUES (:cid, :token, :phone, '', 'connected', '[]', NOW(), NOW()) RETURNING id"""),
+            {"cid": company_id, "token": encrypt(token), "phone": phone_id},
+        ).scalar()
+        channel_id = db.execute(
+            text("""INSERT INTO channels (company_id, channel_type, name, external_id, meta_connection_id, config_json, status)
+                    VALUES (:cid, 'whatsapp', :name, :eid, :mc, :cfg, 'active') RETURNING id"""),
+            {"cid": company_id, "name": channel_name, "eid": phone_id, "mc": mc_id, "cfg": json.dumps(config)},
+        ).scalar()
+        db.commit()
+
+    # webhook routing por phone_number_id (company_runtime_settings)
+    try:
+        runtime_row = db.execute(
+            text("SELECT settings_json FROM company_runtime_settings WHERE company_id = :cid"), {"cid": company_id}
+        ).scalar()
+        s = json.loads(runtime_row) if runtime_row else {}
+        s["waCloudPhoneNumberId"] = phone_id
+        s.setdefault("waCloudWabaId", waba_id)
+        if runtime_row is None:
+            db.execute(text("INSERT INTO company_runtime_settings (company_id, settings_json) VALUES (:cid, :s)"),
+                       {"cid": company_id, "s": json.dumps(s)})
+        else:
+            db.execute(text("UPDATE company_runtime_settings SET settings_json = :s WHERE company_id = :cid"),
+                       {"s": json.dumps(s), "cid": company_id})
+        db.commit()
+    except Exception:
+        db.rollback()
+        warnings.append("No se pudo guardar el routing del webhook (waCloudPhoneNumberId)")
+
+    _invalidate_channels_cache(company_id)
+    return {"ok": True, "channel_id": channel_id, "phone": display, "name": channel_name,
+            "waba_id": waba_id, "warnings": warnings}
 
 
 # ── Templates de WhatsApp (Meta message_templates) ───────────────────
