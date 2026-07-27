@@ -413,7 +413,50 @@ async def discover_assets(
     token = body.access_token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="access_token es requerido")
+    return await _discover_with_token(db, token)
 
+
+async def _exchange_meta_code(code: str) -> str:
+    """Canjea el code de OAuth/Embedded Signup por un access token."""
+    app_id = os.getenv("META_APP_ID", "").strip()
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        raise HTTPException(status_code=500, detail="Falta configurar META_APP_ID/META_APP_SECRET")
+    async with httpx.AsyncClient(timeout=25) as client:
+        resp = await client.get(f"{GRAPH}/oauth/access_token", params={
+            "client_id": app_id, "client_secret": app_secret, "code": code.strip(),
+        })
+    if resp.status_code != 200:
+        err = (resp.json().get("error") or {}).get("message") or resp.text[:200]
+        raise HTTPException(status_code=400, detail=f"Meta rechazó el código: {err}")
+    token = resp.json().get("access_token") or ""
+    if not token:
+        raise HTTPException(status_code=400, detail="Meta no devolvió un token")
+    return token
+
+
+class OAuthDiscoverBody(BaseModel):
+    code: str
+
+
+@router.post("/oauth-discover")
+async def oauth_discover(
+    body: OAuthDiscoverBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Login con Meta (popup) para Instagram/Messenger: canjea el code y
+    devuelve los activos conectables + el token para el wizard de selección."""
+    require_admin(payload)
+    if not body.code.strip():
+        raise HTTPException(status_code=400, detail="Falta el code de Meta")
+    token = await _exchange_meta_code(body.code)
+    result = await _discover_with_token(db, token)
+    result["token"] = token
+    return result
+
+
+async def _discover_with_token(db: Session, token: str) -> dict:
     warnings: list[str] = []
     async with httpx.AsyncClient(timeout=15) as client:
         # 1. Validate the token
@@ -524,7 +567,11 @@ class EmbeddedSignupBody(BaseModel):
 def embedded_signup_config(payload: dict = Depends(get_current_user_payload)):
     app_id = os.getenv("META_APP_ID", "").strip()
     config_id = os.getenv("META_ES_CONFIG_ID", "").strip()
-    return {"app_id": app_id, "config_id": config_id, "ready": bool(app_id and config_id)}
+    # Config de Facebook Login for Business (variación General) para conectar
+    # Instagram/Messenger sin pasar por el registro de WhatsApp
+    login_config_id = os.getenv("META_LOGIN_CONFIG_ID", "").strip() or config_id
+    return {"app_id": app_id, "config_id": config_id, "login_config_id": login_config_id,
+            "ready": bool(app_id and config_id)}
 
 
 @router.post("/embedded-signup")
@@ -535,26 +582,12 @@ async def embedded_signup_connect(
 ):
     require_admin(payload)
     company_id = payload.get("companyId")
-    app_id = os.getenv("META_APP_ID", "").strip()
-    app_secret = os.getenv("META_APP_SECRET", "").strip()
-    if not app_id or not app_secret:
-        raise HTTPException(status_code=500, detail="Falta configurar META_APP_ID/META_APP_SECRET")
     if not body.code.strip():
         raise HTTPException(status_code=400, detail="Falta el code de Meta")
 
     warnings: list[str] = []
+    token = await _exchange_meta_code(body.code)
     async with httpx.AsyncClient(timeout=25) as client:
-        # 1. code → business token
-        resp = await client.get(f"{GRAPH}/oauth/access_token", params={
-            "client_id": app_id, "client_secret": app_secret, "code": body.code.strip(),
-        })
-        if resp.status_code != 200:
-            err = (resp.json().get("error") or {}).get("message") or resp.text[:200]
-            raise HTTPException(status_code=400, detail=f"Meta rechazó el código: {err}")
-        token = resp.json().get("access_token") or ""
-        if not token:
-            raise HTTPException(status_code=400, detail="Meta no devolvió un token")
-
         # 2. Resolver WABA/número si el popup no los informó
         waba_id = body.waba_id.strip()
         phone_id = body.phone_number_id.strip()
@@ -655,8 +688,20 @@ async def embedded_signup_connect(
         warnings.append("No se pudo guardar el routing del webhook (waCloudPhoneNumberId)")
 
     _invalidate_channels_cache(company_id)
+
+    # El mismo token del registro da acceso a Páginas e Instagram del negocio:
+    # los devolvemos para ofrecer conectarlos en el mismo paso
+    extra_assets = {"instagram": [], "messenger": [], "token": token}
+    try:
+        disc = await _discover_with_token(db, token)
+        if disc.get("ok"):
+            extra_assets["instagram"] = [a for a in disc.get("instagram", []) if not a.get("already_connected")]
+            extra_assets["messenger"] = [a for a in disc.get("messenger", []) if not a.get("already_connected")]
+    except Exception:
+        pass
+
     return {"ok": True, "channel_id": channel_id, "phone": display, "name": channel_name,
-            "waba_id": waba_id, "warnings": warnings}
+            "waba_id": waba_id, "warnings": warnings, "extra_assets": extra_assets}
 
 
 # ── Templates de WhatsApp (Meta message_templates) ───────────────────

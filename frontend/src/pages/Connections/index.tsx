@@ -75,7 +75,7 @@ const Connections = () => {
 
   // Embedded Signup oficial de WhatsApp (Tech Provider): popup de Meta,
   // el cliente elige su WABA y número, el backend canjea el code y conecta.
-  const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; ready: boolean } | null>(null);
+  const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; login_config_id?: string; ready: boolean } | null>(null);
   const [esConnecting, setEsConnecting] = useState(false);
   const esSession = { waba_id: '', phone_number_id: '' };
 
@@ -96,14 +96,25 @@ const Connections = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const withFbSdk = (fn: () => void) => {
+    if ((window as any).FB) { fn(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://connect.facebook.net/es_LA/sdk.js';
+    s.async = true;
+    s.onload = () => {
+      (window as any).FB.init({ appId: esConfig!.app_id, autoLogAppEvents: true, xfbml: false, version: 'v21.0' });
+      fn();
+    };
+    document.body.appendChild(s);
+  };
+
   const startEmbeddedSignup = () => {
     if (!esConfig?.ready) {
       toast.info('Falta configurar el Embedded Signup en la app de Meta (config_id)');
       return;
     }
-    const launch = () => {
-      const FB = (window as any).FB;
-      FB.login((response: any) => {
+    withFbSdk(() => {
+      (window as any).FB.login((response: any) => {
         const code = response?.authResponse?.code;
         if (!code) { toast.info('Conexión cancelada'); return; }
         setEsConnecting(true);
@@ -113,6 +124,19 @@ const Connections = () => {
           toast.success(`WhatsApp ${data.phone || ''} conectado`);
           (data.warnings || []).forEach((w: string) => toast.warning(w, { autoClose: 10000 }));
           load();
+          // El mismo permiso da acceso a sus páginas e Instagram: ofrecer conectarlos
+          const extra = data.extra_assets || {};
+          if ((extra.instagram || []).length || (extra.messenger || []).length) {
+            setWizToken(extra.token || '');
+            setWizAssets({
+              token_info: { type: 'business', expires_at: 0, never_expires: true },
+              whatsapp: [], instagram: extra.instagram || [], messenger: extra.messenger || [],
+              warnings: [],
+            });
+            setWizSelected(new Set());
+            setWizardOpen(true);
+            toast.info('Encontramos Instagram/Facebook de tu negocio — elegí cuáles conectar', { autoClose: 8000 });
+          }
         }).catch((e: any) => {
           toast.error(e?.response?.data?.detail || 'No se pudo conectar');
         }).finally(() => setEsConnecting(false));
@@ -122,16 +146,35 @@ const Connections = () => {
         override_default_response_type: true,
         extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
       });
-    };
-    if ((window as any).FB) { launch(); return; }
-    const s = document.createElement('script');
-    s.src = 'https://connect.facebook.net/es_LA/sdk.js';
-    s.async = true;
-    s.onload = () => {
-      (window as any).FB.init({ appId: esConfig.app_id, autoLogAppEvents: true, xfbml: false, version: 'v21.0' });
-      launch();
-    };
-    document.body.appendChild(s);
+    });
+  };
+
+  // Instagram / Messenger con login de Meta (sin pasar por el registro de WhatsApp)
+  const startSocialLogin = () => {
+    if (!esConfig?.login_config_id) {
+      toast.info('Falta configurar el login de Meta (config_id)');
+      return;
+    }
+    withFbSdk(() => {
+      (window as any).FB.login((response: any) => {
+        const code = response?.authResponse?.code;
+        if (!code) { toast.info('Conexión cancelada'); return; }
+        setEsConnecting(true);
+        api.post('/channels/oauth-discover', { code }).then(({ data }) => {
+          if (!data.ok) { toast.error(data.error || 'No se pudieron listar los activos'); return; }
+          setWizToken(data.token || '');
+          setWizAssets(data);
+          setWizSelected(new Set());
+          setWizardOpen(true);
+        }).catch((e: any) => {
+          toast.error(e?.response?.data?.detail || 'No se pudo conectar');
+        }).finally(() => setEsConnecting(false));
+      }, {
+        config_id: esConfig.login_config_id,
+        response_type: 'code',
+        override_default_response_type: true,
+      });
+    });
   };
 
   const load = useCallback(async () => {
@@ -334,6 +377,10 @@ const Connections = () => {
           </Button>
           <Button variant="outlined" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
             Conectar con token
+          </Button>
+          <Button variant="contained" onClick={startSocialLogin} disabled={esConnecting || !esConfig}
+            sx={{ fontSize: '0.82rem', bgcolor: '#E1306C', '&:hover': { bgcolor: '#C13584' } }}>
+            Conectar IG/Facebook
           </Button>
           <Tooltip title={esConfig && !esConfig.ready ? 'Pendiente de configuración en Meta (config_id)' : ''}>
             <span>
