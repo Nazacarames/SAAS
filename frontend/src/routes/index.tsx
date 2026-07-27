@@ -20,7 +20,6 @@ import Templates from '../pages/Templates';
 import CommentAutomations from '../pages/CommentAutomations';
 import MenuBot from '../pages/MenuBot';
 import Reports from '../pages/Reports';
-import Billing from '../pages/Billing';
 import Security from '../pages/Security';
 import Admin from '../pages/Admin';
 import LandingB from '../pages/LandingB';
@@ -78,7 +77,7 @@ const Routes = () => {
         <Route path='comment-automations' element={<CommentAutomations />} />
         <Route path='menu-bot' element={<MenuBot />} />
         <Route path='reports' element={<Reports />} />
-        <Route path='billing' element={<Billing />} />
+        <Route path='billing' element={<Navigate to='/' replace />} />
         <Route path='security' element={<Security />} />
         <Route path='admin' element={<Admin />} />
       </Route>

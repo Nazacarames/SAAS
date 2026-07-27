@@ -16,8 +16,7 @@ import {
   CalendarMonth as CalendarMonthIcon,
   TextSnippet as TextSnippetIcon,
   Forum as ForumIcon,
-  Analytics as AnalyticsIcon,
-  CreditCard as CreditCardIcon
+  Analytics as AnalyticsIcon
 } from '@mui/icons-material';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/Auth/AuthContext';
@@ -31,7 +30,6 @@ const menuItems = [
   { text: 'Agenda',          icon: <CalendarMonthIcon />, path: '/agenda',      section: 'main' },
   { text: 'Canales',         icon: <WhatsAppIcon />,    path: '/connections',   section: 'main' },
   { text: 'Reportes',        icon: <AnalyticsIcon />,   path: '/reports',       section: 'ops', adminOnly: true },
-  { text: 'Billing',         icon: <CreditCardIcon />,  path: '/billing',       section: 'ops' },
   { text: 'Agente IA',       icon: <SmartToyIcon />,    path: '/ai-agents',     section: 'config', adminOnly: true },
   { text: 'Conocimiento',    icon: <AutoStoriesIcon />, path: '/knowledge',     section: 'config', adminOnly: true },
   { text: 'Templates',       icon: <TextSnippetIcon />, path: '/templates',     section: 'config', adminOnly: true },
