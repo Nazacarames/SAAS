@@ -2199,9 +2199,20 @@ BASE DE CONOCIMIENTO:
         except Exception:
             _lessons_block = ""
 
+        # Facetas reales del inventario Tokko: el agente ofrece las opciones que
+        # existen (tipos, operaciones, zonas) al preguntar, en vez de dejar que
+        # el cliente pida algo que no hay
+        _facets_block = ""
+        try:
+            from app.services.tokko_facets import facets_block
+            _facets_block = facets_block(self.company_id)
+        except Exception:
+            _facets_block = ""
+
         prompt_parts = [
             identity,
             company_info,
+            (chr(10) + _facets_block) if _facets_block else "",
             (chr(10) + _lessons_block) if _lessons_block else "",
             f"\nBASE DE CONOCIMIENTO:\n{kb_text}\n" if kb_text else "",
             slots_info,
