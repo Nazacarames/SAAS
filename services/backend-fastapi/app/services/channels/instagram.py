@@ -76,12 +76,14 @@ class InstagramAdapter(ChannelAdapter):
 
 
 async def _send(config: dict, recipient: str, message: dict) -> SendResult:
-    ig_id = config.get("phoneId") or config.get("external_id", "")
     token = config.get("token", "")
-    if not ig_id or not token:
+    if not token:
         return SendResult(ok=False, error="instagram_not_configured")
 
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{ig_id}/messages"
+    # Con token de página el envío va por /me/messages (Messenger Platform for
+    # Instagram); el nodo /{ig_id}/messages es de la API con login de Instagram
+    # y con page token devuelve "(#3) Application does not have the capability"
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient}, "message": message}
 

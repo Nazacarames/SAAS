@@ -499,7 +499,17 @@ async def _discover_with_token(db: Session, token: str) -> dict:
                         "fields": "id,name,access_token,instagram_business_account{id,username}"},
             )
             for p in (resp.json().get("data") or []) if resp.status_code == 200 else []:
-                pages.append({"id": p["id"], "name": p.get("name") or "", "access_token": p.get("access_token") or ""})
+                page_token = p.get("access_token") or ""
+                if not page_token:
+                    # Los tokens de usuario del sistema a veces no traen el page token
+                    # en /me/accounts: pedirlo explícito (sin él la mensajería falla)
+                    try:
+                        r2 = await client.get(f"{GRAPH}/{p['id']}", params={"access_token": token, "fields": "access_token"})
+                        if r2.status_code == 200:
+                            page_token = r2.json().get("access_token") or ""
+                    except Exception:
+                        pass
+                pages.append({"id": p["id"], "name": p.get("name") or "", "access_token": page_token})
                 ig = p.get("instagram_business_account")
                 if ig:
                     instagram.append({
