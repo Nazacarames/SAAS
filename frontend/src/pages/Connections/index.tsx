@@ -241,14 +241,25 @@ const Connections = () => {
     }
   };
 
-  const handleDelete = async (ch: Channel) => {
-    if (!confirm(`¿Desactivar canal "${ch.name}"?`)) return;
+  const handleToggle = async (ch: Channel) => {
+    const enable = ch.status !== 'active';
     try {
-      await api.delete(`/channels/${ch.id}`);
-      toast.success('Canal desactivado');
+      await api.put(`/channels/${ch.id}`, { status: enable ? 'active' : 'disabled' });
+      toast.success(enable ? 'Canal habilitado' : 'Canal deshabilitado — no recibe ni envía mensajes');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Error al desactivar');
+      toast.error(e?.response?.data?.detail || 'No se pudo cambiar el estado');
+    }
+  };
+
+  const handleDelete = async (ch: Channel) => {
+    if (!confirm(`¿Eliminar DEFINITIVAMENTE el canal "${ch.name}"? Se borra su conexión con Meta y habrá que reconectarlo para volver a usarlo.`)) return;
+    try {
+      await api.delete(`/channels/${ch.id}?hard=true`);
+      toast.success('Canal eliminado');
+      await load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Error al eliminar');
     }
   };
 
@@ -502,20 +513,23 @@ const Connections = () => {
                   <Tooltip title="Probar conexión"><IconButton size="small" onClick={() => handleTest(ch)}><TestIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
                   <Tooltip title="Editar"><IconButton size="small" onClick={() => openEdit(ch)}><EditIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
                   {ch.status === 'active' ? (
-                    <Tooltip title="Desactivar"><IconButton size="small" onClick={() => handleDelete(ch)}><DeleteIcon sx={{ fontSize: 16, color: 'rgba(239,83,80,0.6)' }} /></IconButton></Tooltip>
+                    <Tooltip title="Deshabilitar (reversible)">
+                      <IconButton size="small" onClick={() => handleToggle(ch)}>
+                        <CancelIcon sx={{ fontSize: 16, color: '#E8A020' }} />
+                      </IconButton>
+                    </Tooltip>
                   ) : (
-                    <Tooltip title="Reactivar canal">
-                      <IconButton size="small" onClick={async () => {
-                        try {
-                          await api.put(`/channels/${ch.id}`, { status: 'active' });
-                          toast.success('Canal reactivado');
-                          load();
-                        } catch { toast.error('No se pudo reactivar'); }
-                      }}>
+                    <Tooltip title="Habilitar canal">
+                      <IconButton size="small" onClick={() => handleToggle(ch)}>
                         <CheckIcon sx={{ fontSize: 16, color: '#34D399' }} />
                       </IconButton>
                     </Tooltip>
                   )}
+                  <Tooltip title="Eliminar definitivamente">
+                    <IconButton size="small" onClick={() => handleDelete(ch)}>
+                      <DeleteIcon sx={{ fontSize: 16, color: 'rgba(239,83,80,0.6)' }} />
+                    </IconButton>
+                  </Tooltip>
                 </Stack>
               </Paper>
             );

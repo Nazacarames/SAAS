@@ -375,22 +375,35 @@ def update_channel(
 @router.delete("/{channel_id}")
 def delete_channel(
     channel_id: int,
+    hard: bool = False,
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
 ):
+    """Por defecto deshabilita (reversible). Con ?hard=true elimina el canal
+    definitivamente, junto con su conexión de Meta si ningún otro canal la usa."""
     require_admin(payload)
     company_id = payload.get("companyId")
     ch = db.execute(
-        text("SELECT id FROM channels WHERE id = :id AND company_id = :cid"),
+        text("SELECT id, meta_connection_id FROM channels WHERE id = :id AND company_id = :cid"),
         {"id": channel_id, "cid": company_id},
     ).mappings().first()
     if not ch:
         raise HTTPException(status_code=404, detail="Canal no encontrado")
 
-    db.execute(text("UPDATE channels SET status = 'disabled', updated_at = NOW() WHERE id = :id"), {"id": channel_id})
+    if hard:
+        db.execute(text("DELETE FROM channels WHERE id = :id"), {"id": channel_id})
+        if ch["meta_connection_id"]:
+            in_use = db.execute(
+                text("SELECT COUNT(*) FROM channels WHERE meta_connection_id = :mc"),
+                {"mc": ch["meta_connection_id"]},
+            ).scalar()
+            if not in_use:
+                db.execute(text("DELETE FROM meta_connections WHERE id = :mc"), {"mc": ch["meta_connection_id"]})
+    else:
+        db.execute(text("UPDATE channels SET status = 'disabled', updated_at = NOW() WHERE id = :id"), {"id": channel_id})
     db.commit()
     _invalidate_channels_cache(company_id)
-    return {"ok": True}
+    return {"ok": True, "deleted": hard}
 
 
 class DiscoverRequest(BaseModel):
