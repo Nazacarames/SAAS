@@ -12,8 +12,25 @@ from app.api.deps import get_current_user_payload, get_db
 from app.api.v1.endpoints._ai_shared import (
     KBDocumentCreate, KBDocumentUpdate, OrchestrateRequest,
 )
+from app.services.rag_service import get_openai_client
 
 router = APIRouter()
+
+
+def _embeddings_for(parts: list[str]) -> list[str]:
+    """Batch-embed chunk texts (text-embedding-3-small). Returns JSON strings; '[]' when unavailable."""
+    client = get_openai_client()
+    if not client or not parts:
+        return ["[]"] * len(parts)
+    try:
+        response = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=[p[:8000] for p in parts],
+        )
+        return [json.dumps(d.embedding) for d in response.data]
+    except Exception as e:
+        print(f"[kb] Embedding error: {e}")
+        return ["[]"] * len(parts)
 
 
 # ── KB Documents ──────────────────────────────────────────────────────
@@ -72,11 +89,12 @@ def create_kb_document(
     ).mappings().first()
 
     parts = [p.strip() for p in re.split(r"\n{2,}", body.content) if p.strip()][:200]
+    embeddings = _embeddings_for(parts)
     for i, part in enumerate(parts):
         db.execute(
             text("""INSERT INTO kb_chunks (document_id, chunk_index, chunk_text, token_count, embedding_json, created_at, updated_at)
-                VALUES (:documentId, :chunkIndex, :chunkText, :tokenCount, '[]', NOW(), NOW())"""),
-            {"documentId": doc["id"], "chunkIndex": i, "chunkText": part, "tokenCount": max(1, math.floor(len(part) / 4))},
+                VALUES (:documentId, :chunkIndex, :chunkText, :tokenCount, :embeddingJson, NOW(), NOW())"""),
+            {"documentId": doc["id"], "chunkIndex": i, "chunkText": part, "tokenCount": max(1, math.floor(len(part) / 4)), "embeddingJson": embeddings[i]},
         )
 
     db.commit()
@@ -112,11 +130,12 @@ def update_kb_document(
     db.execute(text("DELETE FROM kb_chunks WHERE document_id = :documentId"), {"documentId": doc_id})
 
     parts = [p.strip() for p in re.split(r"\n{2,}", next_content) if p.strip()][:200]
+    embeddings = _embeddings_for(parts)
     for i, part in enumerate(parts):
         db.execute(
             text("""INSERT INTO kb_chunks (document_id, chunk_index, chunk_text, token_count, embedding_json, created_at, updated_at)
-                VALUES (:documentId, :chunkIndex, :chunkText, :tokenCount, '[]', NOW(), NOW())"""),
-            {"documentId": doc_id, "chunkIndex": i, "chunkText": part, "tokenCount": max(1, math.floor(len(part) / 4))},
+                VALUES (:documentId, :chunkIndex, :chunkText, :tokenCount, :embeddingJson, NOW(), NOW())"""),
+            {"documentId": doc_id, "chunkIndex": i, "chunkText": part, "tokenCount": max(1, math.floor(len(part) / 4)), "embeddingJson": embeddings[i]},
         )
 
     updated = db.execute(
