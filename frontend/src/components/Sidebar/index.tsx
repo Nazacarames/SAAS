@@ -36,7 +36,7 @@ const menuItems = [
   { text: 'Conocimiento',    icon: <AutoStoriesIcon />, path: '/knowledge',     section: 'config', adminOnly: true },
   { text: 'Templates',       icon: <TextSnippetIcon />, path: '/templates',     section: 'config', adminOnly: true },
   { text: 'Comentarios',     icon: <ForumIcon />,       path: '/comment-automations', section: 'config', adminOnly: true },
-  { text: 'Menú Bot',        icon: <SmartToyIcon />,    path: '/menu-bot',      section: 'config', adminOnly: true },
+  { text: 'Menú Bot',        icon: <SmartToyIcon />,    path: '/menu-bot',      section: 'config' },
   { text: 'Usuarios',        icon: <PeopleIcon />,      path: '/users',         section: 'config', adminOnly: true },
   { text: 'Integraciones',   icon: <SettingsIcon />,    path: '/integrations',  section: 'config', adminOnly: true },
   { text: 'Seguridad',       icon: <SettingsIcon />,    path: '/security',      section: 'config' },
