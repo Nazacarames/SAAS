@@ -952,6 +952,23 @@ const Conversations = () => {
             </Paper>
 
             <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
+              <Stack direction='row' justifyContent='space-between' alignItems='center'>
+                <Typography variant='subtitle2' sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>
+                  Agente IA {contactData?.ai_paused ? '(pausado)' : '(activo)'}
+                </Typography>
+                <Switch size='small' checked={!contactData?.ai_paused}
+                  onChange={async (e) => {
+                    const paused = !e.target.checked;
+                    try {
+                      await api.put(`/menu-bot/ai-paused/${selectedConv.contactId}`, { paused });
+                      setContactData((c: any) => ({ ...c, ai_paused: paused }));
+                      toast.success(paused ? 'IA pausada — lo atiende un humano' : 'IA reactivada para este contacto');
+                    } catch { toast.error('No se pudo cambiar'); }
+                  }} />
+              </Stack>
+            </Paper>
+
+            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
               <Typography variant='subtitle2' sx={{ mb: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>Datos capturados</Typography>
               <Typography variant='caption' display='block'>Nombre: {contactData?.name || selectedConv.name}</Typography>
               <Typography variant='caption' display='block'>Email: {contactData?.email || '-'}</Typography>

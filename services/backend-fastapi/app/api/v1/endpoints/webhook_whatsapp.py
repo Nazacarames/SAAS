@@ -160,6 +160,21 @@ class WebhookResponse(BaseModel):
     ai_reply: Optional[str] = None
 
 
+def _extract_interactive_id(payload: dict) -> str:
+    """Id de la respuesta a un botón/lista (ej: mb:o0) si el mensaje es interactivo."""
+    try:
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                for msg in change.get("value", {}).get("messages", []) or []:
+                    reply = (msg.get("interactive") or {}).get("button_reply") or \
+                            (msg.get("interactive") or {}).get("list_reply") or {}
+                    if reply.get("id"):
+                        return str(reply["id"])
+    except Exception:
+        pass
+    return ""
+
+
 def _extract_profile_name(payload: dict, wa_id: str) -> str:
     """Nombre de perfil que sugiere WhatsApp (pushname) para el remitente."""
     try:
@@ -200,6 +215,15 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
                     if text_body:
                         out.append((msg_id, from_num, text_body))
                         continue
+
+                    # Respuestas a botones/listas del Menú Bot: el título elegido
+                    # queda como texto para que el historial se lea natural
+                    if msg.get("type") == "interactive":
+                        _reply = (msg.get("interactive") or {}).get("button_reply") or \
+                                 (msg.get("interactive") or {}).get("list_reply") or {}
+                        if _reply.get("title"):
+                            out.append((msg_id, from_num, str(_reply["title"])))
+                            continue
 
                     msg_type = msg.get("type", "unknown")
                     out.append((msg_id, from_num, f"[{msg_type} message]"))
@@ -607,6 +631,28 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     limit_ok, limit_msg = check_conversation_limit(db, company_id)
     if not limit_ok:
         return {"ok": True, "ignored": True, "reason": "limit_reached", "ai_reply": None}
+
+    # Menú Bot determinístico: si está habilitado y maneja este mensaje
+    # (botón, lista o saludo de sesión nueva), la IA no interviene
+    try:
+        from app.services.menu_bot import handle_inbound as _menu_bot_handle
+        _wa_cfg = get_whatsapp_config(db, company_id, _phone_number_id or None)
+        _mb = await _menu_bot_handle(
+            db, company_id, dict(contact), message_text,
+            _extract_interactive_id(payload), _wa_cfg or {},
+        )
+        if _mb.get("handled"):
+            return {"ok": True, "ignored": False, "reason": "menu_bot", "ai_reply": None}
+    except Exception as _mb_err:
+        print(f"[webhook] menu bot error (non-fatal): {_mb_err}")
+        db.rollback()
+
+    # Handoff a humano: la IA queda pausada para este contacto
+    try:
+        if db.execute(text("SELECT ai_paused FROM contacts WHERE id = :id"), {"id": contact["id"]}).scalar():
+            return {"ok": True, "ignored": False, "reason": "ai_paused", "ai_reply": None}
+    except Exception:
+        db.rollback()
 
     # Get conversation history scoped to this company's contact
     try:
