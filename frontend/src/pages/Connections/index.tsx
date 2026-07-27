@@ -501,7 +501,21 @@ const Connections = () => {
                   {/* Actions */}
                   <Tooltip title="Probar conexión"><IconButton size="small" onClick={() => handleTest(ch)}><TestIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
                   <Tooltip title="Editar"><IconButton size="small" onClick={() => openEdit(ch)}><EditIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
-                  <Tooltip title="Desactivar"><IconButton size="small" onClick={() => handleDelete(ch)}><DeleteIcon sx={{ fontSize: 16, color: 'rgba(239,83,80,0.6)' }} /></IconButton></Tooltip>
+                  {ch.status === 'active' ? (
+                    <Tooltip title="Desactivar"><IconButton size="small" onClick={() => handleDelete(ch)}><DeleteIcon sx={{ fontSize: 16, color: 'rgba(239,83,80,0.6)' }} /></IconButton></Tooltip>
+                  ) : (
+                    <Tooltip title="Reactivar canal">
+                      <IconButton size="small" onClick={async () => {
+                        try {
+                          await api.put(`/channels/${ch.id}`, { status: 'active' });
+                          toast.success('Canal reactivado');
+                          load();
+                        } catch { toast.error('No se pudo reactivar'); }
+                      }}>
+                        <CheckIcon sx={{ fontSize: 16, color: '#34D399' }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
                 </Stack>
               </Paper>
             );
