@@ -98,33 +98,34 @@ async def contacts_send_message(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
 ):
-    """Manual send from the inbox. Supports free-form text ({body}) inside the
-    24h window and WhatsApp templates ({templateName, languageCode}) outside it."""
+    """Manual send from the inbox. Free text ({body}) routed by channel
+    (WhatsApp / Instagram / Messenger según el contacto) y templates de
+    WhatsApp ({templateName, languageCode}) fuera de la ventana de 24h."""
     from sqlalchemy import text as _t
     company_id = payload.get("companyId")
     contact = db.execute(
-        _t('SELECT id, name, number FROM contacts WHERE id = :id AND "companyId" = :cid LIMIT 1'),
+        _t('SELECT id, name, number, igsid, psid FROM contacts WHERE id = :id AND "companyId" = :cid LIMIT 1'),
         {"id": contact_id, "cid": company_id},
     ).mappings().first()
     if not contact:
         raise HTTPException(status_code=404, detail="Contacto no encontrado")
-    if not contact["number"]:
-        raise HTTPException(status_code=400, detail="El contacto no tiene número")
 
     from app.api.v1.endpoints.webhook_whatsapp import get_whatsapp_config, send_whatsapp_message, save_message
-    wa = get_whatsapp_config(db, company_id)
-    if not wa:
-        raise HTTPException(status_code=400, detail="No hay canal de WhatsApp configurado")
 
     template_name = str(body.get("templateName") or "").strip()
     if template_name:
+        if not contact["number"]:
+            raise HTTPException(status_code=400, detail="Los templates son solo para contactos de WhatsApp")
+        wa = get_whatsapp_config(db, company_id)
+        if not wa:
+            raise HTTPException(status_code=400, detail="No hay canal de WhatsApp configurado")
         import httpx as _hx
         lang = str(body.get("languageCode") or "es_AR")
         resp = _hx.post(
-            f"https://graph.facebook.com/v21.0/{wa['phone_number_id']}/messages",
+            f"https://graph.facebook.com/v21.0/{wa['phoneId']}/messages",
             json={"messaging_product": "whatsapp", "to": str(contact["number"]),
                   "type": "template", "template": {"name": template_name, "language": {"code": lang}}},
-            headers={"Authorization": f"Bearer {wa['access_token']}"}, timeout=20,
+            headers={"Authorization": f"Bearer {wa['token']}"}, timeout=20,
         )
         if resp.status_code != 200:
             err = resp.json().get("error", {}).get("message", "")[:200]
@@ -134,9 +135,27 @@ async def contacts_send_message(
         text_body = str(body.get("body") or "").strip()
         if not text_body:
             raise HTTPException(status_code=400, detail="body o templateName requerido")
-        result = await send_whatsapp_message(str(contact["number"]), text_body, wa)
-        if not result.get("ok"):
-            raise HTTPException(status_code=502, detail=str(result.get("error", "Meta rechazó el mensaje"))[:250])
+
+        # Ruteo por canal: el contacto define por dónde se le responde
+        if contact["igsid"] or contact["psid"]:
+            from app.services.channels.registry import get_adapter, get_primary_channel, get_send_config
+            ctype = "instagram" if contact["igsid"] else "messenger"
+            channel = get_primary_channel(db, company_id, ctype)
+            if not channel:
+                raise HTTPException(status_code=400, detail=f"No hay canal de {ctype} activo")
+            adapter = get_adapter(ctype)
+            res = await adapter.send_text(get_send_config(channel), contact["igsid"] or contact["psid"], text_body)
+            if not res.ok:
+                raise HTTPException(status_code=502, detail=str(res.error or "Meta rechazó el mensaje")[:250])
+        elif contact["number"]:
+            wa = get_whatsapp_config(db, company_id)
+            if not wa:
+                raise HTTPException(status_code=400, detail="No hay canal de WhatsApp configurado")
+            result = await send_whatsapp_message(str(contact["number"]), text_body, wa)
+            if not result.get("ok"):
+                raise HTTPException(status_code=502, detail=str(result.get("error", "Meta rechazó el mensaje"))[:250])
+        else:
+            raise HTTPException(status_code=400, detail="El contacto no tiene canal de contacto")
         saved_body = text_body
 
     try:
