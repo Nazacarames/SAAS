@@ -103,6 +103,9 @@ def _candidates(db, company_id: int, days: int, max_wait_days: int) -> list:
             WHERE c."companyId" = :cid
               AND COALESCE(c."isGroup", false) = false
               AND COALESCE(c.number, '') <> ''
+              -- ai_paused = lo está atendiendo un humano (handoff del Menú Bot
+              -- o pausa manual): el reenganche automático no debe pisarlo
+              AND COALESCE(c.ai_paused, false) = false
               AND COALESCE(c."leadStatus", 'new') NOT IN ('customer', 'lost')
               AND (COALESCE(c.lead_score, 0) >= 20 OR COALESCE(c.needs, '') <> '')
               AND m.last_at IS NOT NULL
