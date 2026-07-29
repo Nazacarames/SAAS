@@ -70,9 +70,15 @@ api.interceptors.response.use(
                 return api(originalRequest);
             } catch (refreshError) {
                 processQueue(refreshError);
-                // Never force redirect from interceptor; caller/auth context decides UX.
-                if (isAuthBootstrapCall) {
-                    localStorage.removeItem('authToken');
+                // Refresh falló = sesión realmente vencida. Si dejamos la página
+                // "viva", queda en estado zombie (toasts de error, botones grises).
+                // Limpiamos y mandamos al login, salvo que ya estemos en él.
+                const path = window.location.pathname;
+                const hadToken = !!localStorage.getItem('authToken');
+                localStorage.removeItem('authToken');
+                localStorage.removeItem('user');
+                if (hadToken && !isAuthBootstrapCall && !path.startsWith('/login') && !path.startsWith('/register')) {
+                    window.location.href = '/login?expired=1';
                 }
                 return Promise.reject(refreshError);
             } finally {
