@@ -275,21 +275,29 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
         lead_name = str(contact.get("name") or "").strip() or "Nuevo cliente"
         lead_num = str(contact.get("number") or "")
         tpl = str(node.get("notify_template") or "").strip()
-        if tpl:
-            sent = await _wa_send(wa, {
+
+        async def _send_tpl(name: str) -> bool:
+            return await _wa_send(wa, {
                 "messaging_product": "whatsapp", "to": notify_to, "type": "template",
-                "template": {"name": tpl, "language": {"code": str(node.get("notify_lang") or "es_AR")},
+                "template": {"name": name, "language": {"code": str(node.get("notify_lang") or "es_AR")},
                              "components": [{"type": "body", "parameters": [
                                  {"type": "text", "text": lead_name},
                                  {"type": "text", "text": lead_num or "-"}]}]},
             })
+
+        if tpl:
+            sent = await _send_tpl(tpl)
         else:
             body = f"🔔 Nuevo cliente por atender: {lead_name} (+{lead_num})"
             if asesor_name:
                 body += f" — asignado a {asesor_name}"
-            # texto libre: Meta solo lo entrega si el asesor escribió a la línea en las últimas 24 h
+            # texto libre: Meta solo lo entrega si el asesor escribió a la línea en
+            # las últimas 24 h; si falla, cae a la plantilla "nuevo_cliente" que se
+            # crea automáticamente al conectar WhatsApp
             sent = await _wa_send(wa, {"messaging_product": "whatsapp", "to": notify_to,
                                        "type": "text", "text": {"body": body}})
+            if not sent:
+                sent = await _send_tpl("nuevo_cliente")
         if sent:
             _save_bot_message(db, contact_id, f"[Aviso] Notificado el asesor al +{notify_to}", company_id)
 

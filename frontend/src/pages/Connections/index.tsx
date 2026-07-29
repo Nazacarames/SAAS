@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Box, Typography, Stack, Button, Chip, IconButton, Dialog, DialogTitle,
   DialogContent, DialogActions, TextField, Select, MenuItem, FormControl,
@@ -77,7 +77,10 @@ const Connections = () => {
   // el cliente elige su WABA y número, el backend canjea el code y conecta.
   const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; login_config_id?: string; ready: boolean } | null>(null);
   const [esConnecting, setEsConnecting] = useState(false);
-  const esSession = { waba_id: '', phone_number_id: '' };
+  // ref (no variable de render): el listener se registra una sola vez y el
+  // callback de FB.login corre en otro render — con una variable local el
+  // waba_id capturado se perdía (stale closure) y el canal nunca se creaba
+  const esSession = useRef({ waba_id: '', phone_number_id: '' });
 
   useEffect(() => {
     api.get('/channels/embedded-signup/config').then(({ data }) => setEsConfig(data)).catch(() => {});
@@ -86,8 +89,8 @@ const Connections = () => {
       try {
         const d = JSON.parse(event.data);
         if (d.type === 'WA_EMBEDDED_SIGNUP' && d.data) {
-          esSession.waba_id = d.data.waba_id || '';
-          esSession.phone_number_id = d.data.phone_number_id || '';
+          esSession.current.waba_id = d.data.waba_id || esSession.current.waba_id;
+          esSession.current.phone_number_id = d.data.phone_number_id || esSession.current.phone_number_id;
         }
       } catch { /* mensajes no-JSON de la SDK */ }
     };
@@ -115,11 +118,18 @@ const Connections = () => {
     }
     withFbSdk(() => {
       (window as any).FB.login((response: any) => {
-        const code = response?.authResponse?.code;
-        if (!code) { toast.info('Conexión cancelada'); return; }
+        const code = response?.authResponse?.code || '';
+        const s = esSession.current;
+        // Sin code pero con session info (waba/número del popup) igual conectamos:
+        // el backend usa el token de sistema del proveedor. Sin nada, fue cancelado
+        // o el navegador bloqueó la respuesta de Meta.
+        if (!code && !s.waba_id) {
+          toast.error('Meta no devolvió la autorización. Si completaste el registro, permití las cookies de terceros y probá de nuevo.');
+          return;
+        }
         setEsConnecting(true);
         api.post('/channels/embedded-signup', {
-          code, waba_id: esSession.waba_id, phone_number_id: esSession.phone_number_id,
+          code, waba_id: s.waba_id, phone_number_id: s.phone_number_id,
         }).then(({ data }) => {
           toast.success(`WhatsApp ${data.phone || ''} conectado`);
           (data.warnings || []).forEach((w: string) => toast.warning(w, { autoClose: 10000 }));

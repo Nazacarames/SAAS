@@ -581,7 +581,12 @@ async def _discover_with_token(db: Session, token: str) -> dict:
 # la Cloud API y dejamos el canal creado.
 
 class EmbeddedSignupBody(BaseModel):
-    code: str
+    # code puede faltar: con cookies de terceros bloqueadas FB.login no devuelve
+    # authResponse aunque el cliente haya completado el popup. En ese caso el
+    # frontend manda waba_id/phone_number_id (session info) y usamos el token
+    # de sistema del proveedor (el WABA queda compartido con nuestro portfolio
+    # al completar el Embedded Signup).
+    code: str = ""
     waba_id: str = ""
     phone_number_id: str = ""
 
@@ -605,11 +610,24 @@ async def embedded_signup_connect(
 ):
     require_admin(payload)
     company_id = payload.get("companyId")
-    if not body.code.strip():
-        raise HTTPException(status_code=400, detail="Falta el code de Meta")
-
     warnings: list[str] = []
-    token = await _exchange_meta_code(body.code)
+    via_system_token = False
+    if body.code.strip():
+        token = await _exchange_meta_code(body.code)
+    elif body.waba_id.strip():
+        token = os.getenv("META_SYSTEM_TOKEN", "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Meta no devolvió la autorización y no hay token de sistema configurado")
+        via_system_token = True
+        # el ES completado comparte el WABA con nuestro portfolio; si no es
+        # accesible, el registro no terminó y no hay que crear un canal roto
+        async with httpx.AsyncClient(timeout=25) as client:
+            chk = await client.get(f"{GRAPH}/{body.waba_id.strip()}", params={"access_token": token, "fields": "id,name"})
+        if chk.status_code != 200:
+            raise HTTPException(status_code=400, detail="Meta no devolvió la autorización y el WABA no quedó compartido con el proveedor. Repetí la conexión completando todos los pasos del popup")
+        warnings.append("Meta no devolvió el code (¿cookies de terceros bloqueadas?); se conectó con el token del proveedor")
+    else:
+        raise HTTPException(status_code=400, detail="Meta no devolvió la autorización. Probá de nuevo permitiendo cookies de terceros, o usá 'Conectar con token'")
     async with httpx.AsyncClient(timeout=25) as client:
         # 2. Resolver WABA/número si el popup no los informó
         waba_id = body.waba_id.strip()
@@ -712,16 +730,42 @@ async def embedded_signup_connect(
 
     _invalidate_channels_cache(company_id)
 
-    # El mismo token del registro da acceso a Páginas e Instagram del negocio:
-    # los devolvemos para ofrecer conectarlos en el mismo paso
-    extra_assets = {"instagram": [], "messenger": [], "token": token}
+    # 6.5 Plantilla de aviso al asesor (la usa el Menú Bot como fallback fuera
+    # de la ventana de 24 h). UTILITY: Meta la aprueba en minutos.
     try:
-        disc = await _discover_with_token(db, token)
-        if disc.get("ok"):
-            extra_assets["instagram"] = [a for a in disc.get("instagram", []) if not a.get("already_connected")]
-            extra_assets["messenger"] = [a for a in disc.get("messenger", []) if not a.get("already_connected")]
+        async with httpx.AsyncClient(timeout=25) as client:
+            resp = await client.post(
+                f"{GRAPH}/{waba_id}/message_templates",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "name": "nuevo_cliente", "language": "es_AR", "category": "UTILITY",
+                    "components": [{
+                        "type": "BODY",
+                        "text": "🔔 Nuevo cliente por atender: *{{1}}*\nWhatsApp: {{2}}\nEntrá al CRM para ver la conversación.",
+                        "example": {"body_text": [["Juan Pérez", "5491122334455"]]},
+                    }],
+                })
+            if resp.status_code != 200:
+                err = str((resp.json().get("error") or {}).get("message", ""))[:150] if "json" in resp.headers.get("content-type", "") else resp.text[:150]
+                if "already exists" not in err.lower():
+                    warnings.append(f"No se pudo crear la plantilla de aviso al asesor ({err}); creala desde Templates")
     except Exception:
         pass
+
+    # El mismo token del registro da acceso a Páginas e Instagram del negocio:
+    # los devolvemos para ofrecer conectarlos en el mismo paso. NUNCA en modo
+    # fallback: ahí el token es el de sistema del proveedor y no debe viajar
+    # al navegador del cliente.
+    extra_assets = {"instagram": [], "messenger": [], "token": ""}
+    if not via_system_token:
+        extra_assets["token"] = token
+        try:
+            disc = await _discover_with_token(db, token)
+            if disc.get("ok"):
+                extra_assets["instagram"] = [a for a in disc.get("instagram", []) if not a.get("already_connected")]
+                extra_assets["messenger"] = [a for a in disc.get("messenger", []) if not a.get("already_connected")]
+        except Exception:
+            pass
 
     return {"ok": True, "channel_id": channel_id, "phone": display, "name": channel_name,
             "waba_id": waba_id, "warnings": warnings, "extra_assets": extra_assets}
