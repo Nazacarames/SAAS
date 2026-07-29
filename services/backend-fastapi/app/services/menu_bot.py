@@ -17,6 +17,10 @@ Config por empresa en bot_flows.flow_json:
         "rr_replies": ["msj user 3", "msj 4"], // opcional: mensaje propio por asesor,
                                                // alineado por posición con assign_users
                                                // (entrada vacía → cae a reply_text)
+        "notify_number": "5491122334455",      // opcional: avisar por WA a este número
+        "notify_template": "nuevo_cliente",    // opcional: plantilla del aviso ({{1}}=cliente,
+                                               // {{2}}=tel); sin plantilla es texto libre y solo
+                                               // entrega dentro de la ventana de 24 h de Meta
         "internal_note": "",                   // opcional: nota interna en el hilo
         "after": "human",                      // "human" pausa la IA; "ai" la deja seguir
         "submenu": {                           // opcional: lista de WhatsApp (máx 10 items)
@@ -261,6 +265,29 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
     note = str(node.get("internal_note") or "").strip()
     if note:
         _save_bot_message(db, contact_id, f"[Nota interna] {note}", company_id)
+
+    notify_to = "".join(c for c in str(node.get("notify_number") or "") if c.isdigit())
+    if notify_to:
+        lead_name = str(contact.get("name") or "").strip() or "Nuevo cliente"
+        lead_num = str(contact.get("number") or "")
+        tpl = str(node.get("notify_template") or "").strip()
+        if tpl:
+            sent = await _wa_send(wa, {
+                "messaging_product": "whatsapp", "to": notify_to, "type": "template",
+                "template": {"name": tpl, "language": {"code": str(node.get("notify_lang") or "es_AR")},
+                             "components": [{"type": "body", "parameters": [
+                                 {"type": "text", "text": lead_name},
+                                 {"type": "text", "text": lead_num or "-"}]}]},
+            })
+        else:
+            body = f"🔔 Nuevo cliente por atender: {lead_name} (+{lead_num})"
+            if asesor_name:
+                body += f" — asignado a {asesor_name}"
+            # texto libre: Meta solo lo entrega si el asesor escribió a la línea en las últimas 24 h
+            sent = await _wa_send(wa, {"messaging_product": "whatsapp", "to": notify_to,
+                                       "type": "text", "text": {"body": body}})
+        if sent:
+            _save_bot_message(db, contact_id, f"[Aviso] Notificado el asesor al +{notify_to}", company_id)
 
     reply = ""
     if rr_replies:
