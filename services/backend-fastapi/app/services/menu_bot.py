@@ -18,6 +18,8 @@ Config por empresa en bot_flows.flow_json:
                                                // alineado por posición con assign_users
                                                // (entrada vacía → cae a reply_text)
         "notify_number": "5491122334455",      // opcional: avisar por WA a este número
+        "rr_notify_numbers": ["...", "..."],   // opcional: número propio por asesor
+                                               // (alineado con assign_users; vacío → notify_number)
         "notify_template": "nuevo_cliente",    // opcional: plantilla del aviso ({{1}}=cliente,
                                                // {{2}}=tel); sin plantilla es texto libre y solo
                                                // entrega dentro de la ventana de 24 h de Meta
@@ -266,7 +268,9 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
     if note:
         _save_bot_message(db, contact_id, f"[Nota interna] {note}", company_id)
 
-    notify_to = "".join(c for c in str(node.get("notify_number") or "") if c.isdigit())
+    rr_notify = [str(n or "") for n in (node.get("rr_notify_numbers") or [])]
+    _cand = rr_notify[idx % len(rr_notify)] if rr_notify else ""
+    notify_to = "".join(c for c in (_cand or str(node.get("notify_number") or "")) if c.isdigit())
     if notify_to:
         lead_name = str(contact.get("name") or "").strip() or "Nuevo cliente"
         lead_num = str(contact.get("number") or "")

@@ -29,7 +29,7 @@ interface SubItem {
 interface Option {
   label: string; reply_text: string; stage_id: number | null;
   assign_users: number[]; rr_replies: string[]; internal_note: string; after: 'human' | 'ai';
-  notify_number: string; notify_template: string;
+  notify_number: string; notify_template: string; rr_notify_numbers: string[];
   submenu: { text: string; button: string; items: SubItem[] } | null;
 }
 interface Flow {
@@ -39,7 +39,7 @@ interface Flow {
 
 const emptyOption = (): Option => ({
   label: 'Nueva opción', reply_text: '', stage_id: null, assign_users: [], rr_replies: [], internal_note: '', after: 'human',
-  notify_number: '', notify_template: '', submenu: null,
+  notify_number: '', notify_template: '', rr_notify_numbers: [], submenu: null,
 });
 const emptySub = (): SubItem => ({
   label: 'Nuevo ítem', description: '', reply_text: '', stage_id: null, internal_note: '', after: 'human',
@@ -251,7 +251,8 @@ const MenuBot = () => {
           mk(iid, 1260, iy, 'item', it.label || `Ítem ${j + 1}`,
              [it.description, it.notify_number ? '🔔 avisa' : '', it.after === 'human' ? 'humano' : 'IA'].filter(Boolean).join(' · '), stats[iid], true);
           edge(lid, iid, '#B76BE0', stats[iid] ? `${stats[iid]}` : undefined);
-          mk(`fin_${iid}`, 1580, iy, 'fin', it.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA', '«Volver al menú» → inicio');
+          mk(`fin_${iid}`, 1580, iy, 'fin', it.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA',
+             [it.notify_number ? '🔔 avisa' : '', '«Volver al menú» → inicio'].filter(Boolean).join(' · '));
           edge(iid, `fin_${iid}`, '#EF5350');
           iy += 110;
         });
@@ -268,13 +269,15 @@ const MenuBot = () => {
           const uname = users.find(u => u.id === uid)?.name || `Asesor ${k + 1}`;
           mk(mid, 940, my, 'msg', `Mensaje de ${uname}`, (o.rr_replies[k] || o.reply_text || '').split('\n')[0]);
           edge(oid, mid, '#56A8D6', `RR 1/${o.assign_users.length}`);
-          mk(`fin_${mid}`, 1260, my, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA', '«Volver al menú» → inicio');
+          mk(`fin_${mid}`, 1260, my, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA',
+             [(o.rr_notify_numbers[k] || o.notify_number) ? `🔔 avisa a ${uname}` : '', '«Volver al menú» → inicio'].filter(Boolean).join(' · '));
           edge(mid, `fin_${mid}`, '#EF5350');
           my += 110;
         });
         y += Math.max(160, o.assign_users.length * 110 + 40);
       } else {
-        mk(`fin_${oid}`, 940, y, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA', '«Volver al menú» → inicio');
+        mk(`fin_${oid}`, 940, y, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA',
+           [o.notify_number ? '🔔 avisa' : '', '«Volver al menú» → inicio'].filter(Boolean).join(' · '));
         edge(oid, `fin_${oid}`, '#EF5350');
         y += 160;
       }
@@ -328,16 +331,19 @@ const MenuBot = () => {
 
   const simRun = (node: Option | SubItem, opt?: Option, rrKey?: string): SimMsg => {
     let reply = node.reply_text;
+    let rrNotify = '';
     const chips: string[] = [];
     if (opt && opt.assign_users.length) {
       const k = (rrSim.current[rrKey!] = (rrSim.current[rrKey!] ?? -1) + 1) % opt.assign_users.length;
       const uname = users.find(u => u.id === opt.assign_users[k])?.name || `asesor ${k + 1}`;
       reply = ((opt.rr_replies[k] || '').trim() || reply).replace('{asesor}', uname);
       chips.push(`Asignado a ${uname}${opt.assign_users.length > 1 ? ' (round-robin)' : ''}`);
+      rrNotify = (opt.rr_notify_numbers[k] || '').trim();
+      if (rrNotify) chips.push(`🔔 Aviso a ${uname} al +${rrNotify}`);
     }
     if (node.stage_id) chips.push(`Movido a etapa: ${stages.find(s => s.id === node.stage_id)?.name || node.stage_id}`);
     if (node.internal_note) chips.push('Deja nota interna en el hilo');
-    if (node.notify_number) chips.push(`🔔 Aviso por WhatsApp al +${node.notify_number}`);
+    if (!rrNotify && node.notify_number) chips.push(`🔔 Aviso por WhatsApp al +${node.notify_number}`);
     chips.push(node.after === 'human' ? 'IA pausada: sigue un humano' : 'El agente IA sigue la charla');
     return { from: 'bot', text: reply || '(sin respuesta configurada)', chips, buttons: [{ id: 'root', label: '↩ Volver al menú' }] };
   };
@@ -584,8 +590,62 @@ const MenuBot = () => {
         </Stack>
       );
     } else if (selected.startsWith('fin_')) {
+      const ref = selected.slice(4);
+      const om = ref.match(/^o(\d+)$/);
+      const mm = ref.match(/^m(\d+):(\d+)$/);
+      const sm = ref.match(/^s(\d+):(\d+)$/);
       title = 'Fin del recorrido';
-      body = <Alert severity="info">Configurá qué pasa después (humano o IA) en el nodo anterior. Toda respuesta del bot incluye el botón "Volver al menú".</Alert>;
+      if (om || mm) {
+        const i = Number((om || mm)![1]);
+        const o = flow.options[i];
+        if (!o) return null;
+        const k = mm ? Number(mm[2]) : -1;
+        const uname = k >= 0 ? (users.find(u => u.id === o.assign_users[k])?.name || `asesor ${k + 1}`) : '';
+        const notifyVal = k >= 0 ? (o.rr_notify_numbers[k] || '') : o.notify_number;
+        body = (
+          <Stack spacing={2}>
+            <AfterSelect value={o.after} onChange={v => setOpt(i, { after: v })} />
+            <TextField size="small" fullWidth placeholder="5491122334455"
+              label={k >= 0 ? `🔔 Avisar a ${uname} al número (opcional)` : '🔔 Avisar por WhatsApp al número (opcional)'}
+              value={notifyVal}
+              onChange={e => {
+                const v = e.target.value.replace(/\D/g, '');
+                if (k >= 0) { const rr = [...o.rr_notify_numbers]; rr[k] = v; setOpt(i, { rr_notify_numbers: rr }); }
+                else setOpt(i, { notify_number: v });
+              }}
+              helperText={k >= 0
+                ? `Cuando el round-robin asigna a ${uname}, le llega el aviso de nuevo cliente a ese WhatsApp`
+                : 'Le llega "Nuevo cliente por atender" con nombre y teléfono del cliente'} />
+            {!!notifyVal && (
+              <TextField size="small" label="Plantilla de Meta del aviso (opcional)" fullWidth
+                value={o.notify_template} onChange={e => setOpt(i, { notify_template: e.target.value })}
+                helperText="Sin plantilla, el aviso solo llega si el asesor escribió a la línea en las últimas 24h (regla de Meta). Con plantilla aprobada llega siempre" />
+            )}
+            <Alert severity="info">El botón «Volver al menú» siempre lleva al cliente al mensaje inicial.</Alert>
+          </Stack>
+        );
+      } else if (sm) {
+        const [i, j] = [Number(sm[1]), Number(sm[2])];
+        const it = flow.options[i]?.submenu?.items[j];
+        if (!it) return null;
+        body = (
+          <Stack spacing={2}>
+            <AfterSelect value={it.after} onChange={v => setSub(i, j, { after: v })} />
+            <TextField size="small" fullWidth placeholder="5491122334455" label="🔔 Avisar por WhatsApp al número (opcional)"
+              value={it.notify_number}
+              onChange={e => setSub(i, j, { notify_number: e.target.value.replace(/\D/g, '') })}
+              helperText="Le avisa al asesor de esta sucursal que tiene un nuevo cliente" />
+            {!!it.notify_number && (
+              <TextField size="small" label="Plantilla de Meta del aviso (opcional)" fullWidth
+                value={it.notify_template} onChange={e => setSub(i, j, { notify_template: e.target.value })}
+                helperText="Sin plantilla, el aviso solo llega dentro de la ventana de 24h de Meta" />
+            )}
+            <Alert severity="info">El botón «Volver al menú» siempre lleva al cliente al mensaje inicial.</Alert>
+          </Stack>
+        );
+      } else {
+        body = <Alert severity="info">Configurá qué pasa después (humano o IA) en el nodo anterior. Toda respuesta del bot incluye el botón «Volver al menú».</Alert>;
+      }
     }
 
     return (
