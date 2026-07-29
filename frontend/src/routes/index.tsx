@@ -62,7 +62,8 @@ const Routes = () => {
         <Route path='tickets' element={<Navigate to='/conversations' replace />} />
         <Route path='conversations' element={<Conversations />} />
         <Route path='contacts' element={<Contacts />} />
-        <Route path='leads' element={<Leads />} />
+        <Route path='pipeline' element={<Leads />} />
+        <Route path='leads' element={<Navigate to='/pipeline' replace />} />
         <Route path='agenda' element={<Agenda />} />
         <Route path='connections' element={<Connections />} />
         <Route path='users' element={<Users />} />

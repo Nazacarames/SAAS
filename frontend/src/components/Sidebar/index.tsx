@@ -16,7 +16,8 @@ import {
   CalendarMonth as CalendarMonthIcon,
   TextSnippet as TextSnippetIcon,
   Forum as ForumIcon,
-  Analytics as AnalyticsIcon
+  Analytics as AnalyticsIcon,
+  ViewKanban as ViewKanbanIcon
 } from '@mui/icons-material';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/Auth/AuthContext';
@@ -26,7 +27,8 @@ const drawerWidth = 224;
 const menuItems = [
   { text: 'Dashboard',       icon: <DashboardIcon />,   path: '/',              section: 'main' },
   { text: 'Conversaciones',  icon: <ChatIcon />,        path: '/conversations', section: 'main' },
-  { text: 'Leads',           icon: <ContactsIcon />,    path: '/leads',         section: 'main' },
+  { text: 'Leads',           icon: <ContactsIcon />,    path: '/contacts',      section: 'main' },
+  { text: 'Pipeline',        icon: <ViewKanbanIcon />,  path: '/pipeline',      section: 'main' },
   { text: 'Agenda',          icon: <CalendarMonthIcon />, path: '/agenda',      section: 'main' },
   { text: 'Canales',         icon: <WhatsAppIcon />,    path: '/connections',   section: 'main' },
   { text: 'Reportes',        icon: <AnalyticsIcon />,   path: '/reports',       section: 'ops', adminOnly: true },
