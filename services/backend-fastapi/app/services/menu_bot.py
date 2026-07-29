@@ -14,6 +14,9 @@ Config por empresa en bot_flows.flow_json:
         "reply_text": "Te atiende {asesor}...",
         "stage_id": 12,                        // opcional: mover en el pipeline
         "assign_users": [3, 4],                // opcional: round-robin entre usuarios
+        "rr_replies": ["msj user 3", "msj 4"], // opcional: mensaje propio por asesor,
+                                               // alineado por posición con assign_users
+                                               // (entrada vacía → cae a reply_text)
         "internal_note": "",                   // opcional: nota interna en el hilo
         "after": "human",                      // "human" pausa la IA; "ai" la deja seguir
         "submenu": {                           // opcional: lista de WhatsApp (máx 10 items)
@@ -199,22 +202,20 @@ async def _send_menu(db: Session, wa: dict, to: str, flow: dict, company_id: int
     _event(db, company_id, "menu_sent", contact_id)
 
 
-def _pick_round_robin(db: Session, company_id: int, key: str, user_ids: list) -> int | None:
-    ids = [int(u) for u in user_ids if u]
-    if not ids:
-        return None
-    if len(ids) == 1:
-        return ids[0]
+def _rr_index(db: Session, company_id: int, key: str, n: int) -> int:
+    """Índice round-robin 0..n-1 compartido entre asignación y mensajes."""
+    if n <= 1:
+        return 0
     try:
         idx = db.execute(text("""
             INSERT INTO rr_counters (company_id, counter_key, idx) VALUES (:cid, :k, 1)
             ON CONFLICT (company_id, counter_key) DO UPDATE SET idx = rr_counters.idx + 1
             RETURNING idx"""), {"cid": company_id, "k": key}).scalar()
         db.commit()
-        return ids[(int(idx) - 1) % len(ids)]
+        return (int(idx) - 1) % n
     except Exception:
         db.rollback()
-        return ids[0]
+        return 0
 
 
 async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key: str,
@@ -223,9 +224,13 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
     to = str(contact.get("number") or "")
     asesor_name = ""
 
-    user_ids = node.get("assign_users") or []
+    user_ids = [int(u) for u in (node.get("assign_users") or []) if u]
+    rr_replies = [str(r or "") for r in (node.get("rr_replies") or [])]
+    # un solo índice RR para usuario y mensaje: la posición k de rr_replies
+    # corresponde al asesor k de assign_users (mismo largo desde el editor)
+    idx = _rr_index(db, company_id, event_key, max(len(user_ids), len(rr_replies)))
     if user_ids:
-        uid = _pick_round_robin(db, company_id, event_key, user_ids)
+        uid = user_ids[idx % len(user_ids)]
         if uid:
             row = db.execute(
                 text('SELECT name FROM users WHERE id = :id AND "companyId" = :cid'),
@@ -257,7 +262,11 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
     if note:
         _save_bot_message(db, contact_id, f"[Nota interna] {note}", company_id)
 
-    reply = str(node.get("reply_text") or "").strip()
+    reply = ""
+    if rr_replies:
+        reply = rr_replies[idx % len(rr_replies)].strip()
+    if not reply:
+        reply = str(node.get("reply_text") or "").strip()
     if reply:
         reply = reply.replace("{asesor}", asesor_name or "nuestro equipo")
         await send_buttons(wa, to, reply, [("mb:root", "Volver al menú")])

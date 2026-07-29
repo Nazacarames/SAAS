@@ -26,7 +26,7 @@ interface SubItem {
 }
 interface Option {
   label: string; reply_text: string; stage_id: number | null;
-  assign_users: number[]; internal_note: string; after: 'human' | 'ai';
+  assign_users: number[]; rr_replies: string[]; internal_note: string; after: 'human' | 'ai';
   submenu: { text: string; button: string; items: SubItem[] } | null;
 }
 interface Flow {
@@ -35,7 +35,7 @@ interface Flow {
 }
 
 const emptyOption = (): Option => ({
-  label: 'Nueva opción', reply_text: '', stage_id: null, assign_users: [], internal_note: '', after: 'human', submenu: null,
+  label: 'Nueva opción', reply_text: '', stage_id: null, assign_users: [], rr_replies: [], internal_note: '', after: 'human', submenu: null,
 });
 const emptySub = (): SubItem => ({
   label: 'Nuevo ítem', description: '', reply_text: '', stage_id: null, internal_note: '', after: 'human',
@@ -51,6 +51,7 @@ const KIND_STYLE: Record<string, { color: string; icon: JSX.Element; title: stri
   option: { color: '#E8A020', icon: <BotIcon sx={{ fontSize: 15 }} />, title: 'Opción' },
   list: { color: '#B76BE0', icon: <ListIcon sx={{ fontSize: 15 }} />, title: 'Lista (submenú)' },
   item: { color: '#E5C438', icon: <ListIcon sx={{ fontSize: 15 }} />, title: 'Ítem' },
+  msg: { color: '#56A8D6', icon: <ChatIcon sx={{ fontSize: 15 }} />, title: 'Mensaje' },
   fallback: { color: '#7A9CC6', icon: <BotIcon sx={{ fontSize: 15 }} />, title: 'Texto libre' },
   fin: { color: '#EF5350', icon: <FlagIcon sx={{ fontSize: 15 }} />, title: 'Fin' },
 };
@@ -186,6 +187,19 @@ const MenuBot = () => {
           iy += 110;
         });
         y += Math.max(160, o.submenu.items.length * 110 + 40);
+      } else if (o.assign_users.length > 1 && o.rr_replies.some(t => (t || '').trim())) {
+        // mensaje propio por asesora (round-robin), como los nodos "Mensaje" de Kommo
+        let my = y - (o.assign_users.length - 1) * 55;
+        o.assign_users.forEach((uid, k) => {
+          const mid = `m${i}:${k}`;
+          const uname = users.find(u => u.id === uid)?.name || `Asesor ${k + 1}`;
+          mk(mid, 940, my, 'msg', `Mensaje de ${uname}`, (o.rr_replies[k] || o.reply_text || '').split('\n')[0]);
+          edge(oid, mid, '#56A8D6', `RR 1/${o.assign_users.length}`);
+          mk(`fin_${mid}`, 1260, my, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA');
+          edge(mid, `fin_${mid}`, '#EF5350');
+          my += 110;
+        });
+        y += Math.max(160, o.assign_users.length * 110 + 40);
       } else {
         mk(`fin_${oid}`, 940, y, 'fin', o.after === 'human' ? 'Pasa a humano (IA pausada)' : 'Sigue el agente IA');
         edge(oid, `fin_${oid}`, '#EF5350');
@@ -197,7 +211,7 @@ const MenuBot = () => {
        'cualquier otro mensaje');
     edge('menu', 'fallback', '#7A9CC6');
     return { nodes: N, edges: E };
-  }, [flow, stats, selected, dragged]);
+  }, [flow, stats, selected, dragged, users]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const moved = applyNodeChanges(changes, nodes);
@@ -296,6 +310,16 @@ const MenuBot = () => {
                   {users.map(u => <MenuItem key={u.id} value={u.id}>{u.name}</MenuItem>)}
                 </Select>
               </FormControl>
+              {o.assign_users.length > 1 && o.assign_users.map((uid, k) => (
+                <TextField key={uid} size="small" fullWidth multiline minRows={3}
+                  label={`Mensaje si atiende ${users.find(u => u.id === uid)?.name || `asesor ${k + 1}`}`}
+                  value={o.rr_replies[k] || ''}
+                  onChange={e => {
+                    const rr = [...o.rr_replies]; rr[k] = e.target.value;
+                    setOpt(i, { rr_replies: rr });
+                  }}
+                  helperText={k === 0 ? 'Opcional: mensaje propio por asesor (vacío = respuesta general)' : undefined} />
+              ))}
               <AfterSelect value={o.after} onChange={v => setOpt(i, { after: v })} />
               <TextField size="small" label="Nota interna (opcional)" fullWidth value={o.internal_note}
                 onChange={e => setOpt(i, { internal_note: e.target.value })} />
@@ -306,6 +330,23 @@ const MenuBot = () => {
             onClick={() => { setSelected(null); setFlow(f => ({ ...f, options: f.options.filter((_, j) => j !== i) })); }}>
             Eliminar opción
           </Button>
+        </Stack>
+      );
+    } else if (/^m\d+:\d+$/.test(selected)) {
+      const [i, k] = selected.slice(1).split(':').map(Number);
+      const o = flow.options[i];
+      if (!o) return null;
+      const uname = users.find(u => u.id === o.assign_users[k])?.name || `Asesor ${k + 1}`;
+      title = `Mensaje de ${uname}`;
+      body = (
+        <Stack spacing={2}>
+          <TextField size="small" label={`Se envía cuando el round-robin asigna a ${uname}`} fullWidth multiline minRows={5}
+            value={o.rr_replies[k] || ''}
+            onChange={e => {
+              const rr = [...o.rr_replies]; rr[k] = e.target.value;
+              setOpt(i, { rr_replies: rr });
+            }}
+            helperText="Vacío = usa la respuesta general de la opción. Siempre incluye el botón «Volver al menú»." />
         </Stack>
       );
     } else if (/^l\d+$/.test(selected)) {
