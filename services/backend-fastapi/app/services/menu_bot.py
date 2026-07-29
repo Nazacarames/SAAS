@@ -353,6 +353,19 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
     to = str(contact.get("number") or "")
     contact_id = int(contact["id"])
 
+    # Los números de asesores (destinos de avisos) no son clientes: si contestan
+    # el aviso en la línea, ni el bot ni la IA deben tratarlos como lead
+    asesor_numbers: set[str] = set()
+    for o in options:
+        for n in [o.get("notify_number")] + list(o.get("rr_notify_numbers") or []):
+            if n:
+                asesor_numbers.add("".join(c for c in str(n) if c.isdigit()))
+        for it in (o.get("submenu") or {}).get("items") or []:
+            if it.get("notify_number"):
+                asesor_numbers.add("".join(c for c in str(it["notify_number"]) if c.isdigit()))
+    if to and "".join(c for c in to if c.isdigit()) in asesor_numbers:
+        return {"handled": True}  # silencio: es un asesor, lo atiende el equipo
+
     if interactive_id.startswith("mb:"):
         ref = interactive_id[3:]
         if ref == "root":
