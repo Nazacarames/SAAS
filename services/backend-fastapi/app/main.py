@@ -114,7 +114,7 @@ async def _enforce_subscription(request, call_next):
 # CORS middleware - restrict origins in production
 _is_prod = settings.environment == "production"
 _allowed_origins = (
-    ["https://charlott.ai", "https://www.charlott.ai"]
+    ["https://crm.lmtmas.com", "https://charlott.ai", "https://www.charlott.ai", "https://login.charlott.ai"]
     if _is_prod
     else ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]
 )

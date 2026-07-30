@@ -62,14 +62,45 @@ def _check_replay(body: bytes) -> bool:
         return True
 
 
+def _channel_app_secrets() -> list[str]:
+    """Secretos de apps de Meta propias de clientes (config_json.appSecret).
+
+    Permite que un cliente cuyo número está tomado por otro proveedor apunte
+    el webhook de SU app a este CRM: la firma viene con el secreto de esa app,
+    no con el nuestro."""
+    from app.services.cache import get_or_set
+
+    def _load():
+        from app.core.db import SessionLocal
+        db = SessionLocal()
+        try:
+            out = []
+            for r in db.execute(text("SELECT config_json FROM channels WHERE status = 'active'")).mappings():
+                raw = r["config_json"]
+                cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                s = str(cfg.get("appSecret") or "").strip()
+                if s and s not in out:
+                    out.append(s)
+            return out
+        except Exception:
+            return []
+        finally:
+            db.close()
+
+    return get_or_set("channel_app_secrets", 120, _load)
+
+
 def _verify_signature(body: bytes, signature: str) -> bool:
     app_secret = os.getenv("META_APP_SECRET") or os.getenv("WHATSAPP_APP_SECRET") or ""
     if not app_secret:
         return settings.environment != "production"
     if not signature:
         return settings.environment != "production"
-    expected = hmac_mod.new(app_secret.encode(), body, "sha256").hexdigest()
-    return hmac_mod.compare_digest(f"sha256={expected}", signature)
+    for secret in [app_secret, *_channel_app_secrets()]:
+        expected = hmac_mod.new(secret.encode(), body, "sha256").hexdigest()
+        if hmac_mod.compare_digest(f"sha256={expected}", signature):
+            return True
+    return False
 
 
 # ── GET /webhooks/meta — verification ─────────────────────────────
