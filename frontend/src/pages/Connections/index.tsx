@@ -3,7 +3,7 @@ import {
   Box, Typography, Stack, Button, Chip, IconButton, Dialog, DialogTitle,
   DialogContent, DialogActions, TextField, Select, MenuItem, FormControl,
   InputLabel, CircularProgress, InputAdornment, Paper, Tooltip, Checkbox,
-  Alert,
+  Alert, Menu,
 } from '@mui/material';
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon,
@@ -41,7 +41,7 @@ interface Channel {
 
 // Assets discovered by POST /channels/discover
 interface DiscoveredAssets {
-  token_info: { type: string; expires_at: number; never_expires: boolean };
+  token_info: { type: string; expires_at: number; never_expires: boolean; app_id?: string; foreign_app?: boolean };
   whatsapp: { id: string; display_phone_number: string; verified_name: string; quality_rating: string; waba_name: string; already_connected: boolean }[];
   instagram: { id: string; username: string; page_name: string; access_token: string; already_connected: boolean }[];
   messenger: { id: string; name: string; access_token: string; already_connected: boolean }[];
@@ -63,6 +63,8 @@ const Connections = () => {
   const [wizAssets, setWizAssets] = useState<DiscoveredAssets | null>(null);
   const [wizSelected, setWizSelected] = useState<Set<string>>(new Set());
   const [wizConnecting, setWizConnecting] = useState(false);
+  const [wizAppSecret, setWizAppSecret] = useState('');
+  const [waMenuAnchor, setWaMenuAnchor] = useState<null | HTMLElement>(null);
 
   const [formType, setFormType] = useState('whatsapp');
   const [formName, setFormName] = useState('');
@@ -112,7 +114,10 @@ const Connections = () => {
     document.body.appendChild(s);
   };
 
-  const startEmbeddedSignup = () => {
+  // featureType '' = número nuevo Cloud API; 'whatsapp_business_app_onboarding'
+  // = coexistencia (números que siguen usando la app WhatsApp Business del
+  // celular — el popup los empareja por QR; sin esto NUNCA aparecen en la lista)
+  const startEmbeddedSignup = (featureType: string = '') => {
     if (!esConfig?.ready) {
       toast.info('Falta configurar el Embedded Signup en la app de Meta (config_id)');
       return;
@@ -155,7 +160,7 @@ const Connections = () => {
         config_id: esConfig.config_id,
         response_type: 'code',
         override_default_response_type: true,
-        extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+        extras: { setup: {}, featureType, sessionInfoVersion: '3' },
       });
     });
   };
@@ -372,13 +377,17 @@ const Connections = () => {
     if (!wizAssets || wizSelected.size === 0) return;
     setWizConnecting(true);
     let created = 0, failed = 0;
-    const jobs: { channel_type: string; name: string; external_id: string; access_token: string }[] = [];
+    // Token de otra app de Meta: adjuntar su App Secret a cada canal para que
+    // el CRM pueda verificar la firma de esos webhooks
+    const extraSecret = wizAssets.token_info?.foreign_app ? wizAppSecret.trim() : '';
+    const jobs: { channel_type: string; name: string; external_id: string; access_token: string; app_secret?: string }[] = [];
     wizAssets.whatsapp.forEach(w => {
       if (wizSelected.has(`whatsapp:${w.id}`)) jobs.push({
         channel_type: 'whatsapp',
         name: w.verified_name || w.display_phone_number || 'WhatsApp',
         external_id: w.id,
         access_token: wizToken.trim(),
+        app_secret: extraSecret,
       });
     });
     wizAssets.instagram.forEach(i => {
@@ -387,6 +396,7 @@ const Connections = () => {
         name: i.username ? `@${i.username}` : 'Instagram',
         external_id: i.id,
         access_token: i.access_token || wizToken.trim(), // page token: mejor para mensajería
+        app_secret: extraSecret,
       });
     });
     wizAssets.messenger.forEach(p => {
@@ -395,6 +405,7 @@ const Connections = () => {
         name: p.name || 'Messenger',
         external_id: p.id,
         access_token: p.access_token || wizToken.trim(),
+        app_secret: extraSecret,
       });
     });
     for (const job of jobs) {
@@ -438,24 +449,50 @@ const Connections = () => {
               {checking ? <CircularProgress size={16} /> : 'Verificar canales'}
             </Button>
           )}
-          <Button variant="outlined" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
-            Carga manual
-          </Button>
-          <Button variant="outlined" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
-            Conectar con token
-          </Button>
-          <Button variant="contained" onClick={startSocialLogin} disabled={esConnecting || !esConfig}
-            sx={{ fontSize: '0.82rem', bgcolor: '#E1306C', '&:hover': { bgcolor: '#C13584' } }}>
-            Conectar IG/Facebook
-          </Button>
+          <Tooltip title="Avanzado: cargar un canal con IDs y token a mano">
+            <Button variant="outlined" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
+              Carga manual
+            </Button>
+          </Tooltip>
+          <Tooltip title="Avanzado: pegar un token de usuario del sistema y detectar todos los activos">
+            <Button variant="outlined" startIcon={<BoltIcon />} onClick={openWizard} sx={{ fontSize: '0.82rem' }}>
+              Conectar con token
+            </Button>
+          </Tooltip>
+          <Tooltip title="Conectar Instagram y páginas de Facebook con tu login de Meta">
+            <span>
+              <Button variant="contained" onClick={startSocialLogin} disabled={esConnecting || !esConfig}
+                sx={{ fontSize: '0.82rem', bgcolor: '#E1306C', '&:hover': { bgcolor: '#C13584' } }}>
+                Conectar IG/Facebook
+              </Button>
+            </span>
+          </Tooltip>
           <Tooltip title={esConfig && !esConfig.ready ? 'Pendiente de configuración en Meta (config_id)' : ''}>
             <span>
-              <Button variant="contained" onClick={startEmbeddedSignup} disabled={esConnecting || !esConfig}
+              <Button variant="contained" onClick={e => setWaMenuAnchor(e.currentTarget)} disabled={esConnecting || !esConfig}
                 sx={{ fontSize: '0.82rem', bgcolor: '#25D366', '&:hover': { bgcolor: '#1DA851' } }}>
                 {esConnecting ? <CircularProgress size={18} /> : 'Conectar WhatsApp'}
               </Button>
             </span>
           </Tooltip>
+          <Menu anchorEl={waMenuAnchor} open={!!waMenuAnchor} onClose={() => setWaMenuAnchor(null)}>
+            <MenuItem onClick={() => { setWaMenuAnchor(null); startEmbeddedSignup(''); }}>
+              <Box>
+                <Typography sx={{ fontSize: '0.85rem', fontWeight: 600 }}>Número nuevo o de la API</Typography>
+                <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary' }}>
+                  Dar de alta un número o migrar uno que ya usa la API de WhatsApp
+                </Typography>
+              </Box>
+            </MenuItem>
+            <MenuItem onClick={() => { setWaMenuAnchor(null); startEmbeddedSignup('whatsapp_business_app_onboarding'); }}>
+              <Box>
+                <Typography sx={{ fontSize: '0.85rem', fontWeight: 600 }}>Número de la app WhatsApp Business 📱</Typography>
+                <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary' }}>
+                  El número sigue en el celular y también atiende el CRM (se empareja con QR)
+                </Typography>
+              </Box>
+            </MenuItem>
+          </Menu>
         </Stack>
       </Stack>
 
@@ -676,6 +713,17 @@ const Connections = () => {
               {wizAssets.warnings.map((w, i) => (
                 <Alert key={i} severity="warning" sx={{ py: 0, fontSize: '0.78rem' }}>{w}</Alert>
               ))}
+
+              {wizAssets.token_info.foreign_app && (
+                <Alert severity="warning" sx={{ fontSize: '0.78rem' }}>
+                  Este token pertenece a <b>otra app de Meta</b> (id {wizAssets.token_info.app_id}), no a la del CRM.
+                  Los mensajes entrantes van a llegar firmados por esa app: para que el CRM los acepte,
+                  pegá el <b>App Secret</b> de esa app (developers.facebook.com → tu app → Configuración → Básica
+                  → Clave secreta) y asegurate de que el webhook de esa app apunte a nuestra URL de Canales.
+                  <TextField size="small" fullWidth sx={{ mt: 1 }} label="App Secret de esa app"
+                    value={wizAppSecret} onChange={e => setWizAppSecret(e.target.value)} />
+                </Alert>
+              )}
 
               {([
                 { type: 'whatsapp', title: 'WhatsApp', items: wizAssets.whatsapp.map(w => ({ id: w.id, primary: w.verified_name || w.display_phone_number, secondary: `${w.display_phone_number} · ${w.waba_name}`, already: w.already_connected })) },

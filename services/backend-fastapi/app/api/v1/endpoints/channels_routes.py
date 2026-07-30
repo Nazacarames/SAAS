@@ -154,6 +154,32 @@ def create_channel(
     if body.app_secret.strip():
         config["appSecret"] = body.app_secret.strip()
 
+    # Con token: resolver el dato legible (número/@usuario/página) y detectar
+    # si el token es de otra app de Meta (los webhooks irían a ESA app)
+    warnings: list[str] = []
+    if body.access_token.strip():
+        tok = body.access_token.strip()
+        try:
+            with httpx.Client(timeout=20) as client:
+                dbg = client.get(f"{GRAPH}/debug_token", params={"input_token": tok, "access_token": tok})
+                tok_app = str((dbg.json().get("data") or {}).get("app_id") or "") if dbg.status_code == 200 else ""
+                our_app = os.getenv("META_APP_ID", "").strip()
+                if our_app and tok_app and tok_app != our_app and not body.app_secret.strip():
+                    warnings.append("El token es de otra app de Meta: los mensajes entrantes van a llegar "
+                                    "firmados por esa app. Cargá el App Secret de esa app en el canal "
+                                    "(editar canal) o los webhooks serán rechazados.")
+                f = {"whatsapp": "display_phone_number,verified_name", "instagram": "username,name"}.get(body.channel_type, "name")
+                info = client.get(f"{GRAPH}/{body.external_id.strip()}", params={"access_token": tok, "fields": f})
+                if info.status_code == 200:
+                    j = info.json()
+                    disp = (j.get("display_phone_number")
+                            or (("@" + j["username"]) if j.get("username") else "")
+                            or j.get("name") or "")
+                    if disp:
+                        config["displayPhone" if body.channel_type == "whatsapp" else "displayName"] = disp
+        except Exception:
+            pass
+
     db.execute(
         text(
             """INSERT INTO channels (company_id, channel_type, name, external_id, meta_connection_id, config_json, status)
@@ -177,7 +203,6 @@ def create_channel(
 
     # Suscribir la app a los webhooks del activo: sin esto el canal queda
     # "conectado" pero Meta nunca envía los mensajes entrantes
-    warnings: list[str] = []
     if body.access_token.strip():
         ok, detail = _subscribe_channel_webhooks(
             body.channel_type, body.external_id.strip(), body.access_token.strip())
@@ -630,11 +655,15 @@ async def _discover_with_token(db: Session, token: str) -> dict:
             return {"ok": False, "error": err}
 
         expires_at = dbg.get("expires_at") or 0
+        _our_app = os.getenv("META_APP_ID", "").strip()
         token_info = {
             "type": dbg.get("type") or "",
             "expires_at": expires_at,  # 0 = never (system user)
             "never_expires": expires_at == 0,
             "app_id": dbg.get("app_id") or "",
+            # token de otra app de Meta: los webhooks van a ESA app, no a la
+            # nuestra — el wizard tiene que avisarlo y pedir el App Secret
+            "foreign_app": bool(_our_app and str(dbg.get("app_id") or "") != _our_app),
         }
 
         # 2. Pages (Messenger) + linked Instagram accounts + per-page tokens
@@ -816,9 +845,15 @@ async def embedded_signup_connect(
                                  json={"messaging_product": "whatsapp", "pin": pin})
         registered = resp.status_code == 200 and (resp.json() or {}).get("success")
         if not registered:
-            err = (resp.json().get("error") or {}).get("message") if "json" in resp.headers.get("content-type", "") else resp.text[:120]
-            warnings.append(f"El número quedó conectado pero no se pudo registrar en la Cloud API: {err}. "
-                            "Si ya estaba registrado, ignorá este aviso.")
+            err = str((resp.json().get("error") or {}).get("message") or "") if "json" in resp.headers.get("content-type", "") else resp.text[:120]
+            if "SMB businesses" in err:
+                # número de coexistencia (app WhatsApp Business del celular): el
+                # registro lo hace el emparejamiento por QR del propio popup
+                warnings.append("Número de la app WhatsApp Business (coexistencia): el registro lo maneja "
+                                "el emparejamiento con el celular. Si completaste el escaneo del QR, ya está listo.")
+            else:
+                warnings.append(f"El número quedó conectado pero no se pudo registrar en la Cloud API: {err[:150]}. "
+                                "Si ya estaba registrado, ignorá este aviso.")
 
     # 6. Canal + conexión (si ya existía para esta empresa, renovar token)
     existing = db.execute(
