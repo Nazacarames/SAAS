@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -171,8 +172,24 @@ def create_channel(
         {"cid": company_id, "ct": body.channel_type, "eid": body.external_id.strip()},
     ).mappings().first()
 
+    # Suscribir la app a los webhooks del activo: sin esto el canal queda
+    # "conectado" pero Meta nunca envía los mensajes entrantes
+    warnings: list[str] = []
+    if body.access_token.strip():
+        ok, detail = _subscribe_channel_webhooks(
+            body.channel_type, body.external_id.strip(), body.access_token.strip())
+        if not ok:
+            warnings.append(f"El canal se creó pero no se pudieron activar los webhooks: {detail}. "
+                            "Usá el botón Reparar en el canal.")
+        elif row:
+            cfg = json.loads(row["config_json"]) if isinstance(row["config_json"], str) else (row["config_json"] or {})
+            cfg["webhooksOk"] = True
+            db.execute(text("UPDATE channels SET config_json = :c WHERE id = :id"),
+                       {"c": json.dumps(cfg), "id": row["id"]})
+            db.commit()
+
     _invalidate_channels_cache(company_id)
-    return {"ok": True, "channel": dict(row) if row else None}
+    return {"ok": True, "channel": dict(row) if row else None, "warnings": warnings}
 
 
 # ── Recaptación automática (toggle por empresa en la página Templates) ─
@@ -469,6 +486,122 @@ async def oauth_discover(
     return result
 
 
+# ── Descubrimiento y suscripción de webhooks ─────────────────────────
+# Sin suscribir la app al activo (página o WABA), Meta NUNCA envía los
+# mensajes entrantes: el canal se ve "conectado" y no llega nada. Es la
+# causa #1 de "conecté el canal y no funciona".
+
+_PAGE_WEBHOOK_FIELDS = ["messages", "messaging_postbacks", "messaging_optins",
+                        "message_reactions", "messaging_referrals", "feed"]
+
+
+def _paged(client: httpx.Client, url: str, params: dict, cap: int = 500) -> list[dict]:
+    """GET siguiendo paging.next: sin esto se pierden activos a partir del
+    primer lote (por qué 'hay números cargados que no aparecen')."""
+    out: list[dict] = []
+    try:
+        resp = client.get(url, params={**params, "limit": 100})
+        while resp.status_code == 200:
+            data = resp.json()
+            out.extend(data.get("data") or [])
+            nxt = (data.get("paging") or {}).get("next")
+            if not nxt or len(out) >= cap:
+                break
+            resp = client.get(nxt)
+    except Exception:
+        pass
+    return out
+
+
+def _all_business_ids(client: httpx.Client, token: str) -> list[str]:
+    """Negocios alcanzables por el token: los propios y los de cada página.
+    Un token de usuario del sistema suele devolver /me/businesses vacío, por
+    eso hay que llegar también por las páginas."""
+    ids: list[str] = []
+    for b in _paged(client, f"{GRAPH}/me/businesses", {"access_token": token, "fields": "id"}):
+        if b.get("id") and b["id"] not in ids:
+            ids.append(b["id"])
+    for p in _paged(client, f"{GRAPH}/me/accounts", {"access_token": token, "fields": "id"}):
+        try:
+            biz = (client.get(f"{GRAPH}/{p['id']}", params={"access_token": token, "fields": "business"})
+                   .json().get("business") or {}).get("id")
+            if biz and biz not in ids:
+                ids.append(biz)
+        except Exception:
+            continue
+    return ids
+
+
+def _all_wabas(client: httpx.Client, token: str) -> list[dict]:
+    """WABAs visibles: propios (owned) y compartidos con nosotros (client).
+    Antes solo se miraban los owned de los negocios con página, así que los
+    números de un WABA compartido o sin página nunca aparecían."""
+    wabas: list[dict] = []
+    seen: set[str] = set()
+    for biz in _all_business_ids(client, token):
+        for edge in ("owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"):
+            for w in _paged(client, f"{GRAPH}/{biz}/{edge}", {"access_token": token, "fields": "id,name"}):
+                if w.get("id") and w["id"] not in seen:
+                    seen.add(w["id"])
+                    wabas.append(w)
+    return wabas
+
+
+def _resolve_waba_for_phone(client: httpx.Client, phone_id: str, token: str) -> str:
+    for waba in _all_wabas(client, token):
+        for n in _paged(client, f"{GRAPH}/{waba['id']}/phone_numbers", {"access_token": token, "fields": "id"}):
+            if n.get("id") == phone_id:
+                return waba["id"]
+    return ""
+
+
+def _subscribe_channel_webhooks(channel_type: str, external_id: str, token: str,
+                                waba_hint: str = "") -> tuple[bool, str]:
+    """Suscribe la app a los webhooks del canal. Devuelve (ok, detalle)."""
+    if not token:
+        return False, "el canal no tiene token guardado"
+    try:
+        with httpx.Client(timeout=25) as client:
+            if channel_type == "whatsapp":
+                waba = waba_hint or _resolve_waba_for_phone(client, external_id, token)
+                if not waba:
+                    return False, "no se pudo identificar el WABA del número (revisá permisos whatsapp_business_management)"
+                r = client.post(f"{GRAPH}/{waba}/subscribed_apps", headers={"Authorization": f"Bearer {token}"})
+                return (r.status_code == 200), ("" if r.status_code == 200 else r.text[:150])
+
+            # instagram y messenger se suscriben SIEMPRE sobre la página: con
+            # token de página /me devuelve la página (para IG el external_id es
+            # la cuenta de Instagram, no sirve como destino de la suscripción)
+            page_id = external_id if channel_type == "messenger" else ""
+            r = client.get(f"{GRAPH}/me", params={"access_token": token, "fields": "id"})
+            if r.status_code == 200 and r.json().get("id"):
+                page_id = r.json()["id"]
+            if not page_id:
+                return False, "no se pudo identificar la página (el token debería ser de la página)"
+
+            current: list[str] = []
+            r = client.get(f"{GRAPH}/{page_id}/subscribed_apps", params={"access_token": token})
+            if r.status_code == 200:
+                for app in (r.json().get("data") or []):
+                    current.extend(app.get("subscribed_fields") or [])
+            fields = sorted(set(current) | set(_PAGE_WEBHOOK_FIELDS))
+            r = client.post(f"{GRAPH}/{page_id}/subscribed_apps",
+                            params={"subscribed_fields": ",".join(fields)},
+                            headers={"Authorization": f"Bearer {token}"})
+            return (r.status_code == 200), ("" if r.status_code == 200 else r.text[:150])
+    except Exception as e:
+        return False, str(e)[:150]
+
+
+def _channel_token(db: Session, channel_id: int) -> str:
+    row = db.execute(
+        text("""SELECT mc.access_token FROM channels c
+                JOIN meta_connections mc ON mc.id = c.meta_connection_id WHERE c.id = :id"""),
+        {"id": channel_id},
+    ).scalar()
+    return decrypt(row) if row else ""
+
+
 async def _discover_with_token(db: Session, token: str) -> dict:
     warnings: list[str] = []
     async with httpx.AsyncClient(timeout=15) as client:
@@ -513,49 +646,47 @@ async def _discover_with_token(db: Session, token: str) -> dict:
                 ig = p.get("instagram_business_account")
                 if ig:
                     instagram.append({
+                        # page_token, no p["access_token"]: cuando /me/accounts no
+                        # trae el token de página, Instagram quedaba sin token y
+                        # el canal no podía ni recibir ni responder
                         "id": ig["id"], "username": ig.get("username") or "",
-                        "page_name": p.get("name") or "", "access_token": p.get("access_token") or "",
+                        "page_name": p.get("name") or "", "access_token": page_token,
                     })
             if resp.status_code != 200:
                 warnings.append("No se pudieron listar páginas de Facebook")
         except Exception:
             warnings.append("No se pudieron listar páginas de Facebook")
 
-        # 3. WhatsApp numbers: page → business → owned WABAs → phone_numbers
+    # 3. Números de WhatsApp de TODOS los WABAs alcanzables (propios y
+    #    compartidos, con paginación), no solo los de negocios con página
+    def _scan_numbers() -> list[dict]:
+        found, seen_phone = [], set()
+        with httpx.Client(timeout=25) as c:
+            for waba in _all_wabas(c, token):
+                for num in _paged(c, f"{GRAPH}/{waba['id']}/phone_numbers",
+                                  {"access_token": token,
+                                   "fields": "id,display_phone_number,verified_name,quality_rating"}):
+                    if not num.get("id") or num["id"] in seen_phone:
+                        continue
+                    seen_phone.add(num["id"])
+                    found.append({
+                        "id": num["id"],
+                        "display_phone_number": num.get("display_phone_number") or "",
+                        "verified_name": num.get("verified_name") or "",
+                        "quality_rating": num.get("quality_rating") or "",
+                        "waba_name": waba.get("name") or "",
+                        "waba_id": waba["id"],
+                    })
+        return found
+
+    try:
+        whatsapp = await asyncio.to_thread(_scan_numbers)
+    except Exception as e:
         whatsapp = []
-        seen_biz, seen_phone = set(), set()
-        for p in pages:
-            try:
-                resp = await client.get(f"{GRAPH}/{p['id']}", params={"access_token": token, "fields": "business"})
-                biz = (resp.json().get("business") or {}).get("id") if resp.status_code == 200 else None
-                if not biz or biz in seen_biz:
-                    continue
-                seen_biz.add(biz)
-                resp = await client.get(
-                    f"{GRAPH}/{biz}/owned_whatsapp_business_accounts",
-                    params={"access_token": token, "limit": 50, "fields": "id,name"},
-                )
-                for waba in (resp.json().get("data") or []) if resp.status_code == 200 else []:
-                    resp2 = await client.get(
-                        f"{GRAPH}/{waba['id']}/phone_numbers",
-                        params={"access_token": token,
-                                "fields": "id,display_phone_number,verified_name,quality_rating"},
-                    )
-                    for num in (resp2.json().get("data") or []) if resp2.status_code == 200 else []:
-                        if num["id"] in seen_phone:
-                            continue
-                        seen_phone.add(num["id"])
-                        whatsapp.append({
-                            "id": num["id"],
-                            "display_phone_number": num.get("display_phone_number") or "",
-                            "verified_name": num.get("verified_name") or "",
-                            "quality_rating": num.get("quality_rating") or "",
-                            "waba_name": waba.get("name") or "",
-                        })
-            except Exception:
-                continue
-        if pages and not whatsapp:
-            warnings.append("El token no da acceso a números de WhatsApp (revisá permisos whatsapp_business_management)")
+        warnings.append(f"No se pudieron listar números de WhatsApp: {str(e)[:100]}")
+    if not whatsapp:
+        warnings.append("El token no da acceso a números de WhatsApp (revisá permisos whatsapp_business_management "
+                        "y que el usuario del sistema tenga asignado el WABA)")
 
     # 4. Flag assets already registered as channels
     existing = {
@@ -951,6 +1082,101 @@ def waba_templates_delete(
     if resp.status_code != 200 or not data.get("success"):
         raise HTTPException(status_code=400, detail=data.get("error", {}).get("message", "Meta rechazó el borrado")[:250])
     return {"ok": True}
+
+
+@router.get("/diagnose")
+async def diagnose_channels(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Estado real de cada canal contra Meta: token vivo y webhooks suscriptos.
+    Un canal 'activo' sin suscripción no recibe NINGÚN mensaje."""
+    company_id = payload.get("companyId")
+    rows = db.execute(
+        text("""SELECT c.id, c.channel_type, c.name, c.external_id, c.status, c.config_json,
+                       mc.access_token AS mc_token
+                FROM channels c LEFT JOIN meta_connections mc ON mc.id = c.meta_connection_id
+                WHERE c.company_id = :cid ORDER BY c.id"""),
+        {"cid": company_id},
+    ).mappings().all()
+
+    def _check(ch: dict) -> dict:
+        token = decrypt(ch["mc_token"]) if ch["mc_token"] else ""
+        out = {"id": ch["id"], "channel_type": ch["channel_type"], "name": ch["name"],
+               "external_id": ch["external_id"], "status": ch["status"],
+               "token_ok": False, "webhooks_ok": False, "problem": ""}
+        if not token:
+            out["problem"] = "El canal no tiene token guardado"
+            return out
+        try:
+            with httpx.Client(timeout=20) as c:
+                dbg = c.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
+                data = dbg.json().get("data", {}) if dbg.status_code == 200 else {}
+                out["token_ok"] = bool(data.get("is_valid"))
+                if not out["token_ok"]:
+                    out["problem"] = "El token venció o fue revocado: reconectá el canal"
+                    return out
+                if ch["channel_type"] == "whatsapp":
+                    cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else (ch["config_json"] or {})
+                    waba = cfg.get("wabaId") or _resolve_waba_for_phone(c, ch["external_id"], token)
+                    if waba:
+                        r = c.get(f"{GRAPH}/{waba}/subscribed_apps", params={"access_token": token})
+                        out["webhooks_ok"] = r.status_code == 200 and bool(r.json().get("data"))
+                else:
+                    page_id = ch["external_id"] if ch["channel_type"] == "messenger" else ""
+                    me = c.get(f"{GRAPH}/me", params={"access_token": token, "fields": "id"})
+                    if me.status_code == 200 and me.json().get("id"):
+                        page_id = me.json()["id"]
+                    if page_id:
+                        r = c.get(f"{GRAPH}/{page_id}/subscribed_apps", params={"access_token": token})
+                        subs = (r.json().get("data") or []) if r.status_code == 200 else []
+                        fields = {f for a in subs for f in (a.get("subscribed_fields") or [])}
+                        out["webhooks_ok"] = "messages" in fields
+        except Exception as e:
+            out["problem"] = str(e)[:120]
+            return out
+        if not out["webhooks_ok"]:
+            out["problem"] = "No recibe mensajes: falta suscribir los webhooks (tocá Reparar)"
+        return out
+
+    checks = await asyncio.to_thread(lambda: [_check(dict(r)) for r in rows])
+    return {"ok": True, "channels": checks,
+            "problems": len([c for c in checks if c["problem"]])}
+
+
+@router.post("/{channel_id}/repair")
+async def repair_channel(
+    channel_id: int,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Vuelve a suscribir los webhooks del canal (arregla 'conectado pero no
+    llegan mensajes' sin tener que reconectar de cero)."""
+    require_admin(payload)
+    company_id = payload.get("companyId")
+    ch = db.execute(
+        text("""SELECT c.id, c.channel_type, c.external_id, c.config_json, mc.access_token AS mc_token
+                FROM channels c LEFT JOIN meta_connections mc ON mc.id = c.meta_connection_id
+                WHERE c.id = :id AND c.company_id = :cid"""),
+        {"id": channel_id, "cid": company_id},
+    ).mappings().first()
+    if not ch:
+        raise HTTPException(status_code=404, detail="Canal no encontrado")
+    token = decrypt(ch["mc_token"]) if ch["mc_token"] else ""
+    if not token:
+        raise HTTPException(status_code=400, detail="El canal no tiene token: reconectalo desde Canales")
+
+    cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else (ch["config_json"] or {})
+    ok, detail = await asyncio.to_thread(
+        _subscribe_channel_webhooks, ch["channel_type"], ch["external_id"], token, cfg.get("wabaId", ""))
+    if ok:
+        cfg["webhooksOk"] = True
+        db.execute(text("UPDATE channels SET config_json = :c, status = 'active' WHERE id = :id"),
+                   {"c": json.dumps(cfg), "id": channel_id})
+        db.commit()
+        _invalidate_channels_cache(company_id)
+        return {"ok": True, "message": "Webhooks activados: el canal ya recibe mensajes"}
+    raise HTTPException(status_code=400, detail=f"No se pudo activar: {detail}")
 
 
 @router.post("/{channel_id}/test")

@@ -198,7 +198,46 @@ const Connections = () => {
     }
   }, []);
 
+  // Estado real contra Meta: un canal "activo" sin webhooks suscriptos no
+  // recibe ningún mensaje, y eso antes no se veía en ningún lado
+  const [diag, setDiag] = useState<Record<number, { token_ok: boolean; webhooks_ok: boolean; problem: string }>>({});
+  const [checking, setChecking] = useState(false);
+  const [repairing, setRepairing] = useState<number | null>(null);
+
+  const runDiagnose = useCallback(async (silent = true) => {
+    setChecking(true);
+    try {
+      const { data } = await api.get('/channels/diagnose');
+      const map: Record<number, any> = {};
+      (data.channels || []).forEach((c: any) => { map[c.id] = c; });
+      setDiag(map);
+      if (!silent) {
+        if (data.problems) toast.warning(`${data.problems} canal(es) con problemas`);
+        else toast.success('Todos los canales reciben mensajes correctamente');
+      }
+    } catch {
+      if (!silent) toast.error('No se pudo verificar el estado de los canales');
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  const repairChannel = async (ch: Channel) => {
+    setRepairing(ch.id);
+    try {
+      const { data } = await api.post(`/channels/${ch.id}/repair`);
+      toast.success(data.message || 'Canal reparado');
+      await runDiagnose();
+      load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudo reparar el canal');
+    } finally {
+      setRepairing(null);
+    }
+  };
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (channels.length) runDiagnose(true); }, [channels.length, runDiagnose]);
 
   const openCreate = () => {
     setEditing(null);
@@ -393,6 +432,11 @@ const Connections = () => {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
+          {!!channels.length && (
+            <Button variant="outlined" disabled={checking} onClick={() => runDiagnose(false)} sx={{ fontSize: '0.82rem' }}>
+              {checking ? <CircularProgress size={16} /> : 'Verificar canales'}
+            </Button>
+          )}
           <Button variant="outlined" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontSize: '0.82rem' }}>
             Carga manual
           </Button>
@@ -456,6 +500,7 @@ const Connections = () => {
           {channels.map((ch, i) => {
             const m = meta(ch.channel_type);
             const test = testResults[ch.id];
+            const d = diag[ch.id];
             return (
               <Paper
                 key={ch.id}
@@ -504,10 +549,26 @@ const Connections = () => {
                           }}
                         />
                       )}
+                      {d && (
+                        <Chip
+                          size="small"
+                          label={d.webhooks_ok && d.token_ok ? 'Recibe mensajes' : 'No recibe mensajes'}
+                          sx={{
+                            height: 20, fontSize: '0.65rem', fontWeight: 600,
+                            backgroundColor: d.webhooks_ok && d.token_ok ? 'rgba(52,211,153,0.12)' : 'rgba(239,83,80,0.16)',
+                            color: d.webhooks_ok && d.token_ok ? '#34D399' : '#EF5350',
+                          }}
+                        />
+                      )}
                     </Stack>
                     <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.35)', fontFamily: '"JetBrains Mono", monospace' }}>
                       {m.label} &middot; {ch.external_id}
                     </Typography>
+                    {d?.problem && (
+                      <Typography sx={{ fontSize: '0.72rem', color: '#EF5350', mt: 0.3 }}>
+                        {d.problem}
+                      </Typography>
+                    )}
                   </Box>
 
                   {/* Verify token */}
@@ -520,6 +581,13 @@ const Connections = () => {
                   )}
 
                   {/* Actions */}
+                  {d && !(d.webhooks_ok && d.token_ok) && (
+                    <Button size="small" variant="contained" color="error" disabled={repairing === ch.id}
+                      onClick={() => repairChannel(ch)}
+                      sx={{ fontSize: '0.72rem', py: 0.2, textTransform: 'none' }}>
+                      {repairing === ch.id ? <CircularProgress size={14} /> : 'Reparar'}
+                    </Button>
+                  )}
                   <Tooltip title="Probar conexión"><IconButton size="small" onClick={() => handleTest(ch)}><TestIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
                   <Tooltip title="Editar"><IconButton size="small" onClick={() => openEdit(ch)}><EditIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
                   {ch.status === 'active' ? (

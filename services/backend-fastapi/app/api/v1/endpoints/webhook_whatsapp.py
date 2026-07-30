@@ -558,12 +558,24 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     try:
         _phone_number_id = payload.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("metadata", {}).get("phone_number_id", "")
         if _phone_number_id:
-            _crs_row = db.execute(
-                text("SELECT company_id FROM company_runtime_settings WHERE settings_json::jsonb ->> 'waCloudPhoneNumberId' = :pid LIMIT 1"),
+            # La tabla channels es la fuente de verdad: una empresa puede tener
+            # VARIOS números de WhatsApp. company_runtime_settings solo guarda
+            # uno (el último conectado), así que buscando ahí primero se caían
+            # los mensajes de todos los demás números.
+            _ch_row = db.execute(
+                text("SELECT company_id FROM channels WHERE channel_type = 'whatsapp' "
+                     "AND external_id = :pid AND status = 'active' LIMIT 1"),
                 {"pid": _phone_number_id},
             ).mappings().first()
-            if _crs_row:
-                _incoming_company_id = int(_crs_row["company_id"])
+            if _ch_row:
+                _incoming_company_id = int(_ch_row["company_id"])
+            else:
+                _crs_row = db.execute(
+                    text("SELECT company_id FROM company_runtime_settings WHERE settings_json::jsonb ->> 'waCloudPhoneNumberId' = :pid LIMIT 1"),
+                    {"pid": _phone_number_id},
+                ).mappings().first()
+                if _crs_row:
+                    _incoming_company_id = int(_crs_row["company_id"])
     except Exception as _cid_err:
         print(f"[webhook] company_id detection error (non-fatal): {_cid_err}")
 
