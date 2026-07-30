@@ -565,6 +565,17 @@ def _subscribe_channel_webhooks(channel_type: str, external_id: str, token: str,
         return False, "el canal no tiene token guardado"
     try:
         with httpx.Client(timeout=25) as client:
+            # subscribed_apps suscribe la app DUEÑA DEL TOKEN. Con un token de
+            # otra app de Meta la llamada devuelve 200 pero los webhooks van a
+            # esa app, no a nosotros: hay que avisarlo en vez de fingir éxito.
+            our_app = os.getenv("META_APP_ID", "").strip()
+            dbg = client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
+            tok_app = str((dbg.json().get("data") or {}).get("app_id") or "") if dbg.status_code == 200 else ""
+            if our_app and tok_app and tok_app != our_app:
+                return False, ("el canal se conectó con un token de otra app de Meta, así que los mensajes "
+                               "nunca van a llegar acá. Reconectalo con el botón «Conectar WhatsApp» "
+                               "(eligiendo el número que ya existe).")
+
             if channel_type == "whatsapp":
                 waba = waba_hint or _resolve_waba_for_phone(client, external_id, token)
                 if not waba:
@@ -1119,6 +1130,8 @@ async def diagnose_channels(
                 if not out["token_ok"]:
                     out["problem"] = "El token venció o fue revocado: reconectá el canal"
                     return out
+                our_app = os.getenv("META_APP_ID", "").strip()
+                out["foreign_app"] = bool(our_app and str(data.get("app_id") or "") != our_app)
                 # Dato legible del canal (el número real, el @usuario o la página)
                 try:
                     if ch["channel_type"] == "whatsapp":
@@ -1172,7 +1185,10 @@ async def diagnose_channels(
             out["problem"] = str(e)[:120]
             return out
         if not out["webhooks_ok"]:
-            out["problem"] = "No recibe mensajes: falta suscribir los webhooks (tocá Reparar)"
+            out["problem"] = ("No recibe mensajes: se conectó con un token de otra app de Meta. "
+                              "Reconectalo con «Conectar WhatsApp» eligiendo el número existente."
+                              if out.get("foreign_app")
+                              else "No recibe mensajes: falta suscribir los webhooks (tocá Reparar)")
         return out
 
     checks = await asyncio.to_thread(lambda: [_check(dict(r)) for r in rows])
