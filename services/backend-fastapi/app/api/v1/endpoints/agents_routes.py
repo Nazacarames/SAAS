@@ -158,6 +158,51 @@ def update_agent(
     return dict(agent) if agent else None
 
 
+class AgentChannels(BaseModel):
+    channels: list[int] = []
+
+
+@router.put("/agents/{agent_id}/channels")
+def set_agent_channels(
+    agent_id: int,
+    body: AgentChannels,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Canales donde responde el agente. Lista vacía = todos (comportamiento
+    histórico). Se guarda en ai_config_json.channels."""
+    require_admin(payload)
+    company_id = payload.get("companyId")
+
+    row = db.execute(
+        text("SELECT ai_config_json FROM ai_agents WHERE id = :id AND company_id = :cid"),
+        {"id": agent_id, "cid": company_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Agente no encontrado")
+
+    valid = {int(r["id"]) for r in db.execute(
+        text("SELECT id FROM channels WHERE company_id = :cid"), {"cid": company_id}).mappings().all()}
+    chans = []
+    for c in body.channels:
+        if int(c) not in valid:
+            raise HTTPException(status_code=400, detail=f"El canal {c} no pertenece a la empresa")
+        chans.append(int(c))
+
+    try:
+        cfg = json.loads(row["ai_config_json"]) if row["ai_config_json"] else {}
+    except Exception:
+        cfg = {}
+    cfg["channels"] = chans
+    db.execute(
+        text("UPDATE ai_agents SET ai_config_json = :c, updated_at = NOW() WHERE id = :id AND company_id = :cid"),
+        {"c": json.dumps(cfg, ensure_ascii=False), "id": agent_id, "cid": company_id},
+    )
+    db.commit()
+    _invalidate_agent_cache(company_id)
+    return {"ok": True, "channels": chans}
+
+
 @router.delete("/agents/{agent_id}")
 def delete_agent(
     agent_id: int,

@@ -88,11 +88,6 @@ const normalizePreviewImageUrl = (image?: string, baseUrl?: string) => {
   return '';
 };
 
-const fallbackPreviewImageUrl = (url?: string) => {
-  const clean = String(url || '').trim();
-  if (!/^https?:\/\//i.test(clean)) return '';
-  return `https://image.thum.io/get/width/1200/noanimate/${encodeURIComponent(clean)}`;
-};
 
 const parsePropertyCards = (body: string): Array<{ photo: string | null; text: string }> | null => {
   const CARD_SEP = ' ||| ';
@@ -780,12 +775,16 @@ const Conversations = () => {
                                 const title = String(p.title || '').trim();
                                 const desc = String(p.description || '').trim();
                                 const host = String(p.host || (() => { try { return new URL(mediaUrl).hostname; } catch { return ''; } })()).trim();
-                                const image = normalizePreviewImageUrl(String(p.image || '').trim(), mediaUrl);
-                                const fallbackImage = fallbackPreviewImageUrl(mediaUrl);
-                                const previewImage = image || fallbackImage;
+                                // Sin captura externa de respaldo: el servicio no
+                                // siempre responde y dejaba una imagen rota en el hilo
+                                const previewImage = normalizePreviewImageUrl(String(p.image || '').trim(), mediaUrl);
                                 return (
                                   <Box sx={{ mt: 0.8, border: '1px solid rgba(232,160,32,0.15)', borderRadius: 1.5, overflow: 'hidden', bgcolor: 'rgba(255,255,255,0.03)' }}>
-                                    {previewImage && <Box component='img' src={previewImage} alt='preview' sx={{ width: '100%', maxHeight: 180, objectFit: 'cover' }} /> }
+                                    {previewImage && (
+                                      <Box component='img' src={previewImage} alt=''
+                                        onError={(e: any) => { e.currentTarget.style.display = 'none'; }}
+                                        sx={{ width: '100%', maxHeight: 180, objectFit: 'cover' }} />
+                                    )}
                                     <Box sx={{ p: 1 }}>
                                       {title && <Typography variant='body2' sx={{ fontWeight: 700 }}>{title}</Typography>}
                                       {desc && <Typography variant='caption' sx={{ color: '#b8c7cf', display: 'block' }}>{desc}</Typography>}

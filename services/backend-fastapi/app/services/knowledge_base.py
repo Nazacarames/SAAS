@@ -79,6 +79,8 @@ def _load_ai_agent_config(company_id: int) -> Dict:
             "ft_system_prompt": row["ft_system_prompt"] or "",
             "search_wait_msg": _ai_cfg.get("search_wait_msg", ""),
             "rent_requirements_msg": _ai_cfg.get("rent_requirements_msg", ""),
+            # canales donde responde el agente (vacío = todos)
+            "channels": _ai_cfg.get("channels") or [],
             "country": (row.get("country") or "AR"),
             "zone_keywords": (row.get("zone_keywords") or []),
             "budget_floor_rent": row.get("budget_floor_rent"),
@@ -169,3 +171,20 @@ SOCIAL_MEDIA = {}
 
 def get_company_info() -> Dict:
     return COMPANY_PROFILE
+
+
+def agent_answers_channel(company_id: int, channel_id) -> bool:
+    """¿El agente IA está habilitado para este canal?
+
+    ai_config_json.channels = lista de ids de canal. Vacía o ausente
+    (config vieja) = responde en todos, que era el comportamiento previo."""
+    if not channel_id:
+        return True
+    try:
+        cfg = get_ai_agent_config(company_id) or {}
+        raw = cfg.get("channels")
+        if not raw:
+            return True
+        return int(channel_id) in [int(c) for c in raw if str(c).strip()]
+    except Exception:
+        return True

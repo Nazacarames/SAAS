@@ -19,7 +19,12 @@ import {
   DialogContent,
   DialogActions,
   CircularProgress,
-  Alert
+  Alert,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  OutlinedInput
 } from '@mui/material';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
@@ -114,6 +119,13 @@ const AIAgents = () => {
     }
   };
 
+  // Canales donde responde el agente (vacío = todos)
+  const [agentChannels, setAgentChannels] = useState<number[]>([]);
+  const [allChannels, setAllChannels] = useState<{ id: number; name: string; display?: string; channel_type: string }[]>([]);
+  useEffect(() => {
+    api.get('/channels').then(({ data }) => setAllChannels(data.channels || [])).catch(() => {});
+  }, []);
+
   const fetchTemplates = async () => {
     try {
       const { data } = await api.get('/ai/persona-templates');
@@ -194,6 +206,7 @@ const AIAgents = () => {
     setBhStart('');
     setBhEnd('');
     setBhDays([1, 2, 3, 4, 5]);
+    setAgentChannels([]);
   };
 
   const applyTemplate = (t: any) => {
@@ -240,9 +253,11 @@ const AIAgents = () => {
         // Sin model/language: un PUT no debe pisar el modelo configurado
         // (ej: fine-tuned ft:...) con el default.
         await api.put(`/ai/agents/${editingId}`, payload);
+        await api.put(`/ai/agents/${editingId}/channels`, { channels: agentChannels });
         toast.success('Agente IA actualizado');
       } else {
-        await api.post('/ai/agents', { ...payload, language: 'es', model: 'gpt-4o-mini', isActive: true });
+        const { data } = await api.post('/ai/agents', { ...payload, language: 'es', model: 'gpt-4o-mini', isActive: true });
+        if (data?.id) await api.put(`/ai/agents/${data.id}/channels`, { channels: agentChannels });
         toast.success('Agente IA guardado y activado');
       }
       resetForm();
@@ -262,6 +277,12 @@ const AIAgents = () => {
     setOffhoursMsg(agent.offhours_msg || '');
     setFarewellMsg(agent.farewell_msg || '');
     loadBusinessHours(agent.business_hours_json || '{}');
+    try {
+      const cfg = JSON.parse(agent.ai_config_json || '{}');
+      setAgentChannels((cfg.channels || []).map(Number));
+    } catch {
+      setAgentChannels([]);
+    }
   };
 
   const toggleAgent = async (agent: any) => {
@@ -397,6 +418,29 @@ const AIAgents = () => {
                 value={farewellMsg}
                 onChange={(e) => setFarewellMsg(e.target.value)}
               />
+
+              <FormControl size='small' fullWidth>
+                <InputLabel>Canales donde responde</InputLabel>
+                <Select multiple label='Canales donde responde' input={<OutlinedInput label='Canales donde responde' />}
+                  value={agentChannels}
+                  onChange={(e) => setAgentChannels(e.target.value as number[])}
+                  renderValue={(sel) => (sel as number[]).length
+                    ? (sel as number[]).map(id => {
+                        const c = allChannels.find(x => x.id === id);
+                        return c ? (c.display || c.name) : id;
+                      }).join(', ')
+                    : 'Todos los canales'}>
+                  {allChannels.map(c => (
+                    <MenuItem key={c.id} value={c.id}>
+                      {c.channel_type === 'whatsapp' ? 'WhatsApp' : c.channel_type === 'instagram' ? 'Instagram' : 'Messenger'}
+                      {' · '}{c.display || c.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+                <Typography variant='caption' color='text.secondary' sx={{ mt: 0.5 }}>
+                  Sin selección responde en todos. Útil para que el agente atienda solo Instagram, o solo un número.
+                </Typography>
+              </FormControl>
 
               <Box>
                 <Typography variant='caption' color='text.secondary'>

@@ -72,6 +72,21 @@ def _validate_flow(db: Session, cid: int, flow: dict) -> dict:
     if flow.get("no_match") not in (None, "", "ai", "menu"):
         raise HTTPException(status_code=400, detail="'no_match' debe ser ai o menu")
     flow["reopen_hours"] = max(1, min(720, int(flow.get("reopen_hours") or 24)))
+
+    # Canales donde corre el bot (vacío = todos los de WhatsApp)
+    valid_channels = {int(r["id"]) for r in db.execute(
+        text("SELECT id FROM channels WHERE company_id = :cid AND channel_type = 'whatsapp'"),
+        {"cid": cid}).mappings().all()}
+    chans = []
+    for c in (flow.get("channel_ids") or []):
+        try:
+            cid_int = int(c)
+        except (TypeError, ValueError):
+            continue
+        if cid_int not in valid_channels:
+            raise HTTPException(status_code=400, detail=f"El canal {c} no pertenece a la empresa")
+        chans.append(cid_int)
+    flow["channel_ids"] = chans
     return flow
 
 
@@ -91,16 +106,25 @@ def get_menu_bot(payload: dict = Depends(get_current_user_payload), db: Session 
     stages = db.execute(
         text("SELECT id, name FROM lead_stages WHERE company_id = :cid ORDER BY position"), {"cid": cid}
     ).mappings().all()
-    has_wa = db.execute(
-        text("SELECT COUNT(*) FROM channels WHERE company_id = :cid AND channel_type = 'whatsapp' AND status = 'active'"),
+    wa_channels = db.execute(
+        text("""SELECT id, name, external_id, status, config_json FROM channels
+                WHERE company_id = :cid AND channel_type = 'whatsapp' ORDER BY id"""),
         {"cid": cid},
-    ).scalar()
+    ).mappings().all()
+
+    def _label(ch) -> str:
+        raw = ch["config_json"]
+        cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return cfg.get("displayPhone") or ch["external_id"]
+
     return {
         "flow": flow,
         "stats": {r["event_key"]: int(r["n"]) for r in stats_rows},
         "users": [dict(u) for u in users],
         "stages": [dict(s) for s in stages],
-        "has_whatsapp": bool(has_wa),
+        "has_whatsapp": any(c["status"] == "active" for c in wa_channels),
+        "channels": [{"id": c["id"], "name": c["name"], "display": _label(c),
+                      "status": c["status"]} for c in wa_channels],
     }
 
 

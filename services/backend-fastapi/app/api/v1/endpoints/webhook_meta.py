@@ -234,6 +234,14 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     if not limit_ok:
         return {"ignored": True, "reason": "limit_reached"}
 
+    # El agente puede estar limitado a ciertos canales
+    try:
+        from app.services.knowledge_base import agent_answers_channel
+        if not agent_answers_channel(company_id, channel.get("id")):
+            return {"ignored": True, "reason": "agent_channel_off"}
+    except Exception:
+        pass
+
     try:
         db.rollback()
         all_messages = get_conversation_messages(db, contact["id"], company_id=company_id)

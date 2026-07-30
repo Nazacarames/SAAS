@@ -200,12 +200,15 @@ async def _send_menu(db: Session, wa: dict, to: str, flow: dict, company_id: int
     options = flow.get("options") or []
     greeting = flow.get("greeting") or "¡Hola! ¿En qué te podemos ayudar?"
     if len(options) <= 3:
-        await send_buttons(wa, to, greeting, [(f"mb:o{i}", o.get("label", f"Opción {i+1}")) for i, o in enumerate(options)])
+        sent = await send_buttons(wa, to, greeting, [(f"mb:o{i}", o.get("label", f"Opción {i+1}")) for i, o in enumerate(options)])
     else:
-        await send_list(wa, to, greeting, flow.get("menu_button", "Ver opciones"),
-                        [(f"mb:o{i}", o.get("label", ""), "") for i, o in enumerate(options)])
-    _save_bot_message(db, contact_id, f"[Menú] {greeting}", company_id)
-    _event(db, company_id, "menu_sent", contact_id)
+        sent = await send_list(wa, to, greeting, flow.get("menu_button", "Ver opciones"),
+                               [(f"mb:o{i}", o.get("label", ""), "") for i, o in enumerate(options)])
+    if sent:
+        _save_bot_message(db, contact_id, greeting, company_id)
+        _event(db, company_id, "menu_sent", contact_id)
+    else:
+        log.warning("menu_bot menu NO enviado company=%s contacto=%s", company_id, contact_id)
 
 
 def _rr_index(db: Session, company_id: int, key: str, n: int) -> int:
@@ -264,9 +267,9 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
         except Exception:
             db.rollback()
 
-    note = str(node.get("internal_note") or "").strip()
-    if note:
-        _save_bot_message(db, contact_id, f"[Nota interna] {note}", company_id)
+    # La nota interna y el aviso al asesor NO se guardan como mensajes del
+    # hilo: ensuciaban la conversación con texto que el cliente nunca vio.
+    # Quedan trazados en flow_events y en los logs.
 
     rr_notify = [str(n or "") for n in (node.get("rr_notify_numbers") or [])]
     _cand = rr_notify[idx % len(rr_notify)] if rr_notify else ""
@@ -299,7 +302,9 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
             if not sent:
                 sent = await _send_tpl("nuevo_cliente")
         if sent:
-            _save_bot_message(db, contact_id, f"[Aviso] Notificado el asesor al +{notify_to}", company_id)
+            log.info("menu_bot notify sent company=%s to=%s", company_id, notify_to[:6])
+        else:
+            log.warning("menu_bot notify FAILED company=%s to=%s", company_id, notify_to[:6])
 
     reply = ""
     if rr_replies:
@@ -308,8 +313,12 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
         reply = str(node.get("reply_text") or "").strip()
     if reply:
         reply = reply.replace("{asesor}", asesor_name or "nuestro equipo")
-        await send_buttons(wa, to, reply, [("mb:root", "Volver al menú")])
-        _save_bot_message(db, contact_id, reply, company_id)
+        # Solo se guarda si Meta lo aceptó: guardar siempre mostraba en el CRM
+        # mensajes que el cliente nunca recibió
+        if await send_buttons(wa, to, reply, [("mb:root", "Volver al menú")]):
+            _save_bot_message(db, contact_id, reply, company_id)
+        else:
+            log.warning("menu_bot reply NO enviado company=%s contacto=%s", company_id, contact_id)
 
     paused = str(node.get("after") or "human") == "human"
     try:
@@ -343,11 +352,16 @@ def _is_new_session(db: Session, contact_id: int, reopen_hours: int) -> bool:
 
 
 async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: str,
-                         interactive_id: str, wa: dict) -> dict:
+                         interactive_id: str, wa: dict, channel_id: int | None = None) -> dict:
     """Devuelve {"handled": bool}. handled=True → el webhook NO llama al agente IA."""
     flow = get_flow(company_id)
     options = flow.get("options") or []
     if not flow.get("enabled") or not options or not wa:
+        return {"handled": False}
+
+    # El bot puede estar limitado a ciertos canales (vacío = todos)
+    allowed = [int(c) for c in (flow.get("channel_ids") or []) if str(c).strip()]
+    if allowed and channel_id and int(channel_id) not in allowed:
         return {"handled": False}
 
     to = str(contact.get("number") or "")
@@ -378,11 +392,14 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
                 return {"handled": False}
             sub = opt.get("submenu")
             if sub and (sub.get("items") or []):
-                await send_list(wa, to, str(sub.get("text") or "Elegí una opción"), str(sub.get("button") or "Opciones"),
-                                [(f"mb:s{ref[1:]}:{j}", it.get("label", ""), it.get("description", ""))
-                                 for j, it in enumerate(sub["items"])])
-                _save_bot_message(db, contact_id, f"[Menú] {sub.get('text', '')}", company_id)
-                _event(db, company_id, ref, contact_id)
+                sent = await send_list(wa, to, str(sub.get("text") or "Elegí una opción"), str(sub.get("button") or "Opciones"),
+                                       [(f"mb:s{ref[1:]}:{j}", it.get("label", ""), it.get("description", ""))
+                                        for j, it in enumerate(sub["items"])])
+                if sent:
+                    _save_bot_message(db, contact_id, str(sub.get("text") or ""), company_id)
+                    _event(db, company_id, ref, contact_id)
+                else:
+                    log.warning("menu_bot submenu NO enviado company=%s contacto=%s", company_id, contact_id)
             else:
                 await _run_actions(db, wa, flow, opt, ref, company_id, contact)
             return {"handled": True}

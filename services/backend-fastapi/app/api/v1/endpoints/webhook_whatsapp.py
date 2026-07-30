@@ -555,6 +555,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     # Derive company_id from WhatsApp phone_number_id BEFORE contact lookup
     # This ensures we always scope the contact search to the correct tenant
     _incoming_company_id = None
+    _incoming_channel_id = None
     try:
         _phone_number_id = payload.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("metadata", {}).get("phone_number_id", "")
         if _phone_number_id:
@@ -563,12 +564,13 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             # uno (el último conectado), así que buscando ahí primero se caían
             # los mensajes de todos los demás números.
             _ch_row = db.execute(
-                text("SELECT company_id FROM channels WHERE channel_type = 'whatsapp' "
+                text("SELECT id, company_id FROM channels WHERE channel_type = 'whatsapp' "
                      "AND external_id = :pid AND status = 'active' LIMIT 1"),
                 {"pid": _phone_number_id},
             ).mappings().first()
             if _ch_row:
                 _incoming_company_id = int(_ch_row["company_id"])
+                _incoming_channel_id = int(_ch_row["id"])
             else:
                 _crs_row = db.execute(
                     text("SELECT company_id FROM company_runtime_settings WHERE settings_json::jsonb ->> 'waCloudPhoneNumberId' = :pid LIMIT 1"),
@@ -652,6 +654,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
         _mb = await _menu_bot_handle(
             db, company_id, dict(contact), message_text,
             _extract_interactive_id(payload), _wa_cfg or {},
+            channel_id=_incoming_channel_id,
         )
         if _mb.get("handled"):
             return {"ok": True, "ignored": False, "reason": "menu_bot", "ai_reply": None}
@@ -665,6 +668,14 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             return {"ok": True, "ignored": False, "reason": "ai_paused", "ai_reply": None}
     except Exception:
         db.rollback()
+
+    # El agente puede estar limitado a ciertos canales
+    try:
+        from app.services.knowledge_base import agent_answers_channel
+        if not agent_answers_channel(company_id, _incoming_channel_id):
+            return {"ok": True, "ignored": True, "reason": "agent_channel_off", "ai_reply": None}
+    except Exception:
+        pass
 
     # Get conversation history scoped to this company's contact
     try:

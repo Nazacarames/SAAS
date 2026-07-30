@@ -34,7 +34,7 @@ interface Option {
 }
 interface Flow {
   enabled: boolean; greeting: string; reopen_hours: number;
-  no_match: 'ai' | 'menu'; options: Option[];
+  no_match: 'ai' | 'menu'; options: Option[]; channel_ids: number[];
 }
 
 const emptyOption = (): Option => ({
@@ -47,6 +47,7 @@ const emptySub = (): SubItem => ({
 });
 const defaultFlow = (): Flow => ({
   enabled: false, greeting: '¡Hola! 👋 ¿En qué te podemos ayudar hoy?', reopen_hours: 24, no_match: 'ai', options: [],
+  channel_ids: [],
 });
 
 // ── Nodo custom ───────────────────────────────────────────────────────
@@ -127,6 +128,7 @@ const MenuBot = () => {
   const [users, setUsers] = useState<{ id: number; name: string }[]>([]);
   const [stages, setStages] = useState<{ id: number; name: string }[]>([]);
   const [hasWa, setHasWa] = useState(true);
+  const [waChannels, setWaChannels] = useState<{ id: number; name: string; display: string; status: string }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   // posiciones arrastradas en un ref: mover un nodo no debe rearmar el grafo
   const draggedRef = useRef<Record<string, { x: number; y: number }>>({});
@@ -136,11 +138,13 @@ const MenuBot = () => {
     try {
       const { data } = await api.get('/menu-bot');
       const f = data.flow || {};
-      setFlow({ ...defaultFlow(), ...f, options: (f.options || []).map((o: any) => ({ ...emptyOption(), ...o, label: o.label || '' })) });
+      setFlow({ ...defaultFlow(), ...f, channel_ids: f.channel_ids || [],
+                options: (f.options || []).map((o: any) => ({ ...emptyOption(), ...o, label: o.label || '' })) });
       setStats(data.stats || {});
       setUsers(data.users || []);
       setStages(data.stages || []);
       setHasWa(!!data.has_whatsapp);
+      setWaChannels(data.channels || []);
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'Error al cargar el Menú Bot');
     } finally {
@@ -153,7 +157,8 @@ const MenuBot = () => {
     setSaving(true);
     try {
       const { data } = await api.put('/menu-bot', { flow });
-      setFlow({ ...defaultFlow(), ...data.flow, options: (data.flow.options || []).map((o: any) => ({ ...emptyOption(), ...o })) });
+      setFlow({ ...defaultFlow(), ...data.flow, channel_ids: data.flow.channel_ids || [],
+                options: (data.flow.options || []).map((o: any) => ({ ...emptyOption(), ...o })) });
       toast.success('Flujo guardado');
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'No se pudo guardar');
@@ -413,6 +418,24 @@ const MenuBot = () => {
       body = (
         <Stack spacing={2}>
           <Alert severity="info">El flujo arranca solo con la primera conversación de WhatsApp, o cuando el cliente vuelve a escribir después del tiempo configurado.</Alert>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Canales donde corre el bot</InputLabel>
+            <Select multiple label="Canales donde corre el bot" input={<OutlinedInput label="Canales donde corre el bot" />}
+              value={flow.channel_ids}
+              onChange={e => setFlow(f => ({ ...f, channel_ids: e.target.value as number[] }))}
+              renderValue={(sel) => (sel as number[]).length
+                ? (sel as number[]).map(id => waChannels.find(c => c.id === id)?.display || id).join(', ')
+                : 'Todos'}>
+              {waChannels.map(c => (
+                <MenuItem key={c.id} value={c.id}>
+                  {c.display} — {c.name}{c.status !== 'active' ? ' (inactivo)' : ''}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+            Sin selección corre en todos los WhatsApp de la cuenta.
+          </Typography>
           <TextField size="small" type="number" label="Re-saludar tras (horas)" value={flow.reopen_hours}
             onChange={e => setFlow(f => ({ ...f, reopen_hours: Number(e.target.value) || 24 }))} />
         </Stack>
