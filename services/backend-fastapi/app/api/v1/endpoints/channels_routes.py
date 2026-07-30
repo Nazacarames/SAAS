@@ -1121,7 +1121,23 @@ async def diagnose_channels(
                     waba = cfg.get("wabaId") or _resolve_waba_for_phone(c, ch["external_id"], token)
                     if waba:
                         r = c.get(f"{GRAPH}/{waba}/subscribed_apps", params={"access_token": token})
-                        out["webhooks_ok"] = r.status_code == 200 and bool(r.json().get("data"))
+                        subs = (r.json().get("data") or []) if r.status_code == 200 else []
+                        # tiene que estar NUESTRA app: un WABA puede estar
+                        # suscripto a la app de otro proveedor (Kommo, etc.) y
+                        # entonces los mensajes se los lleva ese proveedor
+                        others = []
+                        our_app = os.getenv("META_APP_ID", "").strip()
+                        for a in subs:
+                            aid = str((a.get("whatsapp_business_api_data") or {}).get("id") or "")
+                            name = (a.get("whatsapp_business_api_data") or {}).get("name") or aid
+                            if aid and aid == our_app:
+                                out["webhooks_ok"] = True
+                            elif aid:
+                                others.append(name)
+                        if not out["webhooks_ok"] and others:
+                            out["problem"] = (f"Este número lo está recibiendo otra plataforma ({', '.join(others)}). "
+                                              "Hay que migrarlo a este CRM (tocá Reparar).")
+                            return out
                 else:
                     page_id = ch["external_id"] if ch["channel_type"] == "messenger" else ""
                     me = c.get(f"{GRAPH}/me", params={"access_token": token, "fields": "id"})
