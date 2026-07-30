@@ -33,6 +33,7 @@ interface Channel {
   name: string;
   status: string;
   external_id: string;
+  display?: string;
   verify_token: string;
   has_token: boolean;
   created_at: string;
@@ -200,7 +201,7 @@ const Connections = () => {
 
   // Estado real contra Meta: un canal "activo" sin webhooks suscriptos no
   // recibe ningún mensaje, y eso antes no se veía en ningún lado
-  const [diag, setDiag] = useState<Record<number, { token_ok: boolean; webhooks_ok: boolean; problem: string }>>({});
+  const [diag, setDiag] = useState<Record<number, { token_ok: boolean; webhooks_ok: boolean; problem: string; display?: string }>>({});
   const [checking, setChecking] = useState(false);
   const [repairing, setRepairing] = useState<number | null>(null);
 
@@ -562,7 +563,13 @@ const Connections = () => {
                       )}
                     </Stack>
                     <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.35)', fontFamily: '"JetBrains Mono", monospace' }}>
-                      {m.label} &middot; {ch.external_id}
+                      {m.label} &middot;{' '}
+                      <Box component="span" sx={{ color: 'rgba(255,255,255,0.65)', fontWeight: 600 }}>
+                        {d?.display || ch.display || ch.external_id}
+                      </Box>
+                      {(d?.display || ch.display) && (
+                        <Box component="span" sx={{ opacity: 0.5 }}> &middot; id {ch.external_id}</Box>
+                      )}
                     </Typography>
                     {d?.problem && (
                       <Typography sx={{ fontSize: '0.72rem', color: '#EF5350', mt: 0.3 }}>

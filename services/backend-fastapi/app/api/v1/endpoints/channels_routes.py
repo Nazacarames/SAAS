@@ -94,6 +94,9 @@ def list_channels(
         cfg = json.loads(d.pop("config_json", "{}")) if isinstance(d.get("config_json"), str) else d.pop("config_json", {})
         d["has_token"] = bool(d.get("meta_connection_id"))
         d["verify_token"] = cfg.get("verifyToken", "")
+        # El número/usuario legible: external_id es el id interno de Meta y no
+        # le dice nada al usuario. Se cachea en config al conectar/diagnosticar.
+        d["display"] = cfg.get("displayPhone") or cfg.get("displayName") or ""
         channels.append(d)
 
     return {"ok": True, "channels": channels}
@@ -816,7 +819,7 @@ async def embedded_signup_connect(
 
     verify_token = _get_company_verify_token(db, company_id) or secrets.token_urlsafe(32)
     config = {"verifyToken": verify_token, "wabaId": waba_id, "registerPin": pin,
-              "connectedVia": "embedded_signup"}
+              "connectedVia": "embedded_signup", "displayPhone": display}
     channel_name = verified_name or display or "WhatsApp"
 
     if existing:
@@ -1104,7 +1107,7 @@ async def diagnose_channels(
         token = decrypt(ch["mc_token"]) if ch["mc_token"] else ""
         out = {"id": ch["id"], "channel_type": ch["channel_type"], "name": ch["name"],
                "external_id": ch["external_id"], "status": ch["status"],
-               "token_ok": False, "webhooks_ok": False, "problem": ""}
+               "token_ok": False, "webhooks_ok": False, "problem": "", "display": ""}
         if not token:
             out["problem"] = "El canal no tiene token guardado"
             return out
@@ -1116,6 +1119,23 @@ async def diagnose_channels(
                 if not out["token_ok"]:
                     out["problem"] = "El token venció o fue revocado: reconectá el canal"
                     return out
+                # Dato legible del canal (el número real, el @usuario o la página)
+                try:
+                    if ch["channel_type"] == "whatsapp":
+                        f = "display_phone_number,verified_name"
+                    elif ch["channel_type"] == "instagram":
+                        f = "username,name"
+                    else:
+                        f = "name"
+                    info = c.get(f"{GRAPH}/{ch['external_id']}", params={"access_token": token, "fields": f})
+                    if info.status_code == 200:
+                        j = info.json()
+                        out["display"] = (j.get("display_phone_number")
+                                          or (("@" + j["username"]) if j.get("username") else "")
+                                          or j.get("name") or "")
+                except Exception:
+                    pass
+
                 if ch["channel_type"] == "whatsapp":
                     cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else (ch["config_json"] or {})
                     waba = cfg.get("wabaId") or _resolve_waba_for_phone(c, ch["external_id"], token)
@@ -1156,6 +1176,25 @@ async def diagnose_channels(
         return out
 
     checks = await asyncio.to_thread(lambda: [_check(dict(r)) for r in rows])
+
+    # Cachear el dato legible para que el listado lo muestre sin pegarle a Meta
+    by_id = {r["id"]: r for r in rows}
+    changed = False
+    for c in checks:
+        if not c["display"]:
+            continue
+        raw = by_id[c["id"]]["config_json"]
+        cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        key = "displayPhone" if c["channel_type"] == "whatsapp" else "displayName"
+        if cfg.get(key) != c["display"]:
+            cfg[key] = c["display"]
+            db.execute(text("UPDATE channels SET config_json = :c WHERE id = :id"),
+                       {"c": json.dumps(cfg), "id": c["id"]})
+            changed = True
+    if changed:
+        db.commit()
+        _invalidate_channels_cache(company_id)
+
     return {"ok": True, "channels": checks,
             "problems": len([c for c in checks if c["problem"]])}
 
