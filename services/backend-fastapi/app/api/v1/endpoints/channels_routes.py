@@ -493,6 +493,56 @@ async def _exchange_meta_code(code: str) -> str:
     return token
 
 
+def _system_user_id(sys_token: str) -> str:
+    try:
+        with httpx.Client(timeout=15) as c:
+            r = c.get(f"{GRAPH}/debug_token", params={"input_token": sys_token, "access_token": sys_token})
+            if r.status_code == 200:
+                return str((r.json().get("data") or {}).get("user_id") or "")
+    except Exception:
+        pass
+    return ""
+
+
+async def _persistent_token(client: httpx.AsyncClient, waba_id: str, user_token: str) -> tuple[str, str]:
+    """Token duradero para operar el WABA. Devuelve (token, nota).
+
+    El code del Embedded Signup se canjea por un token de USUARIO que vence en
+    ~2 h: guardarlo dejaba el canal muerto al rato. Asignamos nuestro usuario
+    del sistema al WABA (token que no vence) y guardamos ese; si no se puede,
+    caemos a un token de larga duración (60 días)."""
+    sys_token = os.getenv("META_SYSTEM_TOKEN", "").strip()
+    sys_uid = _system_user_id(sys_token) if sys_token else ""
+    if sys_token and sys_uid and waba_id:
+        try:
+            r = await client.post(f"{GRAPH}/{waba_id}/assigned_users", params={
+                "user": sys_uid, "tasks": json.dumps(["MANAGE"]), "access_token": user_token})
+            ok = r.status_code == 200
+            if not ok:
+                # puede fallar si ya estaba asignado: verificar acceso directo
+                chk = await client.get(f"{GRAPH}/{waba_id}", params={"access_token": sys_token, "fields": "id"})
+                ok = chk.status_code == 200
+            if ok:
+                return sys_token, ""
+        except Exception:
+            pass
+
+    # Fallback: alargar el token de usuario a ~60 días
+    try:
+        r = await client.get(f"{GRAPH}/oauth/access_token", params={
+            "grant_type": "fb_exchange_token",
+            "client_id": os.getenv("META_APP_ID", "").strip(),
+            "client_secret": os.getenv("META_APP_SECRET", "").strip(),
+            "fb_exchange_token": user_token})
+        if r.status_code == 200 and r.json().get("access_token"):
+            return r.json()["access_token"], ("No se pudo asignar el usuario del sistema al WABA: el canal "
+                                              "queda con un token de ~60 días y habrá que reconectarlo antes.")
+    except Exception:
+        pass
+    return user_token, ("El canal quedó con un token temporal (vence en ~2 h). Reconectalo o revisá que el "
+                        "usuario del sistema tenga acceso al WABA.")
+
+
 class OAuthDiscoverBody(BaseModel):
     code: str
 
@@ -521,6 +571,27 @@ async def oauth_discover(
 
 _PAGE_WEBHOOK_FIELDS = ["messages", "messaging_postbacks", "messaging_optins",
                         "message_reactions", "messaging_referrals", "feed"]
+
+
+def _debug_token(client, token: str) -> dict:
+    """Datos de un token, inspeccionado con el APP TOKEN.
+
+    Los tokens que devuelve el Embedded Signup (business integration system
+    user) NO pueden inspeccionarse a sí mismos: Meta responde "#100 You must
+    provide an app access token...". Usarlos como inspector hacía que un canal
+    recién conectado apareciera como "token vencido"."""
+    app_id = os.getenv("META_APP_ID", "").strip()
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    inspectors = [f"{app_id}|{app_secret}"] if (app_id and app_secret) else []
+    inspectors.append(token)  # respaldo: tokens clásicos sí se auto-inspeccionan
+    for insp in inspectors:
+        try:
+            r = client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": insp})
+            if r.status_code == 200 and (r.json().get("data") or {}).get("app_id"):
+                return r.json()["data"]
+        except Exception:
+            continue
+    return {}
 
 
 def _paged(client: httpx.Client, url: str, params: dict, cap: int = 500) -> list[dict]:
@@ -823,6 +894,12 @@ async def embedded_signup_connect(
         if not waba_id or not phone_id:
             raise HTTPException(status_code=400, detail="No se pudo identificar el WABA o el número de WhatsApp")
 
+        # 2.5 Token duradero: el del Embedded Signup vence en ~2 h
+        if not via_system_token:
+            token, note = await _persistent_token(client, waba_id, token)
+            if note:
+                warnings.append(note)
+
         # 3. Suscribir la app al WABA (para que lleguen los webhooks)
         resp = await client.post(f"{GRAPH}/{waba_id}/subscribed_apps",
                                  headers={"Authorization": f"Bearer {token}"})
@@ -937,6 +1014,9 @@ async def embedded_signup_connect(
     # fallback: ahí el token es el de sistema del proveedor y no debe viajar
     # al navegador del cliente.
     extra_assets = {"instagram": [], "messenger": [], "token": ""}
+    # el token de sistema del proveedor NUNCA viaja al navegador del cliente
+    if token == os.getenv("META_SYSTEM_TOKEN", "").strip():
+        via_system_token = True
     if not via_system_token:
         extra_assets["token"] = token
         try:
@@ -1167,6 +1247,17 @@ async def diagnose_channels(
                     return out
                 our_app = os.getenv("META_APP_ID", "").strip()
                 out["foreign_app"] = bool(our_app and str(data.get("app_id") or "") != our_app)
+                # avisar ANTES de que muera: un token que vence deja el canal
+                # mudo sin que nadie se entere
+                exp = int(data.get("expires_at") or 0)
+                out["expires_at"] = exp
+                if exp:
+                    import time as _t
+                    days = (exp - int(_t.time())) / 86400
+                    if days < 7:
+                        out["problem"] = (f"El token de este canal vence en {max(0, int(days))} día(s): "
+                                          "reconectalo para que no deje de funcionar")
+                        return out
                 # Dato legible del canal (el número real, el @usuario o la página)
                 try:
                     if ch["channel_type"] == "whatsapp":

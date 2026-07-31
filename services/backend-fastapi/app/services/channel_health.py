@@ -37,6 +37,12 @@ def _check_channel(ch: dict, our_app: str) -> str:
             data = dbg.json().get("data", {}) if dbg.status_code == 200 else {}
             if not data.get("is_valid"):
                 return "El token venció o fue revocado: reconectar el canal"
+            exp = int(data.get("expires_at") or 0)
+            if exp:
+                import time as _t
+                days = int((exp - int(_t.time())) / 86400)
+                if days < 7:
+                    return f"El token del canal vence en {max(0, days)} día(s): reconectar antes de que caiga"
             foreign = bool(our_app and str(data.get("app_id") or "") != our_app)
             if foreign and not cfg.get("appSecret"):
                 return "Token de otra app de Meta sin App Secret cargado: los webhooks se rechazan"
