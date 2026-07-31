@@ -163,6 +163,28 @@ FUNCTIONS = [
     {
         "type": "function",
         "function": {
+            "name": "derivar_a_asesor",
+            "description": (
+                "Deriva la conversación a un asesor humano: lo asigna, le avisa por WhatsApp "
+                "y pausa al agente. USALA SIEMPRE que digas que vas a pasar la consulta a un "
+                "asesor, o cuando el cliente pida hablar con una persona, mande un archivo que "
+                "no podés procesar, o pida algo fuera de tu alcance (permutas, reclamos, "
+                "excepciones de precio). NUNCA prometas que un asesor lo va a contactar sin "
+                "llamar a esta función."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "motivo": {"type": "string", "description": "Por qué se deriva, en una frase (lo lee el asesor)"},
+                    "resumen": {"type": "string", "description": "Resumen de lo que necesita el cliente, 1-2 oraciones"},
+                },
+                "required": ["motivo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "agendar_cita",
             "description": "Agenda una cita/turno para un contacto existente.",
             "parameters": {
@@ -915,12 +937,96 @@ def _sync_stage_from_status(db, company_id: int, contact_id: int, lead_status: s
     )
 
 
+_HANDOFF_RULES = """
+DERIVAR A UN ASESOR — función derivar_a_asesor:
+- Llamala APENAS detectes cualquiera de estos casos, en el MISMO turno:
+  · el cliente pide hablar con una persona/asesor/vendedor
+  · manda foto, factura, audio o video que no podés interpretar
+  · pide parte de pago, permuta, descuento especial, reclamo o garantía
+  · pide algo que no está en la BASE DE CONOCIMIENTO y no podés resolver
+- NO necesitás el nombre ni ningún otro dato para derivar: derivá primero y después, si querés, pedí el nombre.
+- PROHIBIDO decir "un asesor te va a contactar", "te derivo" o similar SIN haber llamado a derivar_a_asesor en ese turno. Si lo decís sin llamarla, el cliente queda esperando para siempre.
+- Después de derivar: una frase corta de cierre y listo. No sigas preguntando ni pidas datos.
+- Nunca preguntes por qué medio contactarlo: ya estás hablando por WhatsApp.
+"""
+
+_REAL_ESTATE_BLOCK = """BÚSQUEDA DE PROPIEDADES:
+- REGLA CRITICA: NO uses search_properties hasta tener los 3 datos: 1) TIPO, 2) ZONA, 3) PRESUPUESTO MÁXIMO (en USD para compra, en ARS para alquiler).
+- NUNCA vuelvas a preguntar datos que ya figuran en DATOS DEL CLIENTE. Si operation, property_type, zone, budget o rooms ya están seteados, no los repreguntes — usá el valor y pedí solo lo que falte.
+- Si operation="rent" ya está seteada, el cliente quiere ALQUILAR; NO preguntes si quiere comprar, alquilar o tasar.
+- Si property_type ya está seteado, NO preguntes qué tipo de propiedad busca.
+- Pasá `currency` en search_properties: "ARS" si operation="rent" y el presupuesto está en pesos, "USD" en caso contrario.
+- Si el cliente dio un rango (ej: "de 300k a 450k"), pasá price_min Y price_max en la búsqueda.
+- Cuando tenés los 3 datos, buscá inmediatamente.
+- Si ya se mostraron propiedades (hay cache activo o resultados agotados), NO vuelvas a buscar.
+- SIEMPRE pasá operation_type: si los DATOS DEL CLIENTE tienen operation="rent" usá "rent", si tienen operation="sale" usá "sale". Por defecto "sale".
+
+CUANDO EL USUARIO MUESTRA INTERÉS EN UNA PROPIEDAD:
+- Ofrecé coordinar una visita de inmediato: "¿Coordinamos una visita para que la puedas ver?"
+- Si no tenés su nombre, pedíselo para agendar: "¿Me decís tu nombre para reservar el turno?"
+- Si ya tenés nombre, ofrecé fechas o pedí disponibilidad horaria.
+- Nunca respondas solo con información sin proponer el siguiente paso.
+
+CUANDO EL USUARIO DICE QUE NO LE INTERESA NINGUNA:
+- Ofrecé ajustar criterios: zona, presupuesto o tipo de propiedad.
+- Preguntá qué no le convenció para mejorar la búsqueda.
+
+PROPUESTAS PROGRESIVAS (en orden de avance):
+1. Mostrá propiedades
+2. Preguntá si alguna le interesa
+3. Ofrecé visita
+4. Pedí datos de contacto (nombre, horario disponible)
+5. Confirmá el turno
+
+"""
+
+_GENERIC_BLOCK = """QUÉ HACER CON LA CONSULTA:
+- Respondé con lo que figura en la BASE DE CONOCIMIENTO (productos, servicios, precios, sucursales, horarios).
+- NUNCA inventes precios, stock, plazos ni condiciones. Si no está en la KB, no lo afirmes.
+- NO pidas "presupuesto máximo" ni datos de tipo inmobiliario. Preguntá solo lo que hace falta para resolver ESTA consulta (por ejemplo la medida, el modelo o el servicio que necesita).
+- No repreguntes algo que el cliente ya dijo: releé la conversación antes de preguntar.
+- Si el cliente nombra una sucursal o zona que no existe, ofrecé las que sí existen según la KB.
+
+CUÁNDO DERIVAR A UN ASESOR (usá la función derivar_a_asesor):
+- El cliente pide hablar con una persona.
+- Manda una foto, factura, video o audio que no podés interpretar.
+- Pide algo fuera de tu alcance: permutas o parte de pago, descuentos especiales, reclamos, garantías, cuentas corrientes.
+- El cliente ya dio los datos y lo que sigue es cotizar o cerrar.
+- REGLA: si vas a decir que "un asesor lo va a contactar", TENÉS que llamar a derivar_a_asesor en ese mismo turno. Nunca lo prometas sin llamarla.
+- Después de derivar, cerrá con una frase corta ("Ya te derivé con un asesor, te escribe en breve") y NO sigas preguntando.
+
+ARCHIVOS Y ADJUNTOS:
+- Si el cliente manda un archivo o foto, NO digas solo "no puedo recibir archivos" y sigas preguntando: agradecé, decile que un asesor lo va a ver y derivá.
+
+"""
+
+
+def _is_real_estate(company_id, db=None) -> bool:
+    """El rubro decide el guion del agente. Sin esto, toda empresa
+    heredaba el prompt inmobiliario (presupuesto en USD incluido)."""
+    from app.services.cache import get_or_set
+    def _load():
+        from app.core.db import SessionLocal
+        _db = db or SessionLocal()
+        try:
+            v = _db.execute(text("SELECT LOWER(COALESCE(industry, '')) FROM companies WHERE id = :c"),
+                            {"c": company_id}).scalar() or ""
+            return any(k in v for k in ("inmobiliaria", "real estate", "realestate", "broker", "propiedades"))
+        except Exception:
+            return False
+        finally:
+            if db is None:
+                _db.close()
+    return bool(get_or_set(f"is_re:{company_id}", 300, _load))
+
+
 async def execute_tool(
     tool_name: str,
     tool_args: dict,
     company_id: int = None,
     db: Session = None,
     dry_run: bool = False,
+    contact_id: int = None,
 ) -> dict:
     """Execute a tool and return results. With dry_run=True, write-tools
     (upsert_contact, agendar_cita) return a simulated success without touching
@@ -1264,6 +1370,23 @@ async def execute_tool(
             try: db.rollback()
             except Exception: pass
             return {"ok": False, "error": str(e)}
+
+    elif tool_name == "derivar_a_asesor":
+        # Derivación REAL: antes el agente prometía "te paso con un asesor" y no
+        # pasaba nada — ni asignación, ni aviso, ni pausa.
+        if not db or not contact_id:
+            return {"ok": False, "error": "sin contacto"}
+        try:
+            from app.services.handoff import derive_to_advisor
+            return derive_to_advisor(
+                db, company_id, int(contact_id),
+                motivo=str(tool_args.get("motivo") or ""),
+                resumen=str(tool_args.get("resumen") or ""),
+            )
+        except Exception as e:
+            try: db.rollback()
+            except Exception: pass
+            return {"ok": False, "error": str(e)[:150]}
 
     elif tool_name == "agendar_cita":
         if not db:
@@ -1759,10 +1882,14 @@ class ConversationOrchestrator:
             # The exhausted flag is cleared by collect_slots_or_search when the user starts a new search.
             # Per-agent disabled_tools: list of tool names to exclude (e.g. [agendar_cita])
             _disabled_tools = set(self.ai_config.get("disabled_tools") or [])
+            # search_properties es de inmobiliarias: dársela a una gomería
+            # arrastraba todo el guion de propiedades y presupuesto en USD
+            _re_company = _is_real_estate(self.company_id)  # cacheado; db aún no abierta acá
             _available_tools = [
                 f for f in FUNCTIONS
                 if f["function"]["name"] not in _disabled_tools
                 and not (f["function"]["name"] == "search_properties" and self.slots.get("_results_exhausted"))
+                and not (f["function"]["name"] == "search_properties" and not _re_company)
             ]
 
             _call_model = self._model
@@ -1820,6 +1947,7 @@ class ConversationOrchestrator:
                         company_id=self.company_id,
                         db=db,
                         dry_run=self.dry_run,
+                        contact_id=self.contact_id,
                     )
 
                     self.tool_calls.append({
@@ -1869,7 +1997,7 @@ class ConversationOrchestrator:
                                     _has_budget = True
                             except Exception:
                                 pass
-                if _has_search and not _has_budget:
+                if _has_search and not _has_budget and _is_real_estate(self.company_id, db):
                     # Clear tool calls so results are not shown, ask for budget
                     self.tool_calls = []
                     _ask_cur_q = 'en pesos' if self.slots.get('operation') == 'rent' else 'en USD'
@@ -2124,6 +2252,17 @@ class ConversationOrchestrator:
         if not _has_name:
             _contact_hint = "- Todavía no tenés el nombre del cliente. En cuanto haya una oportunidad natural, pedíselo.\n"
 
+        # El prompt era 100% inmobiliario para TODA empresa: a una gomería le
+        # preguntaba "presupuesto máximo en USD". Ahora el bloque de rubro se
+        # elige según companies.industry.
+        _is_re = _is_real_estate(self.company_id)
+        _role_line = (
+            "Sos un asesor inmobiliario proactivo: tu objetivo es avanzar hacia la visita o el cierre, no solo informar."
+            if _is_re else
+            "Sos un asesor comercial proactivo: resolvé la consulta y avanzá hacia la venta o el turno, sin marear al cliente."
+        )
+        _vertical_block = (_REAL_ESTATE_BLOCK if _is_re else _GENERIC_BLOCK) + _HANDOFF_RULES
+
         from datetime import datetime as _dt_now, timedelta as _td_now
         _today_str = _dt_now.now().strftime('%Y-%m-%d')
         _tomorrow_str = (_dt_now.now() + _td_now(days=1)).strftime('%Y-%m-%d')
@@ -2135,37 +2274,9 @@ Al llamar agendar_cita usá SIEMPRE starts_at con año {_dt_now.now().year} o po
 INSTRUCCIONES (WhatsApp):
 - Mensajes cortos y directos. Solo una pregunta o propuesta por turno.
 - SIEMPRE terminá tu respuesta con una propuesta concreta o siguiente paso. Nunca dejes la conversación abierta.
-- Sos un asesor inmobiliario proactivo: tu objetivo es avanzar hacia la visita o el cierre, no solo informar.
+- {_role_line}
 
-BÚSQUEDA DE PROPIEDADES:
-- REGLA CRITICA: NO uses search_properties hasta tener los 3 datos: 1) TIPO, 2) ZONA, 3) PRESUPUESTO MÁXIMO (en USD para compra, en ARS para alquiler).
-- NUNCA vuelvas a preguntar datos que ya figuran en DATOS DEL CLIENTE. Si operation, property_type, zone, budget o rooms ya están seteados, no los repreguntes — usá el valor y pedí solo lo que falte.
-- Si operation="rent" ya está seteada, el cliente quiere ALQUILAR; NO preguntes si quiere comprar, alquilar o tasar.
-- Si property_type ya está seteado, NO preguntes qué tipo de propiedad busca.
-- Pasá `currency` en search_properties: "ARS" si operation="rent" y el presupuesto está en pesos, "USD" en caso contrario.
-- Si el cliente dio un rango (ej: "de 300k a 450k"), pasá price_min Y price_max en la búsqueda.
-- Cuando tenés los 3 datos, buscá inmediatamente.
-- Si ya se mostraron propiedades (hay cache activo o resultados agotados), NO vuelvas a buscar.
-- SIEMPRE pasá operation_type: si los DATOS DEL CLIENTE tienen operation="rent" usá "rent", si tienen operation="sale" usá "sale". Por defecto "sale".
-
-CUANDO EL USUARIO MUESTRA INTERÉS EN UNA PROPIEDAD:
-- Ofrecé coordinar una visita de inmediato: "¿Coordinamos una visita para que la puedas ver?"
-- Si no tenés su nombre, pedíselo para agendar: "¿Me decís tu nombre para reservar el turno?"
-- Si ya tenés nombre, ofrecé fechas o pedí disponibilidad horaria.
-- Nunca respondas solo con información sin proponer el siguiente paso.
-
-CUANDO EL USUARIO DICE QUE NO LE INTERESA NINGUNA:
-- Ofrecé ajustar criterios: zona, presupuesto o tipo de propiedad.
-- Preguntá qué no le convenció para mejorar la búsqueda.
-
-PROPUESTAS PROGRESIVAS (en orden de avance):
-1. Mostrá propiedades
-2. Preguntá si alguna le interesa
-3. Ofrecé visita
-4. Pedí datos de contacto (nombre, horario disponible)
-5. Confirmá el turno
-
-DATOS DE CONTACTO:
+{_vertical_block}DATOS DE CONTACTO:
 {_contact_hint}- Si el usuario está listo para visitar, pedí nombre y disponibilidad horaria.
 - Cuando el cliente diga su nombre o email, llamá upsert_contact con whatsapp_number (ya está en DATOS DEL CLIENTE) + el dato nuevo.
 - Para agendar_cita usá el contact_id que está en DATOS DEL CLIENTE.
@@ -2589,11 +2700,21 @@ BASE DE CONOCIMIENTO:
         if _s.get("rooms"): _parts.append(f"amb:{_s['rooms']}+")
         needs_summary = " | ".join(_parts)
 
-        db.execute(
-            text('UPDATE contacts SET lead_score = :score, "leadStatus" = :status, needs = :needs, "updatedAt" = NOW() WHERE id = :cid AND "companyId" = :company'),
-            {"score": int(round(new_score)), "status": new_status, "needs": needs_summary[:900],
-             "cid": self.contact_id, "company": self.company_id},
-        )
+        # El resumen por slots ("op:búsqueda") es de inmobiliaria: en otros
+        # rubros no dice nada, así que se deja la descripción por señales que
+        # arma lead_enrichment.
+        if _is_real_estate(self.company_id, db):
+            db.execute(
+                text('UPDATE contacts SET lead_score = :score, "leadStatus" = :status, needs = :needs, "updatedAt" = NOW() WHERE id = :cid AND "companyId" = :company'),
+                {"score": int(round(new_score)), "status": new_status, "needs": needs_summary[:900],
+                 "cid": self.contact_id, "company": self.company_id},
+            )
+        else:
+            db.execute(
+                text('UPDATE contacts SET lead_score = :score, "leadStatus" = :status, "updatedAt" = NOW() WHERE id = :cid AND "companyId" = :company'),
+                {"score": int(round(new_score)), "status": new_status,
+                 "cid": self.contact_id, "company": self.company_id},
+            )
 
         # Sync the pipeline stage to match the inferred lead status (board reflects agent progress)
         try:
