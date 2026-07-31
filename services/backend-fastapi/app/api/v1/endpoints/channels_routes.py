@@ -715,14 +715,26 @@ def _channel_token(db: Session, channel_id: int) -> str:
 async def _discover_with_token(db: Session, token: str) -> dict:
     warnings: list[str] = []
     async with httpx.AsyncClient(timeout=15) as client:
-        # 1. Validate the token
-        try:
-            resp = await client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
-            dbg = resp.json().get("data", {}) if resp.status_code == 200 else {}
-        except Exception as e:
-            return {"ok": False, "error": f"No se pudo contactar a Meta: {str(e)[:120]}"}
+        # 1. Validate the token — inspeccionado con el APP TOKEN.
+        # Con el token inspeccionándose a sí mismo, los tokens que devuelve el
+        # login de Meta (Instagram/Messenger) fallaban con "(#100) You must
+        # provide an app access token, or a user access token that is an owner
+        # or developer of the app": solo los admins/devs de la app pueden
+        # auto-inspeccionar. Mismo criterio que _debug_token().
+        _app_id = os.getenv("META_APP_ID", "").strip()
+        _app_secret = os.getenv("META_APP_SECRET", "").strip()
+        inspectors = ([f"{_app_id}|{_app_secret}"] if (_app_id and _app_secret) else []) + [token]
+        dbg, resp = {}, None
+        for insp in inspectors:
+            try:
+                resp = await client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": insp})
+            except Exception as e:
+                return {"ok": False, "error": f"No se pudo contactar a Meta: {str(e)[:120]}"}
+            if resp.status_code == 200 and (resp.json().get("data") or {}).get("is_valid"):
+                dbg = resp.json()["data"]
+                break
         if not dbg.get("is_valid"):
-            err = (resp.json().get("error") or {}).get("message") or "Token inválido o vencido"
+            err = ((resp.json() if resp is not None else {}).get("error") or {}).get("message") or "Token inválido o vencido"
             return {"ok": False, "error": err}
 
         expires_at = dbg.get("expires_at") or 0
@@ -842,8 +854,17 @@ def embedded_signup_config(payload: dict = Depends(get_current_user_payload)):
     config_id = os.getenv("META_ES_CONFIG_ID", "").strip()
     # Config de Facebook Login for Business (variación General) para conectar
     # Instagram/Messenger sin pasar por el registro de WhatsApp
-    login_config_id = os.getenv("META_LOGIN_CONFIG_ID", "").strip() or config_id
+    # sin fallback al config del Embedded Signup: esa config devuelve un token
+    # de WhatsApp, sin acceso a páginas ni a Instagram (el login terminaba en
+    # "#100 ... owner or developer of the app"). Sin config propia, el frontend
+    # pide permisos por scope.
+    login_config_id = os.getenv("META_LOGIN_CONFIG_ID", "").strip()
+    login_scopes = os.getenv("META_LOGIN_SCOPES", "").strip() or (
+        "pages_show_list,pages_messaging,pages_manage_metadata,pages_read_engagement,"
+        "instagram_basic,instagram_manage_messages,business_management"
+    )
     return {"app_id": app_id, "config_id": config_id, "login_config_id": login_config_id,
+            "login_scopes": login_scopes,
             "ready": bool(app_id and config_id)}
 
 

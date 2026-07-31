@@ -78,7 +78,7 @@ const Connections = () => {
 
   // Embedded Signup oficial de WhatsApp (Tech Provider): popup de Meta,
   // el cliente elige su WABA y número, el backend canjea el code y conecta.
-  const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; login_config_id?: string; ready: boolean } | null>(null);
+  const [esConfig, setEsConfig] = useState<{ app_id: string; config_id: string; login_config_id?: string; login_scopes?: string; ready: boolean } | null>(null);
   const [esConnecting, setEsConnecting] = useState(false);
   // ref (no variable de render): el listener se registra una sola vez y el
   // callback de FB.login corre en otro render — con una variable local el
@@ -167,10 +167,16 @@ const Connections = () => {
 
   // Instagram / Messenger con login de Meta (sin pasar por el registro de WhatsApp)
   const startSocialLogin = () => {
-    if (!esConfig?.login_config_id) {
-      toast.info('Falta configurar el login de Meta (config_id)');
+    if (!esConfig?.app_id) {
+      toast.info('Falta configurar el login de Meta');
       return;
     }
+    // Sin una config propia de Facebook Login for Business, el login va por
+    // scopes: usar la config del Embedded Signup de WhatsApp devolvía un token
+    // de WhatsApp sin acceso a páginas ni a Instagram.
+    const loginOpts: any = esConfig.login_config_id
+      ? { config_id: esConfig.login_config_id }
+      : { scope: esConfig.login_scopes || 'pages_show_list,pages_messaging,instagram_basic,instagram_manage_messages' };
     withFbSdk(() => {
       (window as any).FB.login((response: any) => {
         const code = response?.authResponse?.code;
@@ -186,7 +192,7 @@ const Connections = () => {
           toast.error(e?.response?.data?.detail || 'No se pudo conectar');
         }).finally(() => setEsConnecting(false));
       }, {
-        config_id: esConfig.login_config_id,
+        ...loginOpts,
         response_type: 'code',
         override_default_response_type: true,
       });

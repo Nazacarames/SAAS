@@ -28,6 +28,11 @@ class ContactUpdateRequest(BaseModel):
     needs: str | None = None
 
 
+class AssignedUserOut(BaseModel):
+    id: int | None = None
+    name: str | None = None
+
+
 class ContactOut(BaseModel):
     id: int
     name: str
@@ -37,6 +42,9 @@ class ContactOut(BaseModel):
     source: str | None = None
     leadStatus: str | None = None
     assignedUserId: int | None = None
+    # sin este campo el response_model descartaba el asignado que ya resuelve
+    # contacts_service y el panel mostraba "Sin asignar" con el lead asignado
+    assignedUser: AssignedUserOut | None = None
     companyId: int
     inactivityMinutes: int | None = None
     inactivityWebhookId: int | None = None
