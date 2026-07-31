@@ -618,6 +618,14 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             return {"ok": True, "ignored": True, "reason": "contact_create_failed", "ai_reply": None}
 
     company_id = contact.get("companyId") or _incoming_company_id
+    if company_id:
+        # Todo lead entra con dueño (round-robin), sin esperar a que lo derive
+        # el bot o la IA: así cada asesor ve los suyos en su usuario del CRM
+        try:
+            from app.services.handoff import ensure_assigned
+            ensure_assigned(db, int(company_id), int(contact["id"]))
+        except Exception:
+            db.rollback()
     if not company_id:
         print(f"[webhook] WARN: could not resolve company_id for contact {contact.get('id')}, dropping")
         return {"ok": True, "ignored": True, "reason": "unknown_company", "ai_reply": None}

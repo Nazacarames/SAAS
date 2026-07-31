@@ -78,20 +78,54 @@ def _advisor_pool(db: Session, company_id: int) -> list[dict]:
     return [{**dict(r), "number": phones.get(int(r["id"]), "")} for r in rows]
 
 
-def _pick_round_robin(db: Session, company_id: int, n: int) -> int:
+def _pick_round_robin(db: Session, company_id: int, n: int, key: str = "handoff") -> int:
     """Reparte parejo entre los asesores (mismo contador que usa el Menú Bot)."""
     if n <= 1:
         return 0
     try:
         idx = db.execute(text("""
-            INSERT INTO rr_counters (company_id, counter_key, idx) VALUES (:c, 'handoff', 1)
+            INSERT INTO rr_counters (company_id, counter_key, idx) VALUES (:c, :k, 1)
             ON CONFLICT (company_id, counter_key) DO UPDATE SET idx = rr_counters.idx + 1
-            RETURNING idx"""), {"c": company_id}).scalar()
+            RETURNING idx"""), {"c": company_id, "k": key}).scalar()
         db.commit()
         return (int(idx) - 1) % n
     except Exception:
         db.rollback()
         return 0
+
+
+def ensure_assigned(db: Session, company_id: int, contact_id: int) -> dict:
+    """Todo lead entra con dueño: si nadie lo tiene, se reparte por round-robin.
+
+    Aplica a cualquier canal (WhatsApp, Instagram, Messenger) apenas entra el
+    primer mensaje, así cada asesor ve en su usuario del CRM los que le tocan
+    sin depender de que el bot o la IA lo deriven."""
+    try:
+        cur = db.execute(
+            text('SELECT "assignedUserId" FROM contacts WHERE id = :i AND "companyId" = :c'),
+            {"i": contact_id, "c": company_id},
+        ).scalar()
+        if cur:
+            return {"ok": True, "already": True}
+
+        pool = _advisor_pool(db, company_id)
+        if not pool:
+            return {"ok": False, "reason": "sin asesores configurados"}
+
+        advisor = pool[_pick_round_robin(db, company_id, len(pool), key="autoassign")]
+        db.execute(
+            text('UPDATE contacts SET "assignedUserId" = :u, "updatedAt" = NOW() WHERE id = :i'),
+            {"u": advisor["id"], "i": contact_id},
+        )
+        db.commit()
+        log.info("autoasignado company=%s contact=%s -> %s", company_id, contact_id, advisor.get("name"))
+        return {"ok": True, "asesor": advisor.get("name"), "user_id": advisor["id"]}
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)[:120]}
 
 
 def _notify_advisor(db: Session, company_id: int, advisor: dict, contact: dict,

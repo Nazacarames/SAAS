@@ -244,6 +244,14 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     if not contact:
         return {"ignored": True, "reason": "contact_resolve_failed"}
 
+    # Instagram y Messenger también reparten por round-robin: el asesor ve el
+    # lead en su usuario apenas entra, sin importar por dónde llegó
+    try:
+        from app.services.handoff import ensure_assigned
+        ensure_assigned(db, company_id, int(contact["id"]))
+    except Exception:
+        db.rollback()
+
     ticket = _ensure_ticket(db, channel, contact)
 
     from app.api.v1.endpoints.webhook_whatsapp import save_message
@@ -264,6 +272,13 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     limit_ok, _ = check_conversation_limit(db, company_id)
     if not limit_ok:
         return {"ignored": True, "reason": "limit_reached"}
+
+    # Score, fase y descripción también para IG/Messenger
+    try:
+        from app.services.lead_enrichment import enrich_inbound
+        enrich_inbound(db, company_id, int(contact["id"]), inbound.text or "")
+    except Exception:
+        db.rollback()
 
     # El agente puede estar limitado a ciertos canales
     try:
