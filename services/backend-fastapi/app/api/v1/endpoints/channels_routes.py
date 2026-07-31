@@ -544,7 +544,29 @@ async def _persistent_token(client: httpx.AsyncClient, waba_id: str, user_token:
 
 
 class OAuthDiscoverBody(BaseModel):
-    code: str
+    # code: solo para configs de Facebook Login for Business (se canjean sin
+    # redirect_uri). Los codes del login por scopes van atados al redirect_uri
+    # interno del SDK JS y el canje server-side falla con "Error validating
+    # verification code": para ese flujo el frontend manda el access_token.
+    code: str = ""
+    access_token: str = ""
+
+
+async def _extend_user_token(token: str) -> str:
+    """Alarga un token de usuario corto (~2 h) a ~60 días. Los page tokens que
+    se derivan de un token largo no vencen, así el canal queda estable."""
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            r = await client.get(f"{GRAPH}/oauth/access_token", params={
+                "grant_type": "fb_exchange_token",
+                "client_id": os.getenv("META_APP_ID", "").strip(),
+                "client_secret": os.getenv("META_APP_SECRET", "").strip(),
+                "fb_exchange_token": token})
+        if r.status_code == 200 and r.json().get("access_token"):
+            return r.json()["access_token"]
+    except Exception:
+        pass
+    return token
 
 
 @router.post("/oauth-discover")
@@ -553,12 +575,15 @@ async def oauth_discover(
     payload: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db),
 ):
-    """Login con Meta (popup) para Instagram/Messenger: canjea el code y
-    devuelve los activos conectables + el token para el wizard de selección."""
+    """Login con Meta (popup) para Instagram/Messenger: devuelve los activos
+    conectables + el token para el wizard de selección."""
     require_admin(payload)
-    if not body.code.strip():
-        raise HTTPException(status_code=400, detail="Falta el code de Meta")
-    token = await _exchange_meta_code(body.code)
+    if body.access_token.strip():
+        token = await _extend_user_token(body.access_token.strip())
+    elif body.code.strip():
+        token = await _exchange_meta_code(body.code)
+    else:
+        raise HTTPException(status_code=400, detail="Falta el code o access_token de Meta")
     result = await _discover_with_token(db, token)
     result["token"] = token
     return result

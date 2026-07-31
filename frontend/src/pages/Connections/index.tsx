@@ -172,17 +172,20 @@ const Connections = () => {
       return;
     }
     // Sin una config propia de Facebook Login for Business, el login va por
-    // scopes: usar la config del Embedded Signup de WhatsApp devolvía un token
-    // de WhatsApp sin acceso a páginas ni a Instagram.
-    const loginOpts: any = esConfig.login_config_id
-      ? { config_id: esConfig.login_config_id }
+    // scopes y devuelve el access_token directo (el flujo con code del login
+    // por scopes va atado al redirect_uri del SDK y el canje server-side
+    // falla). El backend lo alarga a ~60 días.
+    const hasConfig = Boolean(esConfig.login_config_id);
+    const loginOpts: any = hasConfig
+      ? { config_id: esConfig.login_config_id, response_type: 'code', override_default_response_type: true }
       : { scope: esConfig.login_scopes || 'pages_show_list,pages_messaging,instagram_basic,instagram_manage_messages' };
     withFbSdk(() => {
       (window as any).FB.login((response: any) => {
         const code = response?.authResponse?.code;
-        if (!code) { toast.info('Conexión cancelada'); return; }
+        const accessToken = response?.authResponse?.accessToken;
+        if (!code && !accessToken) { toast.info('Conexión cancelada'); return; }
         setEsConnecting(true);
-        api.post('/channels/oauth-discover', { code }).then(({ data }) => {
+        api.post('/channels/oauth-discover', code ? { code } : { access_token: accessToken }).then(({ data }) => {
           if (!data.ok) { toast.error(data.error || 'No se pudieron listar los activos'); return; }
           setWizToken(data.token || '');
           setWizAssets(data);
@@ -191,11 +194,7 @@ const Connections = () => {
         }).catch((e: any) => {
           toast.error(e?.response?.data?.detail || 'No se pudo conectar');
         }).finally(() => setEsConnecting(false));
-      }, {
-        ...loginOpts,
-        response_type: 'code',
-        override_default_response_type: true,
-      });
+      }, loginOpts);
     });
   };
 
