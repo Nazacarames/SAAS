@@ -5,7 +5,7 @@ import {
   CheckCircle as CheckCircleIcon, TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
 import { useQueryClient } from '@tanstack/react-query';
-import { useConversations, useContacts, useWhatsapps, useFunnelStats } from '../../hooks/useApi';
+import { useConversations, useContacts, useChannels, useFunnelStats } from '../../hooks/useApi';
 import { socketConnection } from '../../services/socket';
 
 function useCountUp(target: number, duration = 900) {
@@ -84,7 +84,7 @@ const Dashboard = () => {
   const queryClient = useQueryClient();
   const { data: ticketsRaw } = useConversations();
   const { data: contactsRaw } = useContacts();
-  const { data: connectionsRaw } = useWhatsapps();
+  const { data: connectionsRaw } = useChannels();
   const { data: funnel } = useFunnelStats();
 
   const tickets    = Array.isArray(ticketsRaw) ? ticketsRaw : Array.isArray((ticketsRaw as any)?.data) ? (ticketsRaw as any).data : [];
@@ -122,8 +122,17 @@ const Dashboard = () => {
     { title: 'Nuevo',       value: funnelData.nuevo,      color: '#8A8FA0' },
   ];
 
-  const waStatus = connections.length > 0 ? 'operational' : 'sin conexion';
-  const waColor  = connections.length > 0 ? '#34D399'     : '#FB923C';
+  const activeChannels = connections.filter((c: any) => c.status === 'active');
+  const channelRows = [
+    { type: 'whatsapp',  label: 'WhatsApp' },
+    { type: 'instagram', label: 'Instagram' },
+    { type: 'messenger', label: 'Messenger' },
+  ].map(({ type, label }) => {
+    const n = activeChannels.filter((c: any) => c.channel_type === type).length;
+    return n > 0
+      ? { label, color: '#34D399', status: n > 1 ? `operational (${n})` : 'operational' }
+      : { label, color: '#FB923C', status: 'sin conexión' };
+  });
   const todayStr = new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
 
   return (
@@ -144,7 +153,7 @@ const Dashboard = () => {
       <Grid container spacing={2} sx={{ mb: 3 }}>
         <Grid item xs={6} lg={3}><StatCard title="Tickets abiertos" value={openTickets}      icon={<ChatIcon sx={{ fontSize: '1.1rem' }} />}         color="#60A5FA" delay={1} /></Grid>
         <Grid item xs={6} lg={3}><StatCard title="Contactos"         value={contacts.length} icon={<ContactsIcon sx={{ fontSize: '1.1rem' }} />}     color="#E8A020" delay={2} /></Grid>
-        <Grid item xs={6} lg={3}><StatCard title="Canales WA"        value={connections.length} icon={<WhatsAppIcon sx={{ fontSize: '1.1rem' }} />} color="#34D399" delay={3} /></Grid>
+        <Grid item xs={6} lg={3}><StatCard title="Canales"           value={activeChannels.length} icon={<WhatsAppIcon sx={{ fontSize: '1.1rem' }} />} color="#34D399" delay={3} /></Grid>
         <Grid item xs={6} lg={3}><StatCard title="Resueltos hoy"     value={closedToday}    icon={<CheckCircleIcon sx={{ fontSize: '1.1rem' }} />}   color="#A78BFA" delay={4} /></Grid>
       </Grid>
 
@@ -172,7 +181,7 @@ const Dashboard = () => {
           <Paper sx={{ p: 2.5 }} className="anim-fade-up anim-fade-up-6">
             <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '0.95rem', color: '#E8EBF2', mb: 2.5 }}>Estado del sistema</Typography>
             <Stack spacing={0}>
-              {[...systemServices, { label: 'WhatsApp Cloud', color: waColor, status: waStatus }].map((item) => (
+              {[...systemServices, ...channelRows].map((item) => (
                 <Stack key={item.label} direction="row" alignItems="center" justifyContent="space-between" sx={{ py: 1.2, borderBottom: '1px solid rgba(255,255,255,0.05)', '&:last-child': { borderBottom: 0 } }}>
                   <Typography sx={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.65)' }}>{item.label}</Typography>
                   <Stack direction="row" spacing={0.75} alignItems="center">

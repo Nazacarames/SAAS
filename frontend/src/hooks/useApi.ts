@@ -82,3 +82,15 @@ export const useWhatsapps = () => {
         },
     });
 };
+
+// Canales reales (tabla channels: WhatsApp, Instagram, Messenger) — la tabla
+// legacy /whatsapps queda vacía para las empresas conectadas por el wizard.
+export const useChannels = () => {
+    return useQuery({
+        queryKey: ['channels'],
+        queryFn: async () => {
+            const { data } = await api.get('/channels');
+            return Array.isArray(data?.channels) ? data.channels : [];
+        },
+    });
+};
