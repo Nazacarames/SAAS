@@ -657,6 +657,13 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             channel_id=_incoming_channel_id,
         )
         if _mb.get("handled"):
+            # El lead del bot también se puntúa y describe: antes quedaba en 0%
+            # y "Sin conversación" justo cuando pedía un asesor
+            try:
+                from app.services.lead_enrichment import enrich_inbound
+                enrich_inbound(db, company_id, int(contact["id"]), message_text, _mb.get("choice", ""))
+            except Exception:
+                db.rollback()
             return {"ok": True, "ignored": False, "reason": "menu_bot", "ai_reply": None}
     except Exception as _mb_err:
         print(f"[webhook] menu bot error (non-fatal): {_mb_err}")
@@ -665,6 +672,12 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     # Handoff a humano: la IA queda pausada para este contacto
     try:
         if db.execute(text("SELECT ai_paused FROM contacts WHERE id = :id"), {"id": contact["id"]}).scalar():
+            # sigue siendo un lead vivo: puntuarlo aunque conteste un humano
+            try:
+                from app.services.lead_enrichment import enrich_inbound
+                enrich_inbound(db, company_id, int(contact["id"]), message_text)
+            except Exception:
+                db.rollback()
             return {"ok": True, "ignored": False, "reason": "ai_paused", "ai_reply": None}
     except Exception:
         db.rollback()

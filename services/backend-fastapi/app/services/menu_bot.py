@@ -390,6 +390,7 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
                 opt = options[int(ref[1:])]
             except Exception:
                 return {"handled": False}
+            chosen_label = str(opt.get("label") or "")
             sub = opt.get("submenu")
             if sub and (sub.get("items") or []):
                 sent = await send_list(wa, to, str(sub.get("text") or "Elegí una opción"), str(sub.get("button") or "Opciones"),
@@ -402,7 +403,7 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
                     log.warning("menu_bot submenu NO enviado company=%s contacto=%s", company_id, contact_id)
             else:
                 await _run_actions(db, wa, flow, opt, ref, company_id, contact)
-            return {"handled": True}
+            return {"handled": True, "choice": chosen_label}
         if ref.startswith("s"):
             try:
                 oi, si = ref[1:].split(":")
@@ -410,7 +411,7 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
             except Exception:
                 return {"handled": False}
             await _run_actions(db, wa, flow, item, ref, company_id, contact)
-            return {"handled": True}
+            return {"handled": True, "choice": str(item.get("label") or "")}
         return {"handled": False}
 
     # Texto libre

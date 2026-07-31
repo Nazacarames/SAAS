@@ -17,6 +17,24 @@ _CONTACT_COLS = (
 )
 
 
+def _qualified_cols(alias: str) -> str:
+    """_CONTACT_COLS con alias de tabla, para poder joinear con users (comparten
+    id/name/email y sin calificar Postgres corta con 'column is ambiguous')."""
+    plain = [
+        "id", "name", "number", "email", '"whatsappId"', "source", '"leadStatus"',
+        '"assignedUserId"', '"companyId"', '"inactivityMinutes"', '"inactivityWebhookId"',
+        '"createdAt"', '"updatedAt"', "lead_score", "business_type", "needs", "progress_tags",
+    ]
+    cols = ", ".join(f"{alias}.{c}" for c in plain)
+    cols += (
+        f" , CASE WHEN COALESCE({alias}.lead_score, 0) >= 75 THEN 'interesado' "
+        f"WHEN COALESCE({alias}.lead_score, 0) >= 50 THEN 'calificado' "
+        f"WHEN COALESCE({alias}.lead_score, 0) >= 25 THEN 'contactado' "
+        "ELSE 'nuevo' END AS lead_stage"
+    )
+    return cols
+
+
 def list_contacts(
     db: Session,
     *,
@@ -25,26 +43,37 @@ def list_contacts(
     assigned_user_id: int | None = None,
     limit: int = 200,
 ):
-    where = ['"companyId" = :company_id']
+    where = ['c."companyId" = :company_id']
     params: dict = {"company_id": company_id, "limit": max(1, min(limit, 500))}
 
     if status:
-        where.append('"leadStatus" = :status')
+        where.append('c."leadStatus" = :status')
         params["status"] = status
 
     if assigned_user_id is not None:
-        where.append('"assignedUserId" = :assigned_user_id')
+        where.append('c."assignedUserId" = :assigned_user_id')
         params["assigned_user_id"] = assigned_user_id
 
     where_clause = " AND ".join(where)
+    # El nombre del asignado viaja resuelto: sin esto el panel mostraba
+    # "Sin asignar" aunque el bot ya hubiera asignado la asesora.
+    # Las columnas van con alias c. porque users comparte id/name/email.
+    cols_q = _qualified_cols("c")
     rows = db.execute(
         text(
-            f"SELECT {_CONTACT_COLS} "
-            f"FROM contacts WHERE {where_clause} ORDER BY id DESC LIMIT :limit"
+            f"SELECT {cols_q}, u.name AS assigned_user_name "
+            f'FROM contacts c LEFT JOIN users u ON u.id = c."assignedUserId" '
+            f"WHERE {where_clause} ORDER BY c.id DESC LIMIT :limit"
         ),
         params,
     ).mappings().all()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        name = d.pop("assigned_user_name", None)
+        d["assignedUser"] = {"id": d.get("assignedUserId"), "name": name} if d.get("assignedUserId") else None
+        out.append(d)
+    return out
 
 
 def create_contact(db: Session, *, company_id: int, payload: dict):

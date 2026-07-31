@@ -57,44 +57,94 @@ def _get_runtime_settings() -> dict[str, Any]:
 
 # ── Lead scoring helpers ─────────────────────────────────────────────
 
+# Señales de intención con peso. Antes una sola palabra ("ya") saltaba el
+# score a 78: ahora suman y hay que juntar varias señales para calificar,
+# que es lo que un vendedor haría al leer la conversación.
+_SCORE_SIGNALS: list[tuple[str, int, str]] = [
+    # intención de compra explícita
+    (r"\b(quiero|necesito|busco)\s+\w*\s*(comprar|contratar|cotizar|reservar|presupuesto)", 35, "quiere comprar"),
+    (r"\b(comprar|contratar|adquirir|llevar)\b", 20, "menciona compra"),
+    # pide precio / presupuesto
+    (r"\b(precio|precios|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuanto está|cotiza|cotización|cotizacion|presupuesto|vale)\b", 25, "pidió precio"),
+    (r"\b(financia|financiación|financiacion|cuotas|tarjeta|transferencia|efectivo|debito|débito)\b", 18, "consultó formas de pago"),
+    # producto/servicio concreto
+    (r"\b(medida|medidas|modelo|marca|rodado|talle|stock|disponible|disponibilidad|\d{3}/\d{2})\b", 16, "consultó producto"),
+    # avanzar: turno, visita, dirección
+    (r"\b(turno|cita|visita|agendar|puedo pasar|puedo ir|paso por|me acerco|voy para|cuando abren|que horario|qué horario)\b", 28, "quiere coordinar"),
+    (r"\b(direccion|dirección|donde están|dónde están|donde queda|ubicaci)", 12, "pidió ubicación"),
+    # datos de contacto propios
+    (r"[\w.+-]+@[\w-]+\.[\w.]+", 12, "dejó email"),
+    # urgencia real (frase, no la palabra suelta)
+    (r"\b(urgente|lo antes posible|para hoy|para mañana|para manana|ahora mismo)\b", 18, "urgencia"),
+    # cierre
+    (r"\b(seña|senia|reserva|reservo|lo llevo|me lo llevo|acepto|confirmo|dale listo)\b", 45, "señales de cierre"),
+    # desinterés: resta
+    (r"\b(no me interesa|muy caro|carísimo|carisimo|despues veo|después veo|otro momento|lo pienso)\b", -25, "objeción"),
+]
+
+# Intenciones que por sí solas ya definen un lead caliente: no dependen de
+# cuánto venía acumulado (alguien que dice "lo llevo" no es un lead frío).
+_SCORE_FLOORS: list[tuple[str, int]] = [
+    (r"\b(seña|senia|reserva|reservo|lo llevo|me lo llevo|acepto|confirmo)\b", 85),
+    (r"\b(quiero|necesito)\s+\w*\s*(comprar|contratar|reservar)", 65),
+    (r"\b(turno|cita|visita|agendar|puedo pasar|puedo ir)\b", 55),
+]
+
+
+def score_signals(txt: str) -> tuple[int, list[str]]:
+    """Puntos y etiquetas legibles de las señales presentes en un texto."""
+    pts, labels = 0, []
+    for pattern, weight, label in _SCORE_SIGNALS:
+        if re.search(pattern, txt or "", re.IGNORECASE):
+            pts += weight
+            labels.append(label)
+    return pts, labels
+
+
 def _score_from_text(txt: str, current: int = 0) -> int:
-    score = current
-    if re.search(r"comprar|contratar|precio|plan|cotiz|demo", txt, re.IGNORECASE):
-        score = max(score, 65)
-    if re.search(r"urgente|hoy|ahora|ya", txt, re.IGNORECASE):
-        score = max(score, 78)
-    if re.search(r"presupuesto|interesa|quiero", txt, re.IGNORECASE):
-        score = max(score, 72)
-    if re.search(r"gracias|resuelto|listo", txt, re.IGNORECASE):
-        score = max(score, 45)
-    return min(100, score)
+    """Score acumulativo: el interés se construye a lo largo de la charla.
+
+    Cada turno suma lo que aporta ese mensaje (amortiguado para que no salte
+    de golpe) sobre el score que ya traía el contacto."""
+    pts, _ = score_signals(txt)
+    score = current + (pts if pts else 2)  # sin señales: solo el roce de conversar
+    for pattern, floor in _SCORE_FLOORS:
+        if re.search(pattern, txt or "", re.IGNORECASE):
+            score = max(score, floor)
+    return int(min(100, max(0, round(score))))
+
+
+_PHASE_RANK = {"nuevo_ingreso": 0, "primer_contacto": 1, "calificacion": 2, "propuesta": 3, "cierre": 4}
 
 
 def _infer_lead_status_by_signals(txt: str, lead_score: int, current_status: str = "") -> str:
+    """Fase comercial = la más avanzada entre lo que dice el texto y lo que
+    indica el score. Antes un "me interesa" al final de un mensaje que además
+    pedía turno tiraba el lead de vuelta a "primer contacto"."""
     t = txt.lower()
     curr = current_status.lower().strip()
 
-    if re.search(r"reserva|seña|senia|cerrar|firma|boleto|avanzamos|quiero avanzar|quiero cerrar", t):
-        return "cierre"
-    if re.search(r"enviar propuesta|te envío propuesta|propuesta|cotización|cotizacion|financiación|financiacion|plan de pago", t):
-        return "propuesta"
-    if re.search(r"visita|tour|recorrido|agendar|agenda|llamar|llamada|reunión|reunion|cuando puedo ir", t):
-        return "calificacion"
-    if re.search(r"hola|buenas|info|información|informacion|consulta|me interesa|quiero saber", t):
-        return "primer_contacto"
-    if re.search(r"dejalo|después|despues|más tarde|mas tarde|no ahora", t):
+    # postergar es un estado lateral y explícito: gana siempre
+    if re.search(r"\b(dejalo|más tarde|mas tarde|no ahora|te aviso|lo pienso)\b", t):
         return "esperando_respuesta"
 
-    if lead_score >= 85:
-        return "cierre"
-    if lead_score >= 65:
-        return "propuesta"
-    if lead_score >= 40:
-        return "calificacion"
-    if lead_score >= 20:
-        return "primer_contacto"
+    by_text = ""
+    if re.search(r"reserva|seña|senia|cerrar|firma|boleto|avanzamos|quiero avanzar|quiero cerrar|lo llevo", t):
+        by_text = "cierre"
+    elif re.search(r"enviar propuesta|te envío propuesta|propuesta|cotización|cotizacion|financiación|financiacion|plan de pago", t):
+        by_text = "propuesta"
+    elif re.search(r"visita|tour|recorrido|agendar|agenda|llamar|llamada|reunión|reunion|cuando puedo ir|puedo pasar|puedo ir|turno", t):
+        by_text = "calificacion"
+    elif re.search(r"hola|buenas|info|información|informacion|consulta|me interesa|quiero saber", t):
+        by_text = "primer_contacto"
 
-    return curr or "nuevo_ingreso"
+    by_score = ("cierre" if lead_score >= 85 else "propuesta" if lead_score >= 65
+                else "calificacion" if lead_score >= 40 else "primer_contacto" if lead_score >= 20
+                else "")
+
+    best = max([by_text, by_score, curr if curr in _PHASE_RANK else ""],
+               key=lambda s: _PHASE_RANK.get(s, -1))
+    return best or curr or "nuevo_ingreso"
 
 
 def _score_lead(source: str = "", interactions: int = 0, inactive_days: int = 0, tags: list[str] = None) -> int:

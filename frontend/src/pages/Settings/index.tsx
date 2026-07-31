@@ -12,6 +12,7 @@ const Settings = () => {
 
   // Tokko
   const [tokkoEnabled, setTokkoEnabled] = useState(false);
+  const [tokkoSyncLeads, setTokkoSyncLeads] = useState(true);
   const [tokkoApiKey, setTokkoApiKey] = useState('');
   const [tokkoApiKeyConfigured, setTokkoApiKeyConfigured] = useState(false);
 
@@ -29,6 +30,7 @@ const Settings = () => {
       const { data } = await api.get('/settings/whatsapp-cloud');
       const s = data?.settings || {};
       setTokkoEnabled(Boolean(s.tokkoEnabled ?? false));
+      setTokkoSyncLeads(Boolean(s.tokkoSyncLeadsEnabled ?? true));
       setTokkoApiKey('');
       setTokkoApiKeyConfigured(Boolean(data?.configured?.tokkoApiKey));
       setMetaLeadAdsEnabled(Boolean(s.metaLeadAdsEnabled ?? false));
@@ -54,7 +56,7 @@ const Settings = () => {
         tokkoBaseUrl: 'https://www.tokkobroker.com/api/v1',
         tokkoLeadsPath: '/webcontact/',
         tokkoPropertiesPath: '/property/',
-        tokkoSyncLeadsEnabled: true,
+        tokkoSyncLeadsEnabled: tokkoSyncLeads,
         tokkoAgentSearchEnabled: true,
         tokkoCooldownSeconds: 10,
         metaLeadAdsEnabled,
@@ -89,6 +91,15 @@ const Settings = () => {
               control={<Switch checked={tokkoEnabled} onChange={(e) => setTokkoEnabled(e.target.checked)} />}
               label='Habilitar integración Tokko'
             />
+            <FormControlLabel
+              disabled={!tokkoEnabled}
+              control={<Switch checked={tokkoSyncLeads} onChange={(e) => setTokkoSyncLeads(e.target.checked)} />}
+              label='Enviar leads calificados a Tokko'
+            />
+            <Typography variant='caption' color='text.secondary' sx={{ mt: -1, ml: 4 }}>
+              Cuando un lead califica, se crea en Tokko con etiquetas (fase, canal, asesor)
+              y un resumen de la conversación. Cada lead se envía una sola vez.
+            </Typography>
             <TextField
               label='Tokko API Key'
               type='password'

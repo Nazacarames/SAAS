@@ -24,6 +24,93 @@ DEFAULT_MIN_SCORE = 40
 QUALIFIED_STATUSES = ("warm", "hot", "customer")
 
 
+def _agent_cfg(db: Session, company_id: int) -> dict:
+    try:
+        row = db.execute(
+            text("SELECT ai_config_json FROM ai_agents WHERE company_id = :cid AND is_active = true ORDER BY id DESC LIMIT 1"),
+            {"cid": company_id},
+        ).mappings().first()
+        if row and row["ai_config_json"]:
+            return json.loads(row["ai_config_json"]) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def sync_enabled(db: Session, company_id: int) -> bool:
+    """El envío de leads a Tokko lo decide el cliente en Configuración.
+
+    Antes alcanzaba con tener cargada la API key: una empresa que la usaba solo
+    para que el agente consultara propiedades empezaba a mandar leads sin
+    haberlo pedido. Ahora manda el switch (companies.tokko_enabled +
+    company_runtime_settings.tokkoSyncLeadsEnabled)."""
+    try:
+        if not db.execute(text("SELECT tokko_enabled FROM companies WHERE id = :c"), {"c": company_id}).scalar():
+            return False
+        raw = db.execute(
+            text("SELECT settings_json FROM company_runtime_settings WHERE company_id = :c"),
+            {"c": company_id},
+        ).scalar()
+        s = json.loads(raw) if raw else {}
+        return bool(s.get("tokkoSyncLeadsEnabled", True))  # default on si Tokko está activo
+    except Exception:
+        return False
+
+
+def _conversation_summary(db: Session, company_id: int, contact_id: int, fallback: str) -> str:
+    """Resumen corto de la charla para que el asesor no tenga que leerla entera.
+    Se genera una sola vez (al calificar), no en cada mensaje."""
+    try:
+        from app.core.config import settings
+        if not settings.openai_api_key:
+            return fallback
+        msgs = db.execute(
+            text('SELECT body, "fromMe" FROM messages WHERE "contactId" = :cid ORDER BY id DESC LIMIT 20'),
+            {"cid": contact_id},
+        ).mappings().all()
+        history = "\n".join(
+            f"{'Empresa' if m['fromMe'] else 'Cliente'}: {str(m['body'])[:200]}"
+            for m in reversed(msgs) if m["body"] and not str(m["body"]).startswith("[")
+        )
+        if not history.strip():
+            return fallback
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": (
+                "Resumí en 2 oraciones qué necesita este cliente y en qué quedó la conversación. "
+                "Escribí para un vendedor que va a llamarlo: concreto, sin saludos ni relleno.\n\n" + history)}],
+            max_tokens=140,
+            temperature=0.3,
+        )
+        txt = (resp.choices[0].message.content or "").strip().replace("\n", " ")
+        return txt[:600] or fallback
+    except Exception as e:
+        log.warning("tokko summary company=%s contact=%s: %s", company_id, contact_id, str(e)[:100])
+        return fallback
+
+
+def _lead_tags(db: Session, contact: dict) -> list[str]:
+    """Etiquetas que le sirven al vendedor en Tokko: origen, fase y quién atiende."""
+    tags = ["LMTM CRM"]
+    status = str(contact.get("leadStatus") or "").lower()
+    tags.append({
+        "cierre": "Cierre", "propuesta": "Propuesta", "calificacion": "Calificado",
+        "hot": "Caliente", "warm": "Tibio", "customer": "Cliente",
+    }.get(status, "Nuevo"))
+    score = int(float(contact.get("lead_score") or 0))
+    tags.append("Score alto" if score >= 70 else "Score medio" if score >= 40 else "Score bajo")
+    src = str(contact.get("source") or "").lower()
+    if src:
+        tags.append({"whatsapp": "WhatsApp", "instagram": "Instagram", "messenger": "Messenger"}.get(src, src[:20]))
+    if contact.get("assignedUserId"):
+        name = db.execute(text("SELECT name FROM users WHERE id = :i"), {"i": contact["assignedUserId"]}).scalar()
+        if name:
+            tags.append(f"Asesor: {name}"[:40])
+    return tags[:8]
+
+
 def _min_score(db: Session, company_id: int) -> int:
     try:
         row = db.execute(
@@ -78,8 +165,12 @@ def maybe_sync_qualified_lead(db: Session, company_id: int, contact_id: int) -> 
     every score update: exits cheap when not qualified / already sent /
     Tokko not configured. Never raises."""
     try:
+        if not sync_enabled(db, company_id):
+            return {"ok": False, "reason": "sync_disabled"}
+
         contact = db.execute(
-            text('SELECT id, name, number, email, needs, lead_score, "leadStatus" FROM contacts WHERE id = :id AND "companyId" = :co LIMIT 1'),
+            text('SELECT id, name, number, email, needs, lead_score, "leadStatus", source, '
+                 '"assignedUserId" FROM contacts WHERE id = :id AND "companyId" = :co LIMIT 1'),
             {"id": contact_id, "co": company_id},
         ).mappings().first()
         if not contact:
@@ -106,9 +197,12 @@ def maybe_sync_qualified_lead(db: Session, company_id: int, contact_id: int) -> 
 
         needs = str(contact.get("needs") or "").strip()
         score = int(float(contact.get("lead_score") or 0))
-        texto = f"Lead calificado por IA (score {score}/100)."
-        if needs:
-            texto += f" Búsqueda: {needs}"
+        resumen = _conversation_summary(db, company_id, contact_id, needs)
+        texto = f"Lead calificado por LMTM CRM (score {score}/100)."
+        if resumen:
+            texto += f"\n\nResumen: {resumen}"
+        if needs and needs != resumen:
+            texto += f"\nSeñales detectadas: {needs}"
 
         resp = requests.post(
             f"{creds['api_url'].rstrip('/')}/webcontact/?key={creds['api_key']}",
@@ -118,7 +212,7 @@ def maybe_sync_qualified_lead(db: Session, company_id: int, contact_id: int) -> 
                 "email": contact.get("email") or "",
                 "text": texto,
                 "source": "LMTM CRM",
-                "tags": ["Lead_Calificado", "Bot"],
+                "tags": _lead_tags(db, dict(contact)),
             },
             headers={"Content-Type": "application/json"},
             timeout=15,
