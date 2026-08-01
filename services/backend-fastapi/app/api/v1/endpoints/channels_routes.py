@@ -1289,8 +1289,9 @@ async def diagnose_channels(
             return out
         try:
             with httpx.Client(timeout=20) as c:
-                dbg = c.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
-                data = dbg.json().get("data", {}) if dbg.status_code == 200 else {}
+                # con el app token: los tokens de página no se auto-inspeccionan
+                # y un canal sano aparecía como "el token venció o fue revocado"
+                data = _debug_token(c, token)
                 out["token_ok"] = bool(data.get("is_valid"))
                 if not out["token_ok"]:
                     out["problem"] = "El token venció o fue revocado: reconectá el canal"
