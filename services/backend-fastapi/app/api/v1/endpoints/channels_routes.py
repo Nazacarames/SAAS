@@ -161,13 +161,14 @@ def create_channel(
         tok = body.access_token.strip()
         try:
             with httpx.Client(timeout=20) as client:
-                dbg = client.get(f"{GRAPH}/debug_token", params={"input_token": tok, "access_token": tok})
-                tok_app = str((dbg.json().get("data") or {}).get("app_id") or "") if dbg.status_code == 200 else ""
+                # con el app token: los tokens de página no se auto-inspeccionan
+                # y el aviso de "token de otra app" nunca aparecía
+                tok_app = str(_debug_token(client, tok).get("app_id") or "")
                 our_app = os.getenv("META_APP_ID", "").strip()
-                if our_app and tok_app and tok_app != our_app and not body.app_secret.strip():
-                    warnings.append("El token es de otra app de Meta: los mensajes entrantes van a llegar "
-                                    "firmados por esa app. Cargá el App Secret de esa app en el canal "
-                                    "(editar canal) o los webhooks serán rechazados.")
+                if our_app and tok_app != our_app and not body.app_secret.strip():
+                    warnings.append("El token no es de la app de este CRM: Meta va a mandar los mensajes a "
+                                    "esa otra app y acá no va a llegar nada. Reconectá el canal con el botón "
+                                    "«Conectar Facebook/Instagram» (o «Conectar WhatsApp»).")
                 f = {"whatsapp": "display_phone_number,verified_name", "instagram": "username,name"}.get(body.channel_type, "name")
                 info = client.get(f"{GRAPH}/{body.external_id.strip()}", params={"access_token": tok, "fields": f})
                 if info.status_code == 200:
@@ -689,10 +690,13 @@ def _subscribe_channel_webhooks(channel_type: str, external_id: str, token: str,
             # subscribed_apps suscribe la app DUEÑA DEL TOKEN. Con un token de
             # otra app de Meta la llamada devuelve 200 pero los webhooks van a
             # esa app, no a nosotros: hay que avisarlo en vez de fingir éxito.
+            # con el token inspeccionándose a sí mismo esto NUNCA detectaba nada
+            # con tokens de página (no se auto-inspeccionan): la suscripción se
+            # hacía sobre la app ajena y devolvía 200 como si todo estuviera bien.
+            # Con el app token: si no se puede inspeccionar, el token no es nuestro.
             our_app = os.getenv("META_APP_ID", "").strip()
-            dbg = client.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
-            tok_app = str((dbg.json().get("data") or {}).get("app_id") or "") if dbg.status_code == 200 else ""
-            if our_app and tok_app and tok_app != our_app:
+            tok_app = str(_debug_token(client, token).get("app_id") or "")
+            if our_app and tok_app != our_app:
                 return False, ("el canal se conectó con un token de otra app de Meta, así que los mensajes "
                                "nunca van a llegar acá. Reconectalo con el botón «Conectar WhatsApp» "
                                "(eligiendo el número que ya existe).")
@@ -1351,8 +1355,23 @@ async def diagnose_channels(
                     if page_id:
                         r = c.get(f"{GRAPH}/{page_id}/subscribed_apps", params={"access_token": token})
                         subs = (r.json().get("data") or []) if r.status_code == 200 else []
-                        fields = {f for a in subs for f in (a.get("subscribed_fields") or [])}
-                        out["webhooks_ok"] = "messages" in fields
+                        # tiene que estar NUESTRA app: antes alcanzaba con que
+                        # CUALQUIER app tuviera 'messages', así que una página
+                        # suscripta a la app de otro proveedor daba "todo ok"
+                        # mientras los mensajes se los llevaba esa otra app.
+                        our_app = os.getenv("META_APP_ID", "").strip()
+                        others = []
+                        for a in subs:
+                            aid = str(a.get("id") or "")
+                            if aid and aid == our_app:
+                                out["webhooks_ok"] = "messages" in (a.get("subscribed_fields") or [])
+                            elif aid:
+                                others.append(a.get("name") or aid)
+                        if not out["webhooks_ok"] and others:
+                            out["problem"] = (f"Esta página la está recibiendo otra app de Meta ({', '.join(others)}), "
+                                              "no este CRM. Borrá el canal y reconectalo con el botón "
+                                              "«Conectar Facebook/Instagram».")
+                            return out
         except Exception as e:
             out["problem"] = str(e)[:120]
             return out
