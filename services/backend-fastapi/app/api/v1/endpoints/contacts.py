@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user_payload
@@ -164,4 +166,70 @@ async def contacts_send_message(
         increment_usage(db, company_id, "messages_sent")
     except Exception:
         pass
+    return {"ok": True}
+
+
+# ── Lista de exclusión del agente ─────────────────────────────────────
+# Clientes históricos que el negocio no quiere que atienda la IA. No alcanza
+# con pausar los contactos existentes: el histórico que escribe por primera vez
+# al CRM entra como contacto nuevo. Por eso la lista vive aparte y se aplica al
+# crear el contacto (contacts_service._is_ai_optout).
+
+class AiOptoutBody(BaseModel):
+    numbers: list[str]
+    note: str = ""
+
+
+@router.post("/ai-optouts")
+def ai_optouts_add(
+    body: AiOptoutBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = int(payload.get("companyId") or 0)
+    digits = {"".join(c for c in str(n) if c.isdigit()) for n in body.numbers}
+    digits = {d for d in digits if len(d) >= 8}
+    if not digits:
+        raise HTTPException(status_code=400, detail="No hay números válidos en la lista")
+
+    for d in digits:
+        db.execute(
+            text("""INSERT INTO ai_optouts (company_id, number, note)
+                    VALUES (:c, :n, :note) ON CONFLICT (company_id, number) DO NOTHING"""),
+            {"c": company_id, "n": d, "note": body.note[:200]},
+        )
+    # los que ya están en el CRM se pausan de una
+    paused = db.execute(
+        text('UPDATE contacts SET ai_paused = true, "updatedAt" = NOW() '
+             'WHERE "companyId" = :c AND number = ANY(:nums) AND COALESCE(ai_paused, false) = false'),
+        {"c": company_id, "nums": list(digits)},
+    ).rowcount
+    db.commit()
+    total = db.execute(text("SELECT COUNT(*) FROM ai_optouts WHERE company_id = :c"), {"c": company_id}).scalar()
+    return {"ok": True, "cargados": len(digits), "contactos_pausados": paused, "total_en_lista": total}
+
+
+@router.get("/ai-optouts")
+def ai_optouts_list(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = int(payload.get("companyId") or 0)
+    rows = db.execute(
+        text("SELECT number, note, created_at FROM ai_optouts WHERE company_id = :c ORDER BY id DESC LIMIT 2000"),
+        {"c": company_id},
+    ).mappings().all()
+    return {"ok": True, "total": len(rows), "numeros": [dict(r) for r in rows]}
+
+
+@router.delete("/ai-optouts/{number}")
+def ai_optouts_remove(
+    number: str,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = int(payload.get("companyId") or 0)
+    d = "".join(c for c in number if c.isdigit())
+    db.execute(text("DELETE FROM ai_optouts WHERE company_id = :c AND number = :n"), {"c": company_id, "n": d})
+    db.commit()
     return {"ok": True}

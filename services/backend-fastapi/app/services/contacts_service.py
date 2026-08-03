@@ -76,16 +76,38 @@ def list_contacts(
     return out
 
 
+def _is_ai_optout(db: Session, company_id: int, number: str) -> bool:
+    """Números que el cliente marcó para que el agente NUNCA les conteste.
+
+    Se aplica al crear el contacto: un cliente histórico que escribe por primera
+    vez al CRM entra como contacto nuevo, así que no alcanza con pausar los que
+    ya existen. Después manda el switch del panel, que es lo esperable si el
+    operador decide activarle el agente a alguien puntual."""
+    digits = "".join(c for c in str(number or "") if c.isdigit())
+    if not digits:
+        return False
+    try:
+        return bool(db.execute(
+            text("SELECT 1 FROM ai_optouts WHERE company_id = :c AND number = :n LIMIT 1"),
+            {"c": company_id, "n": digits},
+        ).scalar())
+    except Exception:
+        db.rollback()
+        return False
+
+
 def create_contact(db: Session, *, company_id: int, payload: dict):
+    paused = _is_ai_optout(db, company_id, payload.get("number") or "")
     row = db.execute(
         text(
             'INSERT INTO contacts (name, number, email, "whatsappId", source, "leadStatus", '
-            '"assignedUserId", "companyId", "createdAt", "updatedAt") '
+            '"assignedUserId", "companyId", ai_paused, "createdAt", "updatedAt") '
             'VALUES (:name, :number, :email, :whatsappId, :source, :leadStatus, '
-            ':assignedUserId, :companyId, NOW(), NOW()) '
+            ':assignedUserId, :companyId, :aiPaused, NOW(), NOW()) '
             f"RETURNING {_CONTACT_COLS}"
         ),
         {
+            "aiPaused": paused,
             "name": payload.get("name"),
             "number": payload.get("number"),
             "email": payload.get("email"),
