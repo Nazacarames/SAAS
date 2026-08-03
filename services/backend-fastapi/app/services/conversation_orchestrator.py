@@ -1875,7 +1875,7 @@ class ConversationOrchestrator:
                     }
 
             # Step 4: Build system prompt
-            system_prompt = self._build_system_prompt(conversation_history)
+            system_prompt = self._build_system_prompt(conversation_history, text)
 
             # Step 5: Build messages
             messages = self._build_messages(text, conversation_history, system_prompt)
@@ -2162,7 +2162,7 @@ class ConversationOrchestrator:
             print(f"[orchestrator] Error: {e}")
             return self._fallback_reply(f"Lo siento, hubo un error: {str(e)[:100]}")
 
-    def _build_system_prompt(self, conversation_history: list) -> str:
+    def _build_system_prompt(self, conversation_history: list, current_text: str = "") -> str:
         """Build system prompt with persona + KB + conversation context."""
 
         # Fine-tuned model: use minimal prompt (personality is baked into weights)
@@ -2181,11 +2181,16 @@ class ConversationOrchestrator:
         # KB context using hybrid RAG
         kb_text = ""
         try:
-            last_msg = ""
-            for msg in reversed(conversation_history):
-                if not msg.get("fromMe", True):
-                    last_msg = msg.get('body', msg.get('content', ''))
-                    break
+            # El mensaje que ACABA de llegar: antes se buscaba con el último del
+            # historial, o sea con la pregunta anterior. El cliente preguntaba
+            # por el horario y el RAG traía lo de la pregunta previa: el dato
+            # estaba en la KB y el agente contestaba "no tengo esa información".
+            last_msg = (current_text or "").strip()
+            if not last_msg:
+                for msg in reversed(conversation_history):
+                    if not msg.get("fromMe", True):
+                        last_msg = msg.get('body', msg.get('content', ''))
+                        break
             if last_msg:
                 kb_text, self.citations = get_kb_context_for_prompt(
                     query=last_msg,

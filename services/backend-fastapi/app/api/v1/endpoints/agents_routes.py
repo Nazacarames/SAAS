@@ -443,6 +443,17 @@ def toggle_ticket_bot(
             text(f'UPDATE tickets SET {", ".join(set_clauses)} WHERE id = :ticketId AND "companyId" = :companyId'),
             params,
         )
+        # contacts.ai_paused es la bandera que de verdad frena al Menú Bot y al
+        # agente en el webhook: sin esto el switch escribía en el ticket y no
+        # apagaba nada. Un solo botón en la UI, las dos banderas coherentes.
+        paused = human_override if isinstance(human_override, bool) else (
+            (not bot_enabled) if isinstance(bot_enabled, bool) else None)
+        if paused is not None:
+            db.execute(
+                text('UPDATE contacts SET ai_paused = :p, "updatedAt" = NOW() '
+                     'WHERE id = (SELECT "contactId" FROM tickets WHERE id = :t) AND "companyId" = :c'),
+                {"p": paused, "t": ticket_id, "c": company_id},
+            )
         db.commit()
 
     ticket = db.execute(

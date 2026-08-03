@@ -452,10 +452,8 @@ const Conversations = () => {
     return Number(m?.ticketId || 0) || 0;
   }, [messages]);
 
-  const latestTicket = useMemo(() => tickets.find((t: any) => Number(t.id) === Number(latestTicketId)) || null, [tickets, latestTicketId]);
-  const botEnabledRaw = latestTicket?.bot_enabled;
-  const humanOverrideRaw = latestTicket?.human_override;
-  const isBotEnabled = (botEnabledRaw === undefined || botEnabledRaw === null ? true : Boolean(botEnabledRaw)) && !Boolean(humanOverrideRaw);
+  // ai_paused manda: es lo que miran el Menú Bot y el agente en el webhook
+  const isBotEnabled = !contactData?.ai_paused;
 
   const updateLeadStage = async (nextStage: string) => {
     if (!selectedConv?.contactId) return;
@@ -501,19 +499,28 @@ const Conversations = () => {
     }
   };
 
-  const toggleHandoff = async (enableHuman: boolean) => {
-    if (!latestTicketId) return;
+  // Un solo interruptor para el bot y el agente: antes eran dos y el de arriba
+  // no apagaba nada (escribía en el ticket, que el webhook no mira). El que
+  // frena de verdad es contacts.ai_paused; el endpoint del ticket lo sincroniza.
+  const toggleAutomation = async (enable: boolean) => {
+    const contactId = selectedConv?.contactId;
+    if (!latestTicketId && !contactId) return;
     setSavingHandoff(true);
     try {
-      await api.post(`/ai/tickets/${latestTicketId}/toggle-bot`, {
-        botEnabled: !enableHuman,
-        humanOverride: enableHuman
-      });
-      toast.success(enableHuman ? 'Intervención humana activada' : 'Bot IA reactivado');
-      if (selectedConv?.contactId) await fetchConversationMessages(selectedConv.contactId);
-      await fetchDecisionLogs(latestTicketId);
+      if (latestTicketId) {
+        await api.post(`/ai/tickets/${latestTicketId}/toggle-bot`, {
+          botEnabled: enable,
+          humanOverride: !enable
+        });
+      } else {
+        await api.put(`/menu-bot/ai-paused/${contactId}`, { paused: !enable });
+      }
+      setContactData((c: any) => ({ ...c, ai_paused: !enable }));
+      toast.success(enable ? 'Bot y agente reactivados' : 'Bot y agente apagados — lo atiende una persona');
+      if (contactId) await fetchContactData(contactId);
+      if (latestTicketId) await fetchDecisionLogs(latestTicketId);
     } catch {
-      toast.error('No se pudo actualizar handoff');
+      toast.error('No se pudo cambiar');
     } finally {
       setSavingHandoff(false);
     }
@@ -880,12 +887,14 @@ const Conversations = () => {
                 Datos del cliente
               </Typography>
               <Stack direction='row' spacing={0.6} alignItems='center'>
-                <Typography variant='caption' sx={{ color: '#7A7872', minWidth: 52, textAlign: 'right' }}>{isBotEnabled ? 'Bot ON' : 'Bot OFF'}</Typography>
+                <Typography variant='caption' sx={{ color: isBotEnabled ? '#7A7872' : '#E8A020', minWidth: 92, textAlign: 'right' }}>
+                  {isBotEnabled ? 'Automático' : 'Lo atiende alguien'}
+                </Typography>
                 <Switch
                   size='small'
                   checked={isBotEnabled}
-                  disabled={savingHandoff || !latestTicketId}
-                  onChange={(_e, checked) => toggleHandoff(!checked)}
+                  disabled={savingHandoff || (!latestTicketId && !selectedConv?.contactId)}
+                  onChange={(_e, checked) => toggleAutomation(checked)}
                   sx={{
                     '& .MuiSwitch-switchBase.Mui-checked': { color: '#E8A020' },
                     '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: '#E8A020' }
@@ -947,23 +956,6 @@ const Conversations = () => {
                     <Typography variant='caption'>interés detectado</Typography>
                   </Stack>
                 </Stack>
-              </Stack>
-            </Paper>
-
-            <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>
-              <Stack direction='row' justifyContent='space-between' alignItems='center'>
-                <Typography variant='subtitle2' sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7872' }}>
-                  Agente IA {contactData?.ai_paused ? '(pausado)' : '(activo)'}
-                </Typography>
-                <Switch size='small' checked={!contactData?.ai_paused}
-                  onChange={async (e) => {
-                    const paused = !e.target.checked;
-                    try {
-                      await api.put(`/menu-bot/ai-paused/${selectedConv.contactId}`, { paused });
-                      setContactData((c: any) => ({ ...c, ai_paused: paused }));
-                      toast.success(paused ? 'IA pausada — lo atiende un humano' : 'IA reactivada para este contacto');
-                    } catch { toast.error('No se pudo cambiar'); }
-                  }} />
               </Stack>
             </Paper>
 
