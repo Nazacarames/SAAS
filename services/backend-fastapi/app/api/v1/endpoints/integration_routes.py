@@ -305,3 +305,112 @@ async def tokko_get_property_photos(
 async def list_integrations(payload: dict = Depends(get_current_user_payload)):
     """List all integrations"""
     return {"tokko": {"connected": False}, "meta": {"connected": False}, "whatsapp": {"connected": True}}
+
+
+# ── Google Calendar (sincronización en dos vías) ──────────────────────
+
+@router.get("/google/status")
+def google_calendar_status(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    from app.services import google_calendar as gc
+    company_id = int(payload.get("companyId") or 0)
+    rows = db.execute(
+        text("""SELECT id, user_id, email, calendar_id, last_sync_at, last_error,
+                       (sync_token <> '') AS sincronizando
+                FROM calendar_connections WHERE company_id = :c AND provider = 'google' ORDER BY id"""),
+        {"c": company_id},
+    ).mappings().all()
+    return {
+        "ok": True,
+        "configurado": gc.is_configured(),
+        "conexiones": [dict(r) for r in rows],
+    }
+
+
+@router.get("/google/auth-url")
+def google_calendar_auth_url(
+    solo_mio: bool = False,
+    payload: dict = Depends(get_current_user_payload),
+):
+    """URL del consentimiento de Google. `solo_mio` conecta el calendario del
+    usuario que la pide; por defecto se conecta el de la empresa."""
+    from jose import jwt as _jwt
+    from app.services import google_calendar as gc
+    if not gc.is_configured():
+        raise HTTPException(status_code=503, detail="Falta configurar GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET")
+    company_id = int(payload.get("companyId") or 0)
+    # el state va firmado: el callback de Google llega sin sesión y sin esto
+    # cualquiera podría colgar un calendario en la empresa que quisiera
+    state = _jwt.encode(
+        {"cid": company_id, "uid": int(payload.get("sub") or 0) if solo_mio else None, "k": "gcal"},
+        settings.jwt_secret, algorithm="HS256")
+    return {"ok": True, "url": gc.auth_url(state)}
+
+
+@router.get("/google/callback")
+def google_calendar_callback(
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    db: Session = Depends(get_db),
+):
+    """Vuelta del consentimiento. Endpoint público: la identidad viaja firmada
+    en el state, no en la sesión."""
+    from jose import jwt as _jwt
+    from fastapi.responses import HTMLResponse
+    from app.services import google_calendar as gc
+
+    def _pagina(titulo: str, detalle: str) -> HTMLResponse:
+        return HTMLResponse(
+            "<html><head><meta charset='utf-8'><title>%s</title></head>"
+            "<body style='background:#0C0E12;color:#E8E6E1;font-family:system-ui;padding:48px;text-align:center'>"
+            "<h2 style='color:#E8A020'>%s</h2><p>%s</p>"
+            "<p style='opacity:.6'>Ya podés cerrar esta pestaña.</p></body></html>" % (titulo, titulo, detalle))
+
+    if error or not code:
+        return _pagina("No se pudo conectar", error or "Google no devolvió el código de autorización.")
+    try:
+        data = _jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        if data.get("k") != "gcal":
+            raise ValueError("state inválido")
+    except Exception:
+        return _pagina("No se pudo conectar", "El pedido no es válido o venció. Probá de nuevo desde el CRM.")
+
+    try:
+        tokens = gc.exchange_code(code)
+        res = gc.save_connection(db, int(data["cid"]), data.get("uid"), tokens)
+    except Exception as e:
+        return _pagina("No se pudo conectar", str(e)[:200])
+    return _pagina("Calendario conectado", "Google Calendar quedó sincronizado con la agenda del CRM (%s)."
+                   % (res.get("email") or "cuenta conectada"))
+
+
+@router.post("/google/sync")
+def google_calendar_sync_now(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    from app.services import google_calendar as gc
+    company_id = int(payload.get("companyId") or 0)
+    conns = db.execute(
+        text("SELECT * FROM calendar_connections WHERE company_id = :c AND provider = 'google'"),
+        {"c": company_id},
+    ).mappings().all()
+    if not conns:
+        raise HTTPException(status_code=400, detail="No hay ningún calendario conectado")
+    return {"ok": True, "resultados": [gc.pull_changes(db, dict(c)) for c in conns]}
+
+
+@router.delete("/google/{connection_id}")
+def google_calendar_disconnect(
+    connection_id: int,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    company_id = int(payload.get("companyId") or 0)
+    db.execute(text("DELETE FROM calendar_connections WHERE id = :i AND company_id = :c"),
+               {"i": connection_id, "c": company_id})
+    db.commit()
+    return {"ok": True}

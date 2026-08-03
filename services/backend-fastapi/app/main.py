@@ -59,6 +59,17 @@ async def _start_channel_health():
     _channel_health_task = asyncio.create_task(channel_health_loop())
 
 
+_calendar_sync_task = None
+
+
+@app.on_event("startup")
+async def _start_calendar_sync():
+    global _calendar_sync_task
+    import asyncio
+    from app.services.google_calendar import calendar_sync_loop
+    _calendar_sync_task = asyncio.create_task(calendar_sync_loop())
+
+
 @app.on_event("startup")
 async def _raise_thread_limit():
     # Sync (def) endpoints run in anyio's threadpool (default 40 threads).

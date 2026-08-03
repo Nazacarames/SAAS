@@ -136,6 +136,51 @@ const Integrations = () => {
         }
     };
 
+    // ── Google Calendar ──────────────────────────────────────────────
+    const [gcal, setGcal] = useState<any>({ configurado: false, conexiones: [] });
+    const [gcalBusy, setGcalBusy] = useState(false);
+
+    const loadGcal = async () => {
+        try {
+            const { data } = await api.get('/integrations/google/status');
+            setGcal(data || { configurado: false, conexiones: [] });
+        } catch { /* la tarjeta queda en "no configurado" */ }
+    };
+    useEffect(() => { loadGcal(); }, []);
+
+    const conectarGcal = async (soloMio: boolean) => {
+        setGcalBusy(true);
+        try {
+            const { data } = await api.get('/integrations/google/auth-url', { params: { solo_mio: soloMio } });
+            // ventana aparte: al volver, Google muestra el resultado y se cierra
+            window.open(data.url, 'gcal', 'width=520,height=680');
+            toast.info('Autorizá el acceso en la ventana de Google y despues actualizá');
+        } catch (e: any) {
+            toast.error(e?.response?.data?.detail || 'No se pudo iniciar la conexion');
+        } finally { setGcalBusy(false); }
+    };
+
+    const sincronizarGcal = async () => {
+        setGcalBusy(true);
+        try {
+            const { data } = await api.post('/integrations/google/sync');
+            const r = (data.resultados || [])[0] || {};
+            toast.success(r.ok ? `Sincronizado: ${r.creadas || 0} nuevas, ${r.actualizadas || 0} actualizadas` : (r.reason || 'Sin cambios'));
+            loadGcal();
+        } catch (e: any) {
+            toast.error(e?.response?.data?.detail || 'No se pudo sincronizar');
+        } finally { setGcalBusy(false); }
+    };
+
+    const desconectarGcal = async (id: number) => {
+        if (!window.confirm('¿Desconectar este calendario? Las citas ya sincronizadas quedan como estan.')) return;
+        try {
+            await api.delete(`/integrations/google/${id}`);
+            toast.success('Calendario desconectado');
+            loadGcal();
+        } catch { toast.error('No se pudo desconectar'); }
+    };
+
     return (
         <Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -153,6 +198,50 @@ const Integrations = () => {
                 Configura webhooks para integrar con n8n, Zapier, Make o cualquier herramienta de automatización.
                 Los eventos se enviarán en tiempo real a las URLs configuradas.
             </Typography>
+
+            <Paper sx={{ p: 2.5, mb: 3 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                    <Typography variant="h6">Google Calendar</Typography>
+                    {gcal.conexiones?.length > 0 && <Chip size="small" color="success" label="Conectado" />}
+                </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    Sincronizacion en dos vias: lo que se agenda en el CRM aparece en Google, y lo que
+                    se agenda en Google baja a la Agenda y dispara los recordatorios de WhatsApp.
+                </Typography>
+
+                {!gcal.configurado && (
+                    <Typography variant="body2" sx={{ color: 'warning.main', mb: 2 }}>
+                        Falta cargar las credenciales de Google en el servidor.
+                    </Typography>
+                )}
+
+                {(gcal.conexiones || []).map((c: any) => (
+                    <Box key={c.id} sx={{ display: 'flex', alignItems: 'center', gap: 2, py: 1, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                        <Box sx={{ flex: 1 }}>
+                            <Typography variant="body2">{c.email || 'Cuenta de Google'}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                                {c.user_id ? 'Calendario personal' : 'Calendario de la empresa'}
+                                {c.last_sync_at ? ` · ultima sincronizacion ${new Date(c.last_sync_at).toLocaleString('es-AR')}` : ' · sin sincronizar todavia'}
+                            </Typography>
+                            {c.last_error && <Typography variant="caption" sx={{ color: 'error.main', display: 'block' }}>{c.last_error}</Typography>}
+                        </Box>
+                        <Button size="small" onClick={() => desconectarGcal(c.id)}>Desconectar</Button>
+                    </Box>
+                ))}
+
+                <Box sx={{ display: 'flex', gap: 1, mt: 2, flexWrap: 'wrap' }}>
+                    <Button variant="contained" disabled={!gcal.configurado || gcalBusy} onClick={() => conectarGcal(false)}>
+                        Conectar calendario de la empresa
+                    </Button>
+                    <Button variant="outlined" disabled={!gcal.configurado || gcalBusy} onClick={() => conectarGcal(true)}>
+                        Conectar el mio
+                    </Button>
+                    {gcal.conexiones?.length > 0 && (
+                        <Button disabled={gcalBusy} onClick={sincronizarGcal}>Sincronizar ahora</Button>
+                    )}
+                    <Button disabled={gcalBusy} onClick={loadGcal}>Actualizar</Button>
+                </Box>
+            </Paper>
 
             <TableContainer component={Paper}>
                 <Table>

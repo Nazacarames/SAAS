@@ -584,6 +584,13 @@ async def create_appointment(
     ).mappings().first()
     db.commit()
 
+    # espejo en Google Calendar, si la empresa lo tiene conectado
+    try:
+        from app.services.google_calendar import push_appointment
+        push_appointment(db, int(company_id), int(row["id"]))
+    except Exception as e:
+        print(f"[appointments] google push failed: {e}")
+
     confirmation_sent = False
     if body.sendConfirmation and contact.get("number"):
         try:
@@ -634,6 +641,13 @@ async def update_appointment_status(
         {"st": status_val, "id": appointment_id, "cid": company_id},
     )
     db.commit()
+
+    # cancelar acá borra el evento del calendario; reprogramar lo mueve
+    try:
+        from app.services.google_calendar import push_appointment
+        push_appointment(db, int(company_id), int(appointment_id))
+    except Exception as e:
+        print(f"[appointments] google push failed: {e}")
 
     notified = False
     if body.notifyContact and status_val == "cancelled" and appt.get("contact_number"):
