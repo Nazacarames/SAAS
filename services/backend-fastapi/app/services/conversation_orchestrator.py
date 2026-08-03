@@ -914,6 +914,21 @@ def _sync_stage_from_status(db, company_id: int, contact_id: int, lead_status: s
     if not lead_status:
         return
     from sqlalchemy import text as _t
+
+    # Un lead ya derivado lo maneja el asesor: la etapa "Asesores" que dejó
+    # mark_derived NO se pisa con la inferida del texto. Sin esto la derivación
+    # movía la etapa y un instante después esta función la devolvía a "Nueva
+    # oportunidad", así que el asesor no encontraba lo que le habían pasado.
+    try:
+        _tags = db.execute(
+            _t('SELECT COALESCE(progress_tags, ARRAY[]::text[]) FROM contacts WHERE id = :i'),
+            {"i": contact_id},
+        ).scalar() or []
+        if any(str(t).strip().lower() == "derivado_asesor" for t in _tags):
+            return
+    except Exception:
+        pass
+
     ls = str(lead_status).strip().lower()
     stages = db.execute(
         _t('SELECT id, name, position FROM lead_stages WHERE company_id = :c ORDER BY position, id'),
