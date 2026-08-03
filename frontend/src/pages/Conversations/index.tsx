@@ -474,6 +474,8 @@ const Conversations = () => {
   };
 
   const progressTags: string[] = (contactData?.progress_tags || []).map((t: string) => t.toLowerCase());
+  const isDerived = progressTags.includes('derivado_asesor');
+  const derivedTo = contactData?.assignedUser?.name || '';
   const hasOpciones = progressTags.includes('opciones_presentadas');
   const hasInteres = progressTags.includes('interes_detectado');
 
@@ -690,7 +692,14 @@ const Conversations = () => {
                     </Typography>
                   </Box>
                 </Stack>
-                <Stack direction='row' spacing={0.6}>
+                <Stack direction='row' spacing={0.6} alignItems='center'>
+                  {isDerived && (
+                    <Chip
+                      size='small'
+                      label={derivedTo ? `Derivado a ${derivedTo}` : 'Derivado a asesor'}
+                      sx={{ bgcolor: 'rgba(232,160,32,0.16)', color: '#E8A020', fontWeight: 600, border: '1px solid rgba(232,160,32,0.35)' }}
+                    />
+                  )}
                   {selectedConv.statuses.slice(0, 2).map((s) => (
                     <Chip key={s} size='small' label={s} color={statusColor(s)} />
                   ))}

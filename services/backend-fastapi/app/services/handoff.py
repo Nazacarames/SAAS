@@ -128,6 +128,46 @@ def ensure_assigned(db: Session, company_id: int, contact_id: int) -> dict:
         return {"ok": False, "error": str(e)[:120]}
 
 
+HANDOFF_STAGE = "Asesores"
+HANDOFF_TAG = "derivado_asesor"
+
+
+def mark_derived(db: Session, company_id: int, contact_id: int) -> None:
+    """Deja el lead identificable como derivado: etapa «Asesores» en el pipeline
+    y etiqueta en la conversación. La usan las dos vías de derivación (el Menú
+    Bot y la función derivar_a_asesor del agente), así el asesor lo encuentra
+    igual sin importar por dónde entró."""
+    try:
+        # LIKE 'asesor%': si la empresa ya armó su etapa ("Asesor", "Asesores",
+        # "Asesoras"), se reusa esa en vez de crear una duplicada al lado
+        stage_id = db.execute(
+            text("SELECT id FROM lead_stages WHERE company_id = :c AND lower(name) LIKE 'asesor%' "
+                 "ORDER BY position LIMIT 1"),
+            {"c": company_id},
+        ).scalar()
+        if not stage_id:
+            pos = db.execute(
+                text("SELECT COALESCE(MAX(position), -1) + 1 FROM lead_stages WHERE company_id = :c"),
+                {"c": company_id},
+            ).scalar()
+            stage_id = db.execute(
+                text("INSERT INTO lead_stages (company_id, name, color, position, is_won) "
+                     "VALUES (:c, :n, '#E8A020', :p, false) RETURNING id"),
+                {"c": company_id, "n": HANDOFF_STAGE, "p": int(pos or 0)},
+            ).scalar()
+        db.execute(
+            text('UPDATE contacts SET stage_id = :s, '
+                 "progress_tags = (SELECT ARRAY(SELECT DISTINCT unnest("
+                 "  COALESCE(progress_tags, ARRAY[]::text[]) || ARRAY[:tag]))), "
+                 '"updatedAt" = NOW() WHERE id = :i AND "companyId" = :c'),
+            {"s": stage_id, "tag": HANDOFF_TAG, "i": contact_id, "c": company_id},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.warning("mark_derived company=%s contact=%s: %s", company_id, contact_id, str(e)[:120])
+
+
 def _notify_advisor(db: Session, company_id: int, advisor: dict, contact: dict,
                     motivo: str, resumen: str) -> bool:
     """Aviso por WhatsApp al asesor. Si está fuera de la ventana de 24 h de
@@ -190,6 +230,8 @@ def derive_to_advisor(db: Session, company_id: int, contact_id: int,
     db.execute(text('UPDATE contacts SET ai_paused = true, "updatedAt" = NOW() WHERE id = :i'),
                {"i": contact_id})
     db.commit()
+
+    mark_derived(db, company_id, contact_id)
 
     notified = _notify_advisor(db, company_id, advisor, dict(contact), motivo, resumen) if advisor else False
 

@@ -256,6 +256,16 @@ async def _run_actions(db: Session, wa: dict, flow: dict, node: dict, event_key:
                 except Exception:
                     db.rollback()
 
+    # Derivación por el bot: misma marca que la del agente (etapa «Asesores» +
+    # etiqueta), para que el lead se identifique igual venga por donde venga.
+    if user_ids:
+        try:
+            from app.services.handoff import mark_derived
+            mark_derived(db, company_id, contact_id)
+        except Exception:
+            db.rollback()
+
+    # el stage_id explícito del nodo pisa a la etapa por defecto
     stage_id = node.get("stage_id")
     if stage_id:
         try:
