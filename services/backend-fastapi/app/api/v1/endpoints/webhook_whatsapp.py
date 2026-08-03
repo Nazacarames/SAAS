@@ -463,6 +463,37 @@ def _ensure_ticket_for_contact(db: Session, contact_id: int, company_id: int) ->
     return int(created["id"]) if created else None
 
 
+async def burst_superseded(db: Session, contact_id: int, seconds: float = 3.0) -> bool:
+    """True si mientras esperábamos llegó otro mensaje del mismo contacto.
+
+    El cliente manda ocho fotos y Meta dispara ocho webhooks en paralelo: sin
+    esto el agente contestaba una vez por foto (y seguía contestando después de
+    derivar). Con la espera corta, solo el último mensaje de la ráfaga responde;
+    los demás ya están guardados, así que la respuesta los ve a todos.
+    """
+    import asyncio
+
+    # por cantidad y no por MAX(id): messages.id es UUID, no es ordenable
+    q = text('SELECT COUNT(*) FROM messages WHERE "contactId" = :c AND "fromMe" = false')
+    try:
+        before = int(db.execute(q, {"c": contact_id}).scalar() or 0)
+        db.commit()
+    except Exception:
+        db.rollback()
+        return False
+
+    await asyncio.sleep(seconds)
+
+    try:
+        db.rollback()  # snapshot nuevo: si no, se relee lo mismo
+        after = int(db.execute(q, {"c": contact_id}).scalar() or 0)
+        db.commit()
+    except Exception:
+        db.rollback()
+        return False
+    return after > before
+
+
 def save_message(db: Session, contact_id: int, body: str, from_me: bool, company_id: int, provider_message_id: str = None) -> dict:
     """Save message to database. Ensures a ticket row exists for the contact.
 
@@ -677,7 +708,12 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
         print(f"[webhook] menu bot error (non-fatal): {_mb_err}")
         db.rollback()
 
+    # Ráfaga: una sola respuesta para todo el bloque de mensajes seguidos
+    if await burst_superseded(db, int(contact["id"])):
+        return {"ok": True, "ignored": True, "reason": "burst_superseded", "ai_reply": None}
+
     # Handoff a humano: la IA queda pausada para este contacto
+    # (se relee DESPUÉS de la espera: la derivación puede haberla activado recién)
     try:
         if db.execute(text("SELECT ai_paused FROM contacts WHERE id = :id"), {"id": contact["id"]}).scalar():
             # sigue siendo un lead vivo: puntuarlo aunque conteste un humano

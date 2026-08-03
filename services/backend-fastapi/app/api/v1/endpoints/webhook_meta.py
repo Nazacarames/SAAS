@@ -280,6 +280,19 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     except Exception:
         db.rollback()
 
+    # Ráfaga: una sola respuesta para todo el bloque de mensajes seguidos
+    from app.api.v1.endpoints.webhook_whatsapp import burst_superseded
+    if await burst_superseded(db, int(contact["id"])):
+        return {"ignored": True, "reason": "burst_superseded"}
+
+    # Handoff a humano: sin esto el agente seguía contestando en IG/Messenger
+    # aunque el lead ya estuviera derivado o el operador hubiera apagado el bot
+    try:
+        if db.execute(text("SELECT ai_paused FROM contacts WHERE id = :id"), {"id": contact["id"]}).scalar():
+            return {"ignored": True, "reason": "ai_paused"}
+    except Exception:
+        db.rollback()
+
     # El agente puede estar limitado a ciertos canales
     try:
         from app.services.knowledge_base import agent_answers_channel
