@@ -919,12 +919,14 @@ def _sync_stage_from_status(db, company_id: int, contact_id: int, lead_status: s
     # mark_derived NO se pisa con la inferida del texto. Sin esto la derivación
     # movía la etapa y un instante después esta función la devolvía a "Nueva
     # oportunidad", así que el asesor no encontraba lo que le habían pasado.
+    # Lo mismo para un lead ya cerrado (etapa ganada): no se lo revive solo.
     try:
-        _tags = db.execute(
-            _t('SELECT COALESCE(progress_tags, ARRAY[]::text[]) FROM contacts WHERE id = :i'),
+        _row = db.execute(
+            _t('SELECT COALESCE(c.progress_tags, ARRAY[]::text[]) AS tags, COALESCE(s.is_won, false) AS won '
+               'FROM contacts c LEFT JOIN lead_stages s ON s.id = c.stage_id WHERE c.id = :i'),
             {"i": contact_id},
-        ).scalar() or []
-        if any(str(t).strip().lower() == "derivado_asesor" for t in _tags):
+        ).mappings().first()
+        if _row and (_row["won"] or any(str(t).strip().lower() == "derivado_asesor" for t in (_row["tags"] or []))):
             return
     except Exception:
         pass

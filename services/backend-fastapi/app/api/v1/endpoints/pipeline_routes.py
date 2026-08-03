@@ -298,5 +298,14 @@ def move_lead(
         text('UPDATE contacts SET stage_id = :sid, "leadStatus" = :name, "updatedAt" = NOW() WHERE id = :id'),
         {"sid": body.stage_id, "name": stage["name"], "id": contact_id},
     )
+
+    # Lead cerrado o pasado a un asesor: el agente no vuelve a meterse. Los
+    # recordatorios de cita siguen saliendo igual (no miran ai_paused), que es
+    # justo lo único que se quiere que llegue después del cierre.
+    if stage["is_won"] or str(stage["name"] or "").strip().lower().startswith("asesor"):
+        db.execute(
+            text('UPDATE contacts SET ai_paused = true, "updatedAt" = NOW() WHERE id = :id'),
+            {"id": contact_id},
+        )
     db.commit()
     return {"ok": True}
