@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import (
-    admin_routes, ai_routes, auth, billing_routes, contacts, conversations, health,
+    admin_routes, ai_routes, auth, billing_routes, contacts, conversations, health, media_routes,
     messages, settings_routes, saved_replies_routes, users,
     webhook_whatsapp, whatsapp_routes, tags_routes,
     channels_routes, comment_automation_routes, integration_routes, menu_bot_routes, meta_webhook_routes, pipeline_routes, webhook_meta, webhooks_routes,
@@ -161,6 +161,7 @@ app.include_router(users.router, prefix=settings.api_prefix)
 
 # Core resources
 app.include_router(contacts.router, prefix=settings.api_prefix)
+app.include_router(media_routes.router, prefix=settings.api_prefix)
 app.include_router(conversations.router, prefix=settings.api_prefix)
 app.include_router(messages.router, prefix=settings.api_prefix)
 app.include_router(tags_routes.router, prefix=settings.api_prefix)

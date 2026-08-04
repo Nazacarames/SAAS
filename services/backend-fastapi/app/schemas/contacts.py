@@ -55,6 +55,7 @@ class ContactOut(BaseModel):
     needs: str | None = None
     progress_tags: list[str] | None = None
     lead_stage: str | None = None
+    ai_paused: bool | None = None
 
     class Config:
         from_attributes = True

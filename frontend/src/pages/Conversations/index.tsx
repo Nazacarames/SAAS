@@ -66,6 +66,37 @@ const scoreFromStage = (stage: string) => {
   }
 };
 
+const isInternalMedia = (value?: string) => String(value || '').trim().startsWith('/api/media/');
+
+// Los adjuntos del cliente se sirven con sesion, no como archivos publicos, asi
+// que <img src> no alcanza: no manda el token. Se bajan por la API y se muestran
+// desde un blob local.
+const AuthedMedia = ({ url, kind }: { url: string; kind: 'image' | 'video' | 'audio' }) => {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    let vivo = true;
+    let objectUrl = '';
+    if (!isInternalMedia(url)) { setSrc(isHttpUrl(url) ? url : ''); return; }
+    api.get(url, { responseType: 'blob' })
+      .then(({ data }) => { if (!vivo) return; objectUrl = URL.createObjectURL(data); setSrc(objectUrl); })
+      .catch(() => { if (vivo) setSrc(''); });
+    return () => { vivo = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [url]);
+
+  if (!src) {
+    return <Typography variant='caption' sx={{ color: '#7A7872', display: 'block', mb: 0.6 }}>Cargando adjunto…</Typography>;
+  }
+  if (kind === 'image') {
+    return (
+      <Box component='a' href={src} target='_blank' rel='noreferrer' sx={{ display: 'block', mb: 0.6 }}>
+        <Box component='img' src={src} alt='Adjunto' sx={{ maxWidth: 280, maxHeight: 320, borderRadius: 1, display: 'block' }} />
+      </Box>
+    );
+  }
+  if (kind === 'video') return <Box component='video' src={src} controls sx={{ maxWidth: 320, borderRadius: 1, mb: 0.6 }} />;
+  return <Box component='audio' src={src} controls sx={{ width: 260, mb: 0.6 }} />;
+};
+
 const isHttpUrl = (value?: string) => /^https?:\/\//i.test(String(value || '').trim());
 const sanitizeUrl = (url?: string) => String(url || '').trim().replace(/[),.;]+$/,'');
 const extractFirstUrl = (value?: string) => {
@@ -769,18 +800,23 @@ const Conversations = () => {
                           const mt = String(m.mediaType || '').toLowerCase();
                           return (
                             <>
-                              {mt === 'image' && isHttpUrl(mediaUrl) && (
-                                <Box component='img' src={mediaUrl} alt='media' sx={{ maxWidth: 280, borderRadius: 1, mb: 0.6 }} />
+                              {mt === 'image' && (isHttpUrl(mediaUrl) || isInternalMedia(mediaUrl)) && (
+                                <AuthedMedia url={mediaUrl} kind='image' />
                               )}
-                              {mt === 'video' && isHttpUrl(mediaUrl) && (
-                                <Box component='video' src={mediaUrl} controls sx={{ maxWidth: 320, borderRadius: 1, mb: 0.6 }} />
+                              {mt === 'video' && (isHttpUrl(mediaUrl) || isInternalMedia(mediaUrl)) && (
+                                <AuthedMedia url={mediaUrl} kind='video' />
                               )}
-                              {mt === 'audio' && isHttpUrl(mediaUrl) && (
-                                <Box component='audio' src={mediaUrl} controls sx={{ width: 260, mb: 0.6 }} />
+                              {mt === 'audio' && (isHttpUrl(mediaUrl) || isInternalMedia(mediaUrl)) && (
+                                <AuthedMedia url={mediaUrl} kind='audio' />
+                              )}
+                              {mt === 'document' && isInternalMedia(mediaUrl) && (
+                                <Typography variant='caption' sx={{ color: '#E8A020', display: 'block', mb: 0.6 }}>Documento adjunto</Typography>
                               )}
                               <Typography variant='body2' sx={{ whiteSpace: 'pre-wrap' }}>
                                 {(() => {
                                   const raw = String(m.body || '').trim();
+                                  // con el adjunto ya visible, el "[image message]" sobra
+                                  if (isInternalMedia(mediaUrl) && /^\[\w+ message\]$/i.test(raw)) return '';
                                   const mtpl = raw.match(/^\[TEMPLATE:([^\]]+)\]/i);
                                   if (mtpl) return ` Template enviado: ${mtpl[1]}`;
                                   return raw || (m.mediaType && m.mediaType !== 'chat' ? `[${String(m.mediaType).toUpperCase()}]` : 'Mensaje sin contenido');

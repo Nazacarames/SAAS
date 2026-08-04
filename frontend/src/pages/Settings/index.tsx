@@ -10,6 +10,42 @@ import api from '../../services/api';
 const Settings = () => {
   const [saving, setSaving] = useState(false);
 
+  // Números que el agente nunca contesta (contratistas, proveedores, clientes
+  // de siempre). Se aplica también a los que todavía no escribieron al CRM.
+  const [ignorados, setIgnorados] = useState<any[]>([]);
+  const [nuevosNumeros, setNuevosNumeros] = useState('');
+  const [notaIgnorados, setNotaIgnorados] = useState('');
+  const [guardandoIgnorados, setGuardandoIgnorados] = useState(false);
+
+  const cargarIgnorados = async () => {
+    try {
+      const { data } = await api.get('/contacts/ai-optouts');
+      setIgnorados(data?.numeros || []);
+    } catch { /* la sección queda vacía */ }
+  };
+  useEffect(() => { cargarIgnorados(); }, []);
+
+  const agregarIgnorados = async () => {
+    const numbers = nuevosNumeros.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
+    if (!numbers.length) { toast.info('Pegá al menos un número'); return; }
+    setGuardandoIgnorados(true);
+    try {
+      const { data } = await api.post('/contacts/ai-optouts', { numbers, note: notaIgnorados });
+      toast.success(`${data.cargados} número(s) en la lista · ${data.contactos_pausados} chat(s) ya abiertos pausados`);
+      setNuevosNumeros(''); setNotaIgnorados('');
+      cargarIgnorados();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudieron cargar');
+    } finally { setGuardandoIgnorados(false); }
+  };
+
+  const quitarIgnorado = async (numero: string) => {
+    try {
+      await api.delete(`/contacts/ai-optouts/${numero}`);
+      cargarIgnorados();
+    } catch { toast.error('No se pudo quitar'); }
+  };
+
   // Tokko
   const [tokkoEnabled, setTokkoEnabled] = useState(false);
   const [tokkoSyncLeads, setTokkoSyncLeads] = useState(true);
@@ -79,6 +115,52 @@ const Settings = () => {
     <Box>
       <Typography variant='h4' gutterBottom>Configuración</Typography>
       <Stack spacing={2}>
+
+        {/* Números que el agente ignora */}
+        <Paper sx={{ p: 2 }}>
+          <Stack direction='row' spacing={1} alignItems='center' sx={{ mb: 1.5 }}>
+            <Typography variant='h6'>Números que el agente ignora</Typography>
+            <Chip size='small' color={ignorados.length ? 'warning' : 'default'} label={`${ignorados.length} en la lista`} />
+          </Stack>
+          <Typography variant='caption' color='text.secondary' sx={{ display: 'block', mb: 1.5 }}>
+            Contratistas, proveedores, clientes de siempre. El agente no les contesta nunca, ni siquiera
+            la primera vez que escriben: los atiende una persona. Se pueden pegar varios, uno por línea.
+          </Typography>
+          <Stack spacing={1.2}>
+            <TextField
+              label='Números'
+              multiline
+              minRows={3}
+              value={nuevosNumeros}
+              onChange={(e) => setNuevosNumeros(e.target.value)}
+              placeholder={'+54 9 341 555-1234\n+54 9 11 4444-5555'}
+              helperText='Con o sin +54, guiones o espacios: da igual.'
+            />
+            <TextField
+              label='Nota (opcional)'
+              value={notaIgnorados}
+              onChange={(e) => setNotaIgnorados(e.target.value)}
+              placeholder='Contratistas'
+            />
+            <Box>
+              <Button variant='contained' disabled={guardandoIgnorados} onClick={agregarIgnorados}>
+                Agregar a la lista
+              </Button>
+            </Box>
+            {ignorados.length > 0 && (
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.8, mt: 1 }}>
+                {ignorados.map((n: any) => (
+                  <Chip
+                    key={n.number}
+                    label={n.note ? `+${n.number} · ${n.note}` : `+${n.number}`}
+                    onDelete={() => quitarIgnorado(n.number)}
+                    size='small'
+                  />
+                ))}
+              </Box>
+            )}
+          </Stack>
+        </Paper>
 
         {/* Tokko */}
         <Paper sx={{ p: 2 }}>

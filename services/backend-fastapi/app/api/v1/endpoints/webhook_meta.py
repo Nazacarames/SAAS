@@ -256,7 +256,19 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
 
     from app.api.v1.endpoints.webhook_whatsapp import save_message
     try:
-        save_message(db, contact["id"], inbound.text, False, company_id, provider_message_id=inbound.provider_message_id or None)
+        # el adjunto se baja y se guarda: la URL que manda Meta vence y despues
+        # el asesor ve un placeholder en vez de la foto
+        _url = _kind = ""
+        if getattr(inbound, "media_url", ""):
+            try:
+                from app.services.media_store import download_direct_url
+                got = download_direct_url(inbound.media_url, int(company_id))
+                _url, _kind = got.get("url", ""), got.get("kind", "")
+            except Exception as _me:
+                log.warning("media download: %s", str(_me)[:120])
+        save_message(db, contact["id"], inbound.text, False, company_id,
+                     provider_message_id=inbound.provider_message_id or None,
+                     media_url=_url, media_type=_kind or (inbound.media_type or ""))
     except Exception as e:
         log.warning("save_message error: %s", e)
         db.rollback()

@@ -190,7 +190,7 @@ def _extract_profile_name(payload: dict, wa_id: str) -> str:
     return ""
 
 
-def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
+def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str, dict | None]]:
     """Extract ALL message tuples (msg_id, from, text) from WhatsApp webhook payload.
     Status-only webhooks return empty list.
     """
@@ -213,7 +213,7 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
                     from_num = msg.get("from", "")
                     text_body = msg.get("text", {}).get("body", "")
                     if text_body:
-                        out.append((msg_id, from_num, text_body))
+                        out.append((msg_id, from_num, text_body, None))
                         continue
 
                     # Respuestas a botones/listas del Menú Bot: el título elegido
@@ -222,11 +222,18 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str]]:
                         _reply = (msg.get("interactive") or {}).get("button_reply") or \
                                  (msg.get("interactive") or {}).get("list_reply") or {}
                         if _reply.get("title"):
-                            out.append((msg_id, from_num, str(_reply["title"])))
+                            out.append((msg_id, from_num, str(_reply["title"]), None))
                             continue
 
+                    # Adjuntos: se arrastra el id de Meta para poder bajarlo.
+                    # Sin esto en el panel solo queda "[image message]" y el
+                    # asesor no puede ver la foto que le mandó el cliente.
                     msg_type = msg.get("type", "unknown")
-                    out.append((msg_id, from_num, f"[{msg_type} message]"))
+                    node = msg.get(msg_type) if isinstance(msg.get(msg_type), dict) else {}
+                    caption = str(node.get("caption") or "").strip()
+                    media = {"id": node.get("id") or "", "type": msg_type,
+                             "filename": str(node.get("filename") or "")} if node.get("id") else None
+                    out.append((msg_id, from_num, caption or f"[{msg_type} message]", media))
         return out
     except Exception as e:
         print(f"extract_messages_from_payload error: {e}")
@@ -494,7 +501,8 @@ async def burst_superseded(db: Session, contact_id: int, seconds: float = 3.0) -
     return after > before
 
 
-def save_message(db: Session, contact_id: int, body: str, from_me: bool, company_id: int, provider_message_id: str = None) -> dict:
+def save_message(db: Session, contact_id: int, body: str, from_me: bool, company_id: int, provider_message_id: str = None,
+                 media_url: str = "", media_type: str = "") -> dict:
     """Save message to database. Ensures a ticket row exists for the contact.
 
     Insert is idempotent on provider_message_id (unique partial index): a
@@ -508,12 +516,13 @@ def save_message(db: Session, contact_id: int, body: str, from_me: bool, company
         print(f"[save_message] Ticket ensure failed: {_e}")
     row = db.execute(
         text(
-            'INSERT INTO messages (body, "fromMe", "contactId", "ticketId", "provider_message_id", "createdAt", "updatedAt") '
-            'VALUES (:body, :from_me, :contact_id, :ticket_id, :pmid, NOW(), NOW()) '
+            'INSERT INTO messages (body, "fromMe", "contactId", "ticketId", "provider_message_id", "mediaUrl", "mediaType", "createdAt", "updatedAt") '
+            'VALUES (:body, :from_me, :contact_id, :ticket_id, :pmid, :murl, :mtype, NOW(), NOW()) '
             'ON CONFLICT ("provider_message_id") WHERE "provider_message_id" IS NOT NULL DO NOTHING '
             'RETURNING id, body, "fromMe", "contactId", "ticketId"'
         ),
-        {"body": body, "from_me": from_me, "contact_id": contact_id, "ticket_id": ticket_id, "pmid": provider_message_id}
+        {"body": body, "from_me": from_me, "contact_id": contact_id, "ticket_id": ticket_id, "pmid": provider_message_id,
+         "murl": media_url or None, "mtype": media_type or None}
     ).mappings().first()
     db.commit()
     if row is None and provider_message_id:
@@ -559,7 +568,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     # message in the batch is saved; their texts are combined so the AI answers
     # the full batch in one reply instead of silently dropping messages 2..N.
     new_messages = []
-    for _mid, _from, _text in extracted_messages:
+    for _mid, _from, _text, _media in extracted_messages:
         if _mid:
             try:
                 existing = db.execute(
@@ -570,7 +579,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
                     continue
             except Exception as _dup_err:
                 print(f"[webhook] dedup check error (non-fatal): {_dup_err}")
-        new_messages.append((_mid, _from, _text))
+        new_messages.append((_mid, _from, _text, _media))
 
     if not new_messages:
         if response is not None:
@@ -578,7 +587,7 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
         return {"ok": True, "ignored": True, "reason": "msg_id_already_processed", "ai_reply": None}
 
     # All batch messages come from the same sender; use the first for routing
-    msg_id, from_number, message_text = new_messages[0]
+    msg_id, from_number, message_text, _ = new_messages[0]
     if len(new_messages) > 1:
         message_text = "\n".join(m[2] for m in new_messages if m[2])
         print(f"[webhook] batch of {len(new_messages)} new messages combined for one reply")
@@ -663,9 +672,19 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     company_id = int(company_id)
 
     # Save every incoming message in the batch (each with its own provider id)
-    for _mid, _from, _text in new_messages:
+    for _mid, _from, _text, _media in new_messages:
         try:
-            save_message(db, contact["id"], _text, False, company_id, provider_message_id=_mid or None)
+            _url = _mtype = ""
+            if _media:
+                try:
+                    from app.services.media_store import download_meta_media
+                    _wa = get_whatsapp_config(db, company_id, _phone_number_id or None)
+                    got = download_meta_media(_media["id"], (_wa or {}).get("token", ""), int(company_id))
+                    _url, _mtype = got.get("url", ""), got.get("kind", "")
+                except Exception as _me:
+                    print(f"[webhook] media download failed: {_me}")
+            save_message(db, contact["id"], _text, False, company_id, provider_message_id=_mid or None,
+                         media_url=_url, media_type=_mtype)
         except Exception as e:
             print(f"Error saving incoming message: {e}")
             db.rollback()
