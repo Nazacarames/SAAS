@@ -414,3 +414,49 @@ def google_calendar_disconnect(
                {"i": connection_id, "c": company_id})
     db.commit()
     return {"ok": True}
+
+
+# ── Carrusel nativo de WhatsApp (inmobiliarias) ───────────────────────
+
+class CarouselCreateBody(BaseModel):
+    sample_image_url: str = ""
+
+
+@router.get("/carousel/status")
+def carousel_status(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    from app.services import wa_carousel
+    return wa_carousel.template_status(db, int(payload.get("companyId") or 0))
+
+
+@router.post("/carousel/template")
+def carousel_create(
+    body: CarouselCreateBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Crea la plantilla de carrusel en el WABA de la empresa y la manda a
+    revisión de Meta. Tarda: la aprobación no es inmediata."""
+    import httpx as _httpx
+    from app.services import wa_carousel
+
+    company_id = int(payload.get("companyId") or 0)
+    url = (body.sample_image_url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Falta la foto de ejemplo (sample_image_url)")
+    try:
+        r = _httpx.get(url, timeout=45, follow_redirects=True)
+        if r.status_code != 200 or not r.content:
+            raise HTTPException(status_code=400, detail="No se pudo descargar la foto de ejemplo")
+        img = r.content
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="No se pudo descargar la foto de ejemplo: %s" % str(e)[:120])
+
+    res = wa_carousel.create_template(db, company_id, img)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Meta rechazó la plantilla")[:400])
+    return res

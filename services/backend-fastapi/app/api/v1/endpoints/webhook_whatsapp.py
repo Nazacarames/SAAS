@@ -844,7 +844,25 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
                     # Send wait message right before property cards (only for fresh searches, not cache)
                     if _wait_msg and not ai_result.get('from_cache'):
                         await send_whatsapp_message(from_number, _wait_msg, wa_config)
-                    for item in prop_items:
+
+                    # Carrusel nativo si la inmobiliaria tiene la plantilla
+                    # aprobada. Si no está aprobada o alguna propiedad no tiene
+                    # foto, se mandan las fichas de siempre: nadie se queda sin
+                    # ver las opciones por esperar a Meta.
+                    _carousel_ok = False
+                    try:
+                        from app.services import wa_carousel
+                        _props = (slots or {}).get("_results_cache") or []
+                        if _props and wa_carousel.is_ready(db, company_id):
+                            _res = wa_carousel.send_carousel(db, company_id, from_number, _props, wa_config)
+                            _carousel_ok = bool(_res.get("ok"))
+                            import logging as _lg
+                            _lg.getLogger("app.access").info(
+                                "WA_CAROUSEL ok=%s %s" % (_carousel_ok, str(_res.get("error", ""))[:120]))
+                    except Exception as _ce:
+                        print(f"[webhook] carrusel: {_ce}")
+
+                    for item in ([] if _carousel_ok else prop_items):
                         if item.get("photo"):
                             send_result = await send_whatsapp_image(from_number, item["photo"], item["text"], wa_config)
                             import logging as _logging; _logging.getLogger("app.access").info(f"WA_CARD_IMAGE ok={send_result.get('ok')} err={send_result.get('error','')[:80]}")
