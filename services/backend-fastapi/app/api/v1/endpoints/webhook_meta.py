@@ -519,7 +519,10 @@ def _ensure_ticket(db: Session, channel: dict, contact: dict) -> Optional[dict]:
         text('SELECT id FROM whatsapps WHERE "companyId" = :co ORDER BY id DESC LIMIT 1'),
         {"co": company_id},
     ).mappings().first()
-    wa_id = wa_row["id"] if wa_row else 1
+    # NULL, no 1: las empresas conectadas por el wizard no tienen fila en la
+    # tabla vieja whatsapps, el 1 hardcodeado violaba la FK y el ticket no se
+    # creaba. Sin ticket el mensaje de Instagram/Messenger se perdia entero.
+    wa_id = wa_row["id"] if wa_row else None
 
     try:
         db.execute(

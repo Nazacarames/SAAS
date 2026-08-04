@@ -460,12 +460,13 @@ def _ensure_ticket_for_contact(db: Session, contact_id: int, company_id: int) ->
         text('SELECT id FROM whatsapps WHERE "companyId" = :co ORDER BY id DESC LIMIT 1'),
         {"co": company_id},
     ).mappings().first()
-    if not wa:
-        return None
+    # whatsappId puede ir NULL: las empresas conectadas por el wizard de Canales
+    # no tienen fila en la tabla vieja whatsapps. Antes se cortaba acá y NUNCA
+    # se creaba el ticket, asi que esas empresas no tenian conversaciones.
     created = db.execute(
         text('INSERT INTO tickets (status, "contactId", "whatsappId", "companyId", "createdAt", "updatedAt") '
              'VALUES (:status, :c, :w, :co, NOW(), NOW()) RETURNING id'),
-        {"status": "open", "c": contact_id, "w": int(wa["id"]), "co": company_id},
+        {"status": "open", "c": contact_id, "w": int(wa["id"]) if wa else None, "co": company_id},
     ).mappings().first()
     return int(created["id"]) if created else None
 

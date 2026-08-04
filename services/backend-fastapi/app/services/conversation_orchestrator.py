@@ -1084,19 +1084,35 @@ async def execute_tool(
                 print(f"[orchestrator] Industry check error: {e}")
                 # Default to allow for backwards compatibility
 
+        # Tokko de la empresa, sin respaldo global. Antes, si la inmobiliaria no
+        # tenía su clave cargada, se usaba la del .env: la agencia terminaba
+        # consultando el Tokko de OTRA cuenta. Y con la integración apagada el
+        # agente igual "buscaba" y contestaba "no encontré propiedades", que es
+        # peor que decir la verdad: el cliente cree que no hay stock.
+        company_tokko_key = ""
+        if db:
+            try:
+                co_row = db.execute(
+                    text("SELECT COALESCE(tokko_api_key, '') AS k, COALESCE(tokko_enabled, false) AS on "
+                         "FROM companies WHERE id = :cid LIMIT 1"),
+                    {"cid": company_id},
+                ).mappings().first()
+                if co_row and co_row["k"] and co_row["on"]:
+                    company_tokko_key = co_row["k"]
+            except Exception:
+                pass
+        if not company_tokko_key:
+            return {
+                "ok": False,
+                "results": [],
+                "message": "SIN BUSCADOR DISPONIBLE. Prohibido decir que no hay propiedades o que no "
+                           "encontraste nada: es mentira y quema el lead. Hacé exactamente esto: llamá a "
+                           "derivar_a_asesor AHORA y respondé «Ya tengo tus datos. Un asesor te pasa las "
+                           "opciones que mejor encajan en un rato.» Nada más.",
+                "meta": {"tokko_not_configured": True},
+            }
+
         try:
-            # Get per-company Tokko API key (fall back to global env key)
-            company_tokko_key = settings.tokko_api_key
-            if db:
-                try:
-                    co_row = db.execute(
-                        text("SELECT tokko_api_key, tokko_base_url FROM companies WHERE id = :cid LIMIT 1"),
-                        {"cid": company_id}
-                    ).mappings().first()
-                    if co_row and co_row["tokko_api_key"]:
-                        company_tokko_key = co_row["tokko_api_key"]
-                except Exception:
-                    pass
             tokko_url = settings.tokko_api_url or "https://api.tokkobroker.com/api/v1"
 
             requested_location = _normalize_text(tool_args.get("location"))
@@ -1979,6 +1995,28 @@ class ConversationOrchestrator:
                         "result": tool_result,
                         "success": tool_result.get("ok", False),
                     })
+
+                    # Buscador sin configurar: se corta acá con una respuesta
+                    # honesta y un humano atrás. Dejarlo al modelo terminaba en
+                    # "no encontré propiedades" (mentira: nunca busco nada) o en
+                    # un "¿en qué puedo ayudarte?" que pierde al cliente.
+                    if (tool_result.get("meta") or {}).get("tokko_not_configured"):
+                        if not self.dry_run and self.contact_id and db:
+                            try:
+                                from app.services.handoff import derive_to_advisor
+                                derive_to_advisor(db, self.company_id, int(self.contact_id),
+                                                  motivo="pidió propiedades y el buscador no está configurado")
+                            except Exception as _de:
+                                print(f"[orchestrator] handoff sin tokko: {_de}")
+                        self._followup_msg = None
+                        return {
+                            "reply": "Ya tengo tus datos. Un asesor te pasa las opciones que mejor encajan en un rato.",
+                            "model": "rule", "intent": self.intent,
+                            "conversation_state": self.conversation_state, "slots": self.slots,
+                            "tool_calls": self.tool_calls, "citations": [], "used_fallback": False,
+                            "latency_ms": 0, "toolCallCount": len(self.tool_calls), "followup": None,
+                        }
+
                     # Sync upsert_contact data back to slots for subsequent turns
                     if function_name == "upsert_contact" and tool_result.get("ok"):
                         if function_args.get("name"):
@@ -2114,6 +2152,25 @@ class ConversationOrchestrator:
                     "success": forced_result.get("ok", False),
                 })
                 results = forced_result.get("results") or []
+                # Sin buscador configurado no se puede decir "no hay propiedades":
+                # el cliente entiende que no hay stock y se va. Lo atiende una
+                # persona, que es lo unico honesto que se puede ofrecer.
+                if (forced_result.get("meta") or {}).get("tokko_not_configured"):
+                    if not self.dry_run and self.contact_id and db:
+                        try:
+                            from app.services.handoff import derive_to_advisor
+                            derive_to_advisor(db, self.company_id, int(self.contact_id),
+                                              motivo="pidió propiedades y el buscador no está configurado")
+                        except Exception as _de:
+                            print(f"[orchestrator] handoff sin tokko: {_de}")
+                    self._followup_msg = None
+                    return {
+                        "reply": "Ya tengo tus datos. Un asesor te pasa las opciones que mejor encajan en un rato.",
+                        "model": "rule", "intent": self.intent,
+                        "conversation_state": self.conversation_state, "slots": self.slots,
+                        "tool_calls": self.tool_calls, "citations": [], "used_fallback": False,
+                        "latency_ms": 0, "toolCallCount": len(self.tool_calls), "followup": None,
+                    }
                 if not results:
                     # Build a helpful no-results message with the applied filters
                     filters = []
