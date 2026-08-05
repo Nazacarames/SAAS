@@ -225,6 +225,49 @@ async def _handle_channel_entry(db: Session, channel_type: str, entry: dict):
     return {"channel": channel_type, "processed": len(processed)}
 
 
+def _placeholder_name(channel_type: str, sender_id: str) -> str:
+    """Nombre provisorio legible mientras Meta no da el perfil.
+
+    El nombre real necesita pages_messaging con acceso avanzado (App Review).
+    Hasta entonces Meta responde "(#3) Application does not have the capability",
+    y mostrar el id crudo de 17 digitos no le sirve a nadie: no se distinguen
+    entre si de un vistazo.
+    """
+    etiqueta = "Instagram" if channel_type == "instagram" else "Messenger"
+    return "%s ...%s" % (etiqueta, str(sender_id)[-6:])
+
+
+async def _refresh_display_name(db, adapter, channel: dict, contact: dict, sender_id: str) -> dict:
+    """Si el contacto quedo guardado con el id de Meta como nombre, reintenta
+    traer el perfil y lo corrige.
+
+    El nombre solo se pedia al crear el contacto: si ese primer pedido fallaba
+    (token recien renovado, perfil no disponible todavia), el lead quedaba
+    llamandose 1234567890123 para siempre.
+    """
+    actual = str(contact.get("name") or "").strip()
+    provisorio = (not actual or actual == str(sender_id)
+                  or actual.startswith("Messenger ...") or actual.startswith("Instagram ..."))
+    if not provisorio:
+        return contact
+    try:
+        profile = await adapter.fetch_profile(get_send_config(channel), sender_id)
+    except Exception:
+        return contact
+    nuevo = (getattr(profile, "name", "") or getattr(profile, "username", "") or "").strip()
+    if not nuevo or nuevo == str(sender_id):
+        return contact
+    try:
+        db.execute(text('UPDATE contacts SET name = :n, "updatedAt" = NOW() WHERE id = :i'),
+                   {"n": nuevo[:255], "i": contact["id"]})
+        db.commit()
+        contact = dict(contact)
+        contact["name"] = nuevo
+    except Exception:
+        db.rollback()
+    return contact
+
+
 async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessage, adapter):
     channel = resolve_channel(db, channel_type, inbound.external_id)
     if not channel or channel.get("status") != "active":
@@ -425,7 +468,7 @@ async def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, 
             {"cid": company_id, "psid": inbound.sender_id},
         ).mappings().first()
         if row:
-            return dict(row)
+            return await _refresh_display_name(db, adapter, channel, dict(row), inbound.sender_id)
 
         profile = None
         try:
@@ -434,7 +477,7 @@ async def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, 
         except Exception:
             pass
 
-        name = (profile.name if profile and profile.name else inbound.sender_id)
+        name = (profile.name if profile and profile.name else _placeholder_name("messenger", inbound.sender_id))
         try:
             db.execute(
                 text(
@@ -461,7 +504,7 @@ async def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, 
             {"cid": company_id, "igsid": inbound.sender_id},
         ).mappings().first()
         if row:
-            return dict(row)
+            return await _refresh_display_name(db, adapter, channel, dict(row), inbound.sender_id)
 
         profile = None
         try:
@@ -479,7 +522,8 @@ async def _resolve_contact(db: Session, channel: dict, inbound: InboundMessage, 
                     "VALUES (:name, :cid, 'instagram', 'open', :igsid, :ch, NOW(), NOW()) "
                     "ON CONFLICT DO NOTHING"
                 ),
-                {"name": name if name != inbound.sender_id else (username or name), "cid": company_id, "igsid": inbound.sender_id, "ch": channel_id},
+                {"name": (name if name != inbound.sender_id else (username or _placeholder_name("instagram", inbound.sender_id))),
+                 "cid": company_id, "igsid": inbound.sender_id, "ch": channel_id},
             )
             db.commit()
             row = db.execute(
