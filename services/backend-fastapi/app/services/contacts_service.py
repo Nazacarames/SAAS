@@ -87,12 +87,16 @@ def _is_ai_optout(db: Session, company_id: int, number: str) -> bool:
     ya existen. Después manda el switch del panel, que es lo esperable si el
     operador decide activarle el agente a alguien puntual."""
     digits = "".join(c for c in str(number or "") if c.isdigit())
-    if not digits:
+    if len(digits) < 8:
         return False
+    # Por sufijo, no exacto: el mismo telefono argentino aparece como
+    # 5493415904534, 543415904534 o 3415904534 segun quien lo escriba, y Meta
+    # no siempre manda el 9. Comparando los ultimos 8 digitos coinciden todos.
     try:
         return bool(db.execute(
-            text("SELECT 1 FROM ai_optouts WHERE company_id = :c AND number = :n LIMIT 1"),
-            {"c": company_id, "n": digits},
+            text("SELECT 1 FROM ai_optouts WHERE company_id = :c "
+                 "AND right(regexp_replace(number, '[^0-9]', '', 'g'), 8) = :suf LIMIT 1"),
+            {"c": company_id, "suf": digits[-8:]},
         ).scalar())
     except Exception:
         db.rollback()

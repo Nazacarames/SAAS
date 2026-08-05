@@ -199,10 +199,13 @@ def ai_optouts_add(
             {"c": company_id, "n": d, "note": body.note[:200]},
         )
     # los que ya están en el CRM se pausan de una
+    # por sufijo: contacts.number viene con formato ("+54 9 3465 40-7454") y con
+    # o sin el 9, asi que la comparacion exacta no pausaba a nadie
     paused = db.execute(
         text('UPDATE contacts SET ai_paused = true, "updatedAt" = NOW() '
-             'WHERE "companyId" = :c AND number = ANY(:nums) AND COALESCE(ai_paused, false) = false'),
-        {"c": company_id, "nums": list(digits)},
+             'WHERE "companyId" = :c AND COALESCE(ai_paused, false) = false '
+             "AND right(regexp_replace(COALESCE(number,''), '[^0-9]', '', 'g'), 8) = ANY(:sufs)"),
+        {"c": company_id, "sufs": [d[-8:] for d in digits]},
     ).rowcount
     db.commit()
     total = db.execute(text("SELECT COUNT(*) FROM ai_optouts WHERE company_id = :c"), {"c": company_id}).scalar()
