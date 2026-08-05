@@ -152,7 +152,11 @@ def is_ready(db: Session, company_id: int) -> bool:
 
 def _card_params(prop: dict, index: int) -> dict:
     titulo = str(prop.get("title") or "Propiedad")[:60]
-    zona = str(prop.get("location") or "Consultar zona")[:60]
+    # "Argentina | Santa Fe | Rosario | Centro" no entra ni sirve en una
+    # tarjeta: se deja lo ultimo, que es lo que identifica el barrio.
+    _loc = str(prop.get("location") or "").replace(" | ", ",")
+    _partes = [x.strip() for x in _loc.split(",") if x.strip()]
+    zona = (", ".join(_partes[-2:]) if len(_partes) >= 2 else (_loc or "Consultar zona"))[:60]
     precio = str(prop.get("price") or "Consultar")[:60]
     foto = str(prop.get("photo") or "")
     # el botón lleva el sufijo de la URL de la ficha; si no hay, se manda el id
