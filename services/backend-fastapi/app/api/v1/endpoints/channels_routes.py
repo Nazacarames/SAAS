@@ -437,6 +437,16 @@ def delete_channel(
         raise HTTPException(status_code=404, detail="Canal no encontrado")
 
     if hard:
+        # Primero se sueltan las referencias: el historial (contactos, tickets y
+        # mensajes) apunta al canal y la FK hacia atras hacia fallar el borrado
+        # con un 500. Se desvincula, no se borra: la conversacion con el cliente
+        # tiene que sobrevivir a que se cambie de numero.
+        for tabla in ("messages", "tickets", "contacts"):
+            try:
+                db.execute(text("UPDATE %s SET channel_id = NULL WHERE channel_id = :id" % tabla),
+                           {"id": channel_id})
+            except Exception:
+                db.rollback()
         db.execute(text("DELETE FROM channels WHERE id = :id"), {"id": channel_id})
         if ch["meta_connection_id"]:
             in_use = db.execute(
