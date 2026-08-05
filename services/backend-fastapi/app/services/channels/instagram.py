@@ -57,16 +57,21 @@ class InstagramAdapter(ChannelAdapter):
         if not token:
             return ContactProfile()
         try:
+            # De mayor a menor: si un campo no esta permitido, Meta tira 400 y
+            # se pierde TODO el perfil. Pidiendo name+username juntos fallaba
+            # siempre; username solo devuelve 200 y alcanza para identificar
+            # al cliente por su @.
             url = f"https://graph.facebook.com/{GRAPH_VERSION}/{recipient_id}"
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params={"fields": "name,username,profile_pic", "access_token": token}, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                return ContactProfile(
-                    name=data.get("name", ""),
-                    username=data.get("username", ""),
-                    profile_pic=data.get("profile_pic", ""),
-                )
+                for campos in ("name,username,profile_pic", "name,username", "username"):
+                    resp = await client.get(url, params={"fields": campos, "access_token": token}, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return ContactProfile(
+                            name=data.get("name", ""),
+                            username=data.get("username", ""),
+                            profile_pic=data.get("profile_pic", ""),
+                        )
         except Exception as e:
             log.warning("ig fetch_profile err=%s", str(e)[:100])
         return ContactProfile()

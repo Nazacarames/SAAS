@@ -254,7 +254,11 @@ async def _refresh_display_name(db, adapter, channel: dict, contact: dict, sende
         profile = await adapter.fetch_profile(get_send_config(channel), sender_id)
     except Exception:
         return contact
-    nuevo = (getattr(profile, "name", "") or getattr(profile, "username", "") or "").strip()
+    # en Instagram el @usuario es lo unico que Meta deja leer sin acceso
+    # avanzado, y alcanza para reconocer al cliente
+    _u = str(getattr(profile, "username", "") or "").strip()
+    nuevo = (str(getattr(profile, "name", "") or "").strip()
+             or (("@" + _u) if _u else ""))
     if not nuevo or nuevo == str(sender_id):
         return contact
     try:
