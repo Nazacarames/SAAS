@@ -35,8 +35,11 @@ class AssignedUserOut(BaseModel):
 
 class ContactOut(BaseModel):
     id: int
-    name: str
-    number: str
+    # nullables: los contactos de Instagram/Messenger no tienen numero de
+    # telefono (Meta da un PSID), y el nombre puede no venir. Con estos campos
+    # obligatorios la lista entera fallaba y el panel mostraba "Sin leads".
+    name: str | None = None
+    number: str | None = None
     email: str | None = None
     whatsappId: int | None = None
     source: str | None = None
