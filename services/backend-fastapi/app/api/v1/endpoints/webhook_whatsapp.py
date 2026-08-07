@@ -219,6 +219,15 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str, di
                     # al PRIMER mensaje: si no se guarda aca, se pierde.
                     if msg.get("referral"):
                         _AD_REFERRALS[msg_id or from_num] = msg["referral"]
+                    # Traza del origen: sin esto, cuando un cliente dice "me
+                    # entraron leads de pauta" no hay forma de saber a que
+                    # numero llegaron ni si Meta mando el bloque del aviso.
+                    import logging as _lg
+                    _lg.getLogger("app.access").info(
+                        "WA_IN phone_id=%s from=%s ad=%s" % (
+                            value.get("metadata", {}).get("phone_number_id"),
+                            from_num,
+                            bool(msg.get("referral"))))
                     text_body = msg.get("text", {}).get("body", "")
                     if text_body:
                         out.append((msg_id, from_num, text_body, None))
