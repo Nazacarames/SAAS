@@ -190,6 +190,10 @@ def _extract_profile_name(payload: dict, wa_id: str) -> str:
     return ""
 
 
+# referral por mensaje: lo llena la extraccion y lo consume el handler
+_AD_REFERRALS: dict = {}
+
+
 def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str, dict | None]]:
     """Extract ALL message tuples (msg_id, from, text) from WhatsApp webhook payload.
     Status-only webhooks return empty list.
@@ -211,6 +215,10 @@ def extract_messages_from_payload(payload: dict) -> list[tuple[str, str, str, di
                 for msg in messages:
                     msg_id = msg.get("id", "")
                     from_num = msg.get("from", "")
+                    # Aviso de origen (Click to WhatsApp). Meta lo adjunta solo
+                    # al PRIMER mensaje: si no se guarda aca, se pierde.
+                    if msg.get("referral"):
+                        _AD_REFERRALS[msg_id or from_num] = msg["referral"]
                     text_body = msg.get("text", {}).get("body", "")
                     if text_body:
                         out.append((msg_id, from_num, text_body, None))
@@ -727,6 +735,48 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     except Exception as _mb_err:
         print(f"[webhook] menu bot error (non-fatal): {_mb_err}")
         db.rollback()
+
+    # Lead que llega desde un aviso: saludo + ficha de la propiedad del aviso.
+    # Va ANTES del bot y del agente: el cliente ya eligio una propiedad puntual,
+    # hacerle el cuestionario de "en que zona buscas" es hacerlo repetir.
+    _ref_raw = _AD_REFERRALS.pop(msg_id, None) or _AD_REFERRALS.pop(from_number, None)
+    if _ref_raw:
+        try:
+            from app.services import ad_referral
+            ref = ad_referral.extract_referral({"referral": _ref_raw})
+            if ref:
+                db.execute(text('UPDATE contacts SET source = :s, "updatedAt" = NOW() WHERE id = :i'),
+                           {"s": ("ad:%s" % ref.get("ad_id"))[:255], "i": contact["id"]})
+                db.commit()
+                _wa = get_whatsapp_config(db, company_id, _phone_number_id or None)
+                if _wa:
+                    _marca = db.execute(text("SELECT name FROM companies WHERE id = :c"),
+                                        {"c": company_id}).scalar() or ""
+                    saludo = ad_referral.welcome_text(ref, _marca)
+                    await send_whatsapp_message(from_number, saludo, _wa)
+                    save_message(db, contact["id"], saludo, True, company_id)
+
+                    prop = None
+                    if ad_referral.is_real_estate(db, company_id):
+                        prop = await ad_referral.match_property(db, company_id, ref)
+                    if prop:
+                        ficha = ad_referral.property_card(prop)
+                        for item in _parse_property_items(ficha):
+                            if item.get("photo"):
+                                await send_whatsapp_image(from_number, item["photo"], item["text"], _wa)
+                            else:
+                                await send_whatsapp_message(from_number, item["text"], _wa)
+                            save_message(db, contact["id"], item["text"], True, company_id)
+                        cierre = "¿Querés que te cuente más de esta o preferís ver otras opciones parecidas?"
+                    else:
+                        cierre = "Contame qué estás buscando y te paso las opciones que mejor encajen."
+                    await send_whatsapp_message(from_number, cierre, _wa)
+                    save_message(db, contact["id"], cierre, True, company_id)
+                    return {"ok": True, "ignored": False, "reason": "ad_referral",
+                            "ai_reply": saludo, "propiedad": (prop or {}).get("id")}
+        except Exception as e:
+            print(f"[webhook] ad referral: {e}")
+            db.rollback()
 
     # Ráfaga: una sola respuesta para todo el bloque de mensajes seguidos
     if await burst_superseded(db, int(contact["id"])):
