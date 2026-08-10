@@ -237,7 +237,7 @@ const Leads = () => {
                   draggable
                   onDragStart={() => setDragLead({ id: l.id, from: s.id })}
                   onDragEnd={() => setDragLead(null)}
-                  onClick={() => navigate('/conversations')}
+                  onClick={() => navigate('/contacts?lead=' + l.id)}
                   sx={{
                     p: 1.2, mb: 1, borderRadius: '9px', cursor: 'grab',
                     background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.06)',

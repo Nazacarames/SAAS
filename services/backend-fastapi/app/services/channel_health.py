@@ -33,8 +33,11 @@ def _check_channel(ch: dict, our_app: str) -> str:
     cfg = json.loads(ch["config_json"]) if isinstance(ch["config_json"], str) else (ch["config_json"] or {})
     try:
         with httpx.Client(timeout=20) as c:
-            dbg = c.get(f"{GRAPH}/debug_token", params={"input_token": token, "access_token": token})
-            data = dbg.json().get("data", {}) if dbg.status_code == 200 else {}
+            # Con el app token: los tokens de pagina (Instagram/Messenger) no se
+            # auto-inspeccionan y el chequeo los daba por vencidos, llenando el
+            # panel de alarmas falsas sobre canales sanos.
+            from app.api.v1.endpoints.channels_routes import _debug_token
+            data = _debug_token(c, token)
             if not data.get("is_valid"):
                 return "El token venció o fue revocado: reconectar el canal"
             exp = int(data.get("expires_at") or 0)

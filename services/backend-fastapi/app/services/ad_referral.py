@@ -52,7 +52,10 @@ def extract_referral(msg: dict) -> dict:
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    # espacios colapsados: "TUCUMAN AL 1500" y "TUCUMAN  al 1500" son la misma
+    # propiedad cargada dos veces, y sin esto se leen como dos distintas y el
+    # empate entre ambas descarta el match.
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
 
 
 _RUIDO = {"casa", "departamento", "depto", "ph", "local", "oficina", "terreno", "lote", "venta",
@@ -61,7 +64,44 @@ _RUIDO = {"casa", "departamento", "depto", "ph", "local", "oficina", "terreno", 
 
 
 def _tokens(s: str) -> set:
-    return {t for t in _norm(s).split() if len(t) > 2 and t not in _RUIDO}
+    salida = set()
+    for t in _norm(s).split():
+        if len(t) <= 2 or t in _RUIDO:
+            continue
+        salida.add(t)
+        # Las alturas no coinciden nunca exacto: el link de la web trae la real
+        # ("tucuman-1508") y en Tokko la cargan redondeada ("TUCUMAN AL 1500").
+        # Se agrega la centena para que igual se reconozcan.
+        if t.isdigit() and 3 <= len(t) <= 5:
+            salida.add("c" + t[:-2])
+    return salida
+
+
+_SEGMENTOS_GENERICOS = {
+    "inmueble", "inmuebles", "propiedad", "propiedades", "ficha", "fichas", "p",
+    "emprendimiento", "emprendimientos", "detalle", "ver", "es", "ar", "com",
+    "venta", "alquiler", "alquileres", "index", "web", "home", "listing",
+}
+
+
+def _slugs_de(texto: str) -> list:
+    """Direcciones escondidas en los links que pega el cliente.
+
+    El cliente manda el link de la web de la inmobiliaria
+    (dunod.com.ar/inmueble/tucuman-1508-04-05). El slug ES la direccion: sirve
+    para encontrar la propiedad aunque el link no sea de ficha.info.
+    """
+    salida = []
+    for url in re.findall(r"https?://[^\s<>\"']+", str(texto or "")):
+        camino = re.sub(r"[?#].*$", "", url.split("//", 1)[-1])
+        for seg in camino.split("/")[1:]:
+            seg = seg.strip()
+            if not seg or seg.lower() in _SEGMENTOS_GENERICOS or len(seg) < 4:
+                continue
+            limpio = re.sub(r"[-_+]+", " ", seg).strip()
+            if limpio and limpio not in salida:
+                salida.append(limpio)
+    return salida
 
 
 def is_real_estate(db: Session, company_id: int) -> bool:
@@ -93,19 +133,26 @@ async def match_property(db: Session, company_id: int, ref: dict) -> dict | None
     if not texto and not url:
         return None
 
-    try:
-        res = await execute_tool(tool_name="search_properties",
-                                 tool_args={"operation_type": "sale", "location": "", "price_max": 0},
-                                 company_id=company_id, db=db)
-        props = res.get("results") or []
-    except Exception as e:
-        log.warning("match_property company=%s: %s", company_id, str(e)[:120])
-        return None
+    # Venta Y alquiler: buscando solo en venta, un link de un depto en alquiler
+    # no encontraba nada y el cliente arrancaba de cero.
+    props, vistos = [], set()
+    for op in ("sale", "rent"):
+        try:
+            res = await execute_tool(tool_name="search_properties",
+                                     tool_args={"operation_type": op, "location": "", "price_max": 0},
+                                     company_id=company_id, db=db)
+        except Exception as e:
+            log.warning("match_property company=%s op=%s: %s", company_id, op, str(e)[:120])
+            continue
+        for p in (res.get("results") or []):
+            if p.get("id") not in vistos:
+                vistos.add(p.get("id"))
+                props.append(p)
     if not props:
         return None
 
     # 1) el link del aviso lleva a la ficha
-    m = re.search(r"/p/([A-Za-z0-9_-]{6,})", url)
+    m = re.search(r"/p/([A-Za-z0-9_-]{6,})", "%s %s" % (url, texto))
     if m:
         clave = m.group(1)
         for p in props:
@@ -116,7 +163,9 @@ async def match_property(db: Session, company_id: int, ref: dict) -> dict | None
     # Primero SOLO el titular: el cuerpo suele ser puro relleno comercial
     # ("Consultanos por este inmueble") y diluye el puntaje hasta hacerlo
     # fallar. Si el titular no alcanza, recien ahi se suma el cuerpo.
-    for fuente in (ref.get("titular", ""), texto):
+    fuentes = _slugs_de(texto) + _slugs_de(url)
+    fuentes += [ref.get("titular", ""), texto]
+    for fuente in fuentes:
         objetivo = _tokens(fuente)
         if len(objetivo) < 2:
             continue

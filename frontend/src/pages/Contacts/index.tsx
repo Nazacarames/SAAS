@@ -23,6 +23,7 @@ import {
 } from '@mui/material';
 import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon } from '@mui/icons-material';
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
 
@@ -135,6 +136,7 @@ const pipelinePhaseFromLead = (lead: Lead): { key: string; label: string; color:
 type UserOption = { id: number; name: string };
 
 const Leads = () => {
+  const [searchParams] = useSearchParams();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -184,11 +186,19 @@ const Leads = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterStatus]);
 
+  // Desde el Pipeline se llega con ?lead=<id>: se muestra ese lead solo, para
+  // no obligar a buscarlo entre todos.
+  const leadDestacado = Number(searchParams.get('lead') || 0);
+
   const filtered = useMemo(() => {
+    if (leadDestacado) {
+      const solo = leads.filter((l) => Number(l.id) === leadDestacado);
+      if (solo.length) return solo;
+    }
     const q = search.trim().toLowerCase();
     if (!q) return leads;
     return leads.filter((l) => [l.name || '', l.number || '', l.email || '', l.source || ''].join(' ').toLowerCase().includes(q));
-  }, [leads, search]);
+  }, [leads, search, leadDestacado]);
 
   const stats = useMemo(() => {
     const total = leads.length;
