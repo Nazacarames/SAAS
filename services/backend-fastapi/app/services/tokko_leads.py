@@ -176,6 +176,14 @@ def maybe_sync_qualified_lead(db: Session, company_id: int, contact_id: int) -> 
         if not contact:
             return {"ok": False, "reason": "not_found"}
 
+        # Numeros de prueba: nunca salen al CRM del cliente. Una prueba interna
+        # que termina como consulta en Tokko no se puede borrar despues (el
+        # endpoint webcontact solo acepta POST), asi que se frena antes.
+        _num = "".join(c for c in str(contact["number"] or "") if c.isdigit())
+        if _num.startswith(("54900001", "54900007", "5490000")) or _num.startswith(("888000", "999000")):
+            log.info("tokko: numero de prueba, no se sincroniza (%s)", _num)
+            return {"ok": False, "reason": "numero_de_prueba"}
+
         min_score = _min_score(db, company_id)
         if not is_qualified(dict(contact), min_score):
             return {"ok": False, "reason": "not_qualified", "score": contact["lead_score"], "min": min_score}

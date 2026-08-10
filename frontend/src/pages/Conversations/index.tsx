@@ -23,7 +23,7 @@ import {
   Menu,
   Tooltip
 } from '@mui/material';
-import { Search as SearchIcon, Send as SendIcon, Refresh as RefreshIcon, TextSnippet as TemplateIcon } from '@mui/icons-material';
+import { ArrowBack as ArrowBackIcon, Search as SearchIcon, Send as SendIcon, Refresh as RefreshIcon, TextSnippet as TemplateIcon } from '@mui/icons-material';
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../services/api';
@@ -560,7 +560,7 @@ const Conversations = () => {
   };
 
   return (
-    <Box sx={{ height: 'calc(100vh - 140px)' }}>
+    <Box sx={{ height: { xs: 'calc(100dvh - 118px)', md: 'calc(100dvh - 140px)' } }}>
       <Paper
         sx={{
           height: '100%',
@@ -710,11 +710,20 @@ const Conversations = () => {
                   alignItems: 'center'
                 }}
               >
-                <Stack direction='row' spacing={1.2} alignItems='center'>
-                  <Avatar sx={{ bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020' }}>
+                <Stack direction='row' spacing={1.2} alignItems='center' sx={{ minWidth: 0 }}>
+                  {/* volver a la lista: en el celular la conversacion ocupa
+                      toda la pantalla y no habia forma de salir */}
+                  <IconButton
+                    onClick={() => setSelectedConv(null)}
+                    aria-label='Volver a la lista'
+                    sx={{ display: { xs: 'inline-flex', md: 'none' }, color: '#E8E6E1', p: 0.5 }}
+                  >
+                    <ArrowBackIcon fontSize='small' />
+                  </IconButton>
+                  <Avatar sx={{ bgcolor: 'rgba(232,160,32,0.14)', color: '#E8A020', display: { xs: 'none', sm: 'flex' } }}>
                     {(selectedConv.name || '?').slice(0, 1).toUpperCase()}
                   </Avatar>
-                  <Box>
+                  <Box sx={{ minWidth: 0 }}>
                     <Typography variant='body2' sx={{ fontWeight: 600, color: '#E8E6E1' }}>
                       {selectedConv.name}
                     </Typography>
@@ -724,6 +733,19 @@ const Conversations = () => {
                   </Box>
                 </Stack>
                 <Stack direction='row' spacing={0.6} alignItems='center'>
+                  {/* En el celular el panel lateral no entra: el interruptor
+                      del bot viaja al header para no perder el control */}
+                  <Stack direction='row' spacing={0.4} alignItems='center' sx={{ display: { xs: 'flex', lg: 'none' } }}>
+                    <Typography variant='caption' sx={{ color: isBotEnabled ? '#7A7872' : '#E8A020', fontSize: '0.68rem' }}>
+                      {isBotEnabled ? 'Auto' : 'Humano'}
+                    </Typography>
+                    <Switch
+                      size='small'
+                      checked={isBotEnabled}
+                      disabled={savingHandoff || (!latestTicketId && !selectedConv?.contactId)}
+                      onChange={(_e, checked) => toggleAutomation(checked)}
+                    />
+                  </Stack>
                   {isDerived && (
                     <Chip
                       size='small'

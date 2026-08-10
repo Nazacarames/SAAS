@@ -63,7 +63,7 @@ const SectionLabel = ({ children }: { children: React.ReactNode }) => (
   </Typography>
 );
 
-const Sidebar = () => {
+const Sidebar = ({ mobileOpen = false, onClose }: { mobileOpen?: boolean; onClose?: () => void }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { handleLogout, user } = useAuth();
@@ -84,7 +84,7 @@ const Sidebar = () => {
       <ListItem disablePadding>
         <ListItemButton
           selected={active}
-          onClick={() => navigate(item.path)}
+          onClick={() => { navigate(item.path); onClose?.(); }}
           sx={{ overflow: 'visible' }}
         >
           {active && (
@@ -210,6 +210,21 @@ const Sidebar = () => {
 
   return (
     <Box component="nav" sx={{ width: { sm: drawerWidth }, flexShrink: { sm: 0 } }}>
+      {/* Celular: cajón temporal que abre el botón del header. Antes el menú
+          estaba en display:none y no habia forma de navegar desde el telefono. */}
+      <Drawer
+        variant="temporary"
+        open={mobileOpen}
+        onClose={onClose}
+        ModalProps={{ keepMounted: true }}
+        sx={{
+          display: { xs: 'block', sm: 'none' },
+          '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth, overflow: 'auto' }
+        }}
+      >
+        {drawer}
+      </Drawer>
+
       <Drawer
         variant="permanent"
         sx={{

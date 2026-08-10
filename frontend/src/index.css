@@ -73,3 +73,40 @@ code,.mono{font-family:var(--font-mono)}
 
 .Toastify__toast{font-family:var(--font-body) !important;font-size:13px !important;border-radius:10px !important;background:var(--surface-2) !important;color:var(--text) !important;border:1px solid var(--border-strong) !important;box-shadow:0 16px 40px rgba(0,0,0,0.5) !important}
 .Toastify__progress-bar{background:var(--amber) !important}
+
+/* ── Celular ──────────────────────────────────────────────────────────
+   El panel se diseñó para escritorio: en vertical las tablas empujaban la
+   pantalla de costado, los diálogos quedaban cortados y iOS hacía zoom solo
+   al tocar un campo, descolocando todo. */
+@media (max-width: 600px){
+  /* nada empuja la pantalla en horizontal */
+  html, body, #root{max-width:100%;overflow-x:hidden}
+
+  /* iOS hace zoom si la fuente del campo baja de 16px */
+  input, textarea, select, .MuiInputBase-input{font-size:16px !important}
+
+  /* las tablas scrollean solas, sin arrastrar la página */
+  .MuiTableContainer-root{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .MuiTable-root{min-width:520px}
+  .MuiTableCell-root{padding:8px 10px !important;font-size:0.8rem !important;white-space:nowrap}
+
+  /* los diálogos ocupan la pantalla: en un celular un modal chico
+     no deja ver ni completar el formulario */
+  .MuiDialog-paper{margin:0 !important;width:100% !important;max-width:100% !important;
+                   max-height:100dvh !important;height:100dvh !important;border-radius:0 !important}
+  .MuiDialogContent-root{padding:16px !important}
+
+  /* area tactil: 44px es el minimo comodo con el pulgar */
+  .MuiIconButton-root{min-width:40px;min-height:40px}
+  .MuiButton-root{min-height:40px}
+
+  /* el menu lateral por encima de todo cuando se abre */
+  .MuiDrawer-root .MuiDrawer-paper{max-width:86vw}
+
+  /* titulos que no rompan la grilla */
+  h1,h2,.MuiTypography-h4{font-size:1.4rem !important}
+  .MuiTypography-h5{font-size:1.15rem !important}
+
+  /* los avisos no tapan la pantalla entera */
+  .Toastify__toast-container{width:calc(100vw - 16px) !important;left:8px !important;right:8px !important;bottom:8px !important}
+}
