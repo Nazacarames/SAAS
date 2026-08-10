@@ -73,6 +73,17 @@ def is_real_estate(db: Session, company_id: int) -> bool:
         return False
 
 
+async def match_by_text(db: Session, company_id: int, texto: str) -> dict | None:
+    """Propiedad que nombra un texto suelto (el primer mensaje del cliente).
+
+    Los avisos de Click to WhatsApp abren el chat con un mensaje ya escrito que
+    nombra la propiedad ("Hola, me interesa Mendoza al 300"). Ese texto es la
+    unica pista fiable: el bloque referral de Meta no siempre llega, sobre todo
+    cuando el numero se atiende tambien desde el celular.
+    """
+    return await match_property(db, company_id, {"titular": texto, "cuerpo": "", "url": ""})
+
+
 async def match_property(db: Session, company_id: int, ref: dict) -> dict | None:
     """Propiedad del aviso, o None si no se puede afirmar cuál es."""
     from app.services.conversation_orchestrator import execute_tool
@@ -116,14 +127,23 @@ async def match_property(db: Session, company_id: int, ref: dict) -> dict | None
             cand = _tokens(p.get("title") or "")
             if not cand:
                 continue
+            if len(cand) < 2:
+                continue  # un titulo de una sola palabra matchea con cualquier cosa
             comunes = objetivo & cand
             if comunes:
-                puntajes.append((len(comunes) / len(objetivo), p))
+                # Se mide cuanto del TITULO aparece en el texto, no al reves:
+                # normalizando por el largo del mensaje, un "Hola! Me interesa X,
+                # quiero mas informacion" diluye el puntaje y nunca matchea.
+                puntajes.append((len(comunes) / len(cand), p))
         if not puntajes:
             continue
         puntajes.sort(key=lambda x: x[0], reverse=True)
         mejor, prop = puntajes[0]
-        segundo = puntajes[1][0] if len(puntajes) > 1 else 0.0
+        # El margen se mide contra la mejor candidata con OTRO titulo: la misma
+        # propiedad suele estar cargada dos veces en la cartera y ese empate
+        # consigo misma no es ambiguedad, es un duplicado.
+        _t0 = _norm(prop.get("title") or "")
+        segundo = next((s for s, q in puntajes[1:] if _norm(q.get("title") or "") != _t0), 0.0)
         # Sin margen claro no se arriesga: mandar la propiedad equivocada es
         # peor que no mandar ninguna y preguntar. Con varias unidades en la
         # misma direccion (un edificio) el empate es real y hay que preguntar.
@@ -133,12 +153,17 @@ async def match_property(db: Session, company_id: int, ref: dict) -> dict | None
     return None
 
 
-def welcome_text(ref: dict, marca: str = "") -> str:
+def welcome_text(ref: dict, marca: str = "", prop: dict | None = None) -> str:
+    """Saludo. Solo se menciona el aviso cuando Meta lo confirmo: si la
+    propiedad se dedujo del texto del cliente, afirmar 'venis por el aviso'
+    seria inventar por donde entro."""
     quien = (" de %s" % marca) if marca else ""
-    titular = ref.get("titular") or ""
+    titular = (ref or {}).get("titular") or ""
     if titular:
         return ("¡Hola! Gracias por escribirnos%s 👋 Vi que venís por el aviso de *%s*."
                 % (quien, titular[:80]))
+    if prop:
+        return "¡Hola! Gracias por escribirnos%s 👋 Te paso los datos de la propiedad que consultaste." % quien
     return "¡Hola! Gracias por escribirnos%s 👋 Vi que venís por uno de nuestros avisos." % quien
 
 

@@ -749,25 +749,41 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     # Va ANTES del bot y del agente: el cliente ya eligio una propiedad puntual,
     # hacerle el cuestionario de "en que zona buscas" es hacerlo repetir.
     _ref_raw = _AD_REFERRALS.pop(msg_id, None) or _AD_REFERRALS.pop(from_number, None)
-    if _ref_raw:
+    # Se dispara con el PRIMER mensaje del contacto, traiga o no el bloque de
+    # Meta. El referral no siempre llega (sobre todo si el numero se atiende
+    # tambien desde el celular), pero el aviso abre el chat con un mensaje ya
+    # escrito que nombra la propiedad: ese texto alcanza para reconocerla.
+    _es_primero = False
+    try:
+        _es_primero = int(db.execute(
+            text('SELECT COUNT(*) FROM messages WHERE "contactId" = :i AND "fromMe" = false'),
+            {"i": contact["id"]}).scalar() or 0) <= len(new_messages)
+    except Exception:
+        db.rollback()
+    if _ref_raw or _es_primero:
         try:
             from app.services import ad_referral
-            ref = ad_referral.extract_referral({"referral": _ref_raw})
-            if ref:
-                db.execute(text('UPDATE contacts SET source = :s, "updatedAt" = NOW() WHERE id = :i'),
-                           {"s": ("ad:%s" % ref.get("ad_id"))[:255], "i": contact["id"]})
-                db.commit()
+            ref = ad_referral.extract_referral({"referral": _ref_raw}) if _ref_raw else {}
+            _inmo = ad_referral.is_real_estate(db, company_id)
+            prop = None
+            if _inmo:
+                prop = (await ad_referral.match_property(db, company_id, ref) if ref
+                        else await ad_referral.match_by_text(db, company_id, message_text))
+            # Sin aviso de Meta y sin propiedad reconocida no se interrumpe:
+            # es una consulta normal y la atiende el agente como siempre.
+            if ref or prop:
+                if ref.get("ad_id"):
+                    db.execute(text('UPDATE contacts SET source = :s, "updatedAt" = NOW() WHERE id = :i'),
+                               {"s": ("ad:%s" % ref["ad_id"])[:255], "i": contact["id"]})
+                    db.commit()
                 _wa = get_whatsapp_config(db, company_id, _phone_number_id or None)
                 if _wa:
                     _marca = db.execute(text("SELECT name FROM companies WHERE id = :c"),
                                         {"c": company_id}).scalar() or ""
-                    saludo = ad_referral.welcome_text(ref, _marca)
+                    saludo = ad_referral.welcome_text(ref, _marca, prop)
                     await send_whatsapp_message(from_number, saludo, _wa)
                     save_message(db, contact["id"], saludo, True, company_id)
 
-                    prop = None
-                    if ad_referral.is_real_estate(db, company_id):
-                        prop = await ad_referral.match_property(db, company_id, ref)
                     if prop:
                         ficha = ad_referral.property_card(prop)
                         for item in _parse_property_items(ficha):
