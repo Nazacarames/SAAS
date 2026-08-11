@@ -605,8 +605,10 @@ async def oauth_discover(
 # mensajes entrantes: el canal se ve "conectado" y no llega nada. Es la
 # causa #1 de "conecté el canal y no funciona".
 
+# leadgen: sin este campo Meta nunca manda los leads de formulario y la pagina
+# se ve conectada igual. Era la razon por la que no entraba ni uno.
 _PAGE_WEBHOOK_FIELDS = ["messages", "messaging_postbacks", "messaging_optins",
-                        "message_reactions", "messaging_referrals", "feed"]
+                        "message_reactions", "messaging_referrals", "feed", "leadgen"]
 
 
 def _debug_token(client, token: str) -> dict:
@@ -737,6 +739,19 @@ def _subscribe_channel_webhooks(channel_type: str, external_id: str, token: str,
             r = client.post(f"{GRAPH}/{page_id}/subscribed_apps",
                             params={"subscribed_fields": ",".join(fields)},
                             headers={"Authorization": f"Bearer {token}"})
+            if r.status_code != 200 and "leadgen" in fields:
+                # Meta rechaza la llamada ENTERA si falta permiso para un solo
+                # campo. Sin este reintento, un token sin leads_retrieval dejaba
+                # la página sin webhooks de mensajería: peor que quedarse sin
+                # los leads de formulario.
+                sin_leadgen = [f for f in fields if f != "leadgen"]
+                r2 = client.post(f"{GRAPH}/{page_id}/subscribed_apps",
+                                 params={"subscribed_fields": ",".join(sin_leadgen)},
+                                 headers={"Authorization": f"Bearer {token}"})
+                if r2.status_code == 200:
+                    return True, ("los mensajes van a llegar bien, pero los leads de formulario no: "
+                                  "al token le falta el permiso leads_retrieval. Reconectá la página "
+                                  "para habilitarlos.")
             return (r.status_code == 200), ("" if r.status_code == 200 else r.text[:150])
     except Exception as e:
         return False, str(e)[:150]

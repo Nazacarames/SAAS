@@ -108,6 +108,7 @@ def get_board(
             """SELECT c.id, c.name, c.number, c.email, c.source, c.lead_score,
                       c.progress_tags, c.stage_id,
                       c."leadStatus" AS lead_status, c.channel_id,
+                      c.ad_id, c.ad_name, c.campaign_name,
                       ch.channel_type,
                       (SELECT m.body FROM messages m
                        JOIN tickets t ON t.id = m."ticketId"
@@ -135,6 +136,9 @@ def get_board(
             "email": lead["email"],
             "source": lead["source"],
             "channel_type": lead["channel_type"],
+            "campaign_name": lead["campaign_name"],
+            "ad_name": lead["ad_name"],
+            "ad_id": lead["ad_id"],
             "lead_score": lead["lead_score"],
             "last_message": lead["last_message"],
             "updated_at": lead["updated_at"].isoformat() if lead["updated_at"] else None,
@@ -284,6 +288,19 @@ def conversions_stats(
     """Ventas cerradas y estado del aviso al pixel: lo que muestra el panel."""
     from app.services import meta_pixel
     return meta_pixel.stats(db, payload.get("companyId"), max(1, min(dias, 365)))
+
+
+# ── GET /pipeline/campanas ────────────────────────────────────────
+@router.get("/campanas")
+def campanas(
+    dias: int = 30,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Leads y ventas por campaña: que pauta trae gente que compra."""
+    from app.services import ad_attribution
+    return {"ok": True, "dias": dias,
+            "campanas": ad_attribution.por_campana(db, payload.get("companyId"), max(1, min(dias, 365)))}
 
 
 # ── PUT /pipeline/leads/{contact_id}/stage ────────────────────────

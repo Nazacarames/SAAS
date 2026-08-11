@@ -5,7 +5,7 @@ import {
   CheckCircle as CheckCircleIcon, TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
 import { useQueryClient } from '@tanstack/react-query';
-import { useConversations, useContacts, useChannels, useFunnelStats, useConversions } from '../../hooks/useApi';
+import { useConversations, useContacts, useChannels, useFunnelStats, useConversions, useCampanas } from '../../hooks/useApi';
 import { socketConnection } from '../../services/socket';
 
 function useCountUp(target: number, duration = 900) {
@@ -95,6 +95,8 @@ const Dashboard = () => {
   const { data: funnel } = useFunnelStats();
   const { data: ventasRaw } = useConversions();
   const ventas = (ventasRaw as any) || null;
+  const { data: campanasRaw } = useCampanas();
+  const campanas: any[] = (campanasRaw as any)?.campanas || [];
 
   const tickets    = Array.isArray(ticketsRaw) ? ticketsRaw : Array.isArray((ticketsRaw as any)?.data) ? (ticketsRaw as any).data : [];
   const contacts   = Array.isArray(contactsRaw) ? contactsRaw : Array.isArray((contactsRaw as any)?.data) ? (contactsRaw as any).data : [];
@@ -108,6 +110,7 @@ const Dashboard = () => {
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
       queryClient.invalidateQueries({ queryKey: ['funnel-stats'] });
       queryClient.invalidateQueries({ queryKey: ['conversions'] });
+      queryClient.invalidateQueries({ queryKey: ['campanas'] });
     };
     if (socket) { socket.on('newMessage', refresh); socket.on('ticketUpdate', refresh); }
     return () => { if (socket) { socket.off('newMessage', refresh); socket.off('ticketUpdate', refresh); } };
@@ -234,6 +237,36 @@ const Dashboard = () => {
           </Typography>
         )}
       </Paper>
+
+      {/* De que pauta viene cada lead, y cual de esas pautas termina en venta */}
+      {campanas.length > 0 && (
+        <Paper sx={{ p: 2.5, mb: 3 }} className="anim-fade-up anim-fade-up-5">
+          <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '0.95rem', color: '#E8EBF2' }}>
+            Leads por campaña
+          </Typography>
+          <Typography sx={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.35)', mt: 0.25, mb: 2 }}>
+            últimos 30 días · ordenado por ventas cerradas
+          </Typography>
+          <Stack direction="row" sx={{ pb: 0.75, borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+            <Typography sx={{ flexGrow: 1, fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 1 }}>Campaña</Typography>
+            {['Leads', 'Ventas', 'Monto'].map((h) => (
+              <Typography key={h} sx={{ width: h === 'Monto' ? 110 : 60, textAlign: 'right', fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 1 }}>{h}</Typography>
+            ))}
+          </Stack>
+          {campanas.map((c: any) => (
+            <Stack key={c.campana} direction="row" alignItems="center" sx={{ py: 1, borderBottom: '1px solid rgba(255,255,255,0.04)', '&:last-child': { borderBottom: 0 } }}>
+              <Typography title={c.campana} sx={{ flexGrow: 1, minWidth: 0, fontSize: '0.8rem', color: c.campana === 'Sin pauta identificada' ? 'rgba(255,255,255,0.35)' : '#E8EBF2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pr: 1 }}>
+                {c.campana}
+              </Typography>
+              <Typography sx={{ width: 60, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: 'rgba(255,255,255,0.7)' }}>{c.leads}</Typography>
+              <Typography sx={{ width: 60, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: c.ventas > 0 ? '#34D399' : 'rgba(255,255,255,0.25)' }}>{c.ventas}</Typography>
+              <Typography sx={{ width: 110, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: c.monto > 0 ? '#34D399' : 'rgba(255,255,255,0.25)' }}>
+                {c.monto > 0 ? c.monto.toLocaleString('es-AR', { maximumFractionDigits: 0 }) : '—'}
+              </Typography>
+            </Stack>
+          ))}
+        </Paper>
+      )}
 
       <Grid container spacing={2}>
         <Grid item xs={12} md={6}>

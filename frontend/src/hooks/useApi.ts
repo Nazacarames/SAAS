@@ -53,6 +53,16 @@ export const useConversions = () => {
     });
 };
 
+export const useCampanas = () => {
+    return useQuery({
+        queryKey: ['campanas'],
+        queryFn: async () => {
+            const { data } = await api.get('/pipeline/campanas');
+            return data;
+        },
+    });
+};
+
 export const useUsers = () => {
     return useQuery({
         queryKey: ['users'],

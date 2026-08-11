@@ -773,9 +773,10 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             # es una consulta normal y la atiende el agente como siempre.
             if ref or prop:
                 if ref.get("ad_id"):
-                    db.execute(text('UPDATE contacts SET source = :s, "updatedAt" = NOW() WHERE id = :i'),
-                               {"s": ("ad:%s" % ref["ad_id"])[:255], "i": contact["id"]})
-                    db.commit()
+                    # El aviso va en sus propias columnas: antes se metia en
+                    # `source` y pisaba el canal por el que entro el lead.
+                    from app.services import ad_attribution
+                    ad_attribution.save(db, company_id, int(contact["id"]), ref["ad_id"])
                 _wa = get_whatsapp_config(db, company_id, _phone_number_id or None)
                 if _wa:
                     _marca = db.execute(text("SELECT name FROM companies WHERE id = :c"),

@@ -204,6 +204,20 @@ async def _handle_whatsapp_entry(db: Session, entry: dict, raw_body: bytes, req:
 
 
 # ── Instagram / Messenger: unified inbound ────────────────────────
+def _referrals_de(entry: dict) -> dict:
+    """Id del aviso por remitente. Meta lo manda pegado al primer mensaje (o en
+    un evento `referral` suelto) y no vuelve a mandarlo nunca más, así que hay
+    que leerlo del payload crudo: el adaptador solo devuelve texto y adjunto."""
+    salida: dict[str, str] = {}
+    for m in (entry.get("messaging") or []):
+        ref = m.get("referral") or (m.get("message") or {}).get("referral") or {}
+        ad_id = str((ref or {}).get("ad_id") or (ref or {}).get("source_id") or "")
+        remitente = str(((m.get("sender") or {}).get("id") or ""))
+        if ad_id and remitente:
+            salida[remitente] = ad_id
+    return salida
+
+
 async def _handle_channel_entry(db: Session, channel_type: str, entry: dict):
     adapter = get_adapter(channel_type)
     if not adapter:
@@ -213,10 +227,12 @@ async def _handle_channel_entry(db: Session, channel_type: str, entry: dict):
     if not messages:
         return {"channel": channel_type, "ignored": True, "reason": "no_messages"}
 
+    avisos = _referrals_de(entry)
+
     processed = []
     for inbound in messages:
         try:
-            result = await _process_inbound(db, channel_type, inbound, adapter)
+            result = await _process_inbound(db, channel_type, inbound, adapter, avisos)
             processed.append(result)
         except Exception as e:
             log.error("[%s] inbound error: %s\n%s", channel_type, e, traceback.format_exc())
@@ -272,7 +288,8 @@ async def _refresh_display_name(db, adapter, channel: dict, contact: dict, sende
     return contact
 
 
-async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessage, adapter):
+async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessage, adapter,
+                           avisos: dict | None = None):
     channel = resolve_channel(db, channel_type, inbound.external_id)
     if not channel or channel.get("status") != "active":
         return {"ignored": True, "reason": "no_active_channel"}
@@ -290,6 +307,16 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     contact = await _resolve_contact(db, channel, inbound, adapter)
     if not contact:
         return {"ignored": True, "reason": "contact_resolve_failed"}
+
+    # De qué aviso vino, si vino de uno
+    _ad = (avisos or {}).get(str(getattr(inbound, "sender_id", "") or ""), "")
+    if _ad:
+        try:
+            from app.services import ad_attribution
+            ad_attribution.save(db, company_id, int(contact["id"]), _ad)
+        except Exception as e:
+            log.warning("atribucion: %s", str(e)[:120])
+            db.rollback()
 
     # Instagram y Messenger también reparten por round-robin: el asesor ve el
     # lead en su usuario apenas entra, sin importar por dónde llegó
@@ -604,16 +631,21 @@ async def _handle_comment(db: Session, channel_type: str, entry: dict, change: d
         return {"channel": f"{channel_type}_comment", "error": str(e)[:200]}
 
 
-# ── Lead Ads: reenvía al procesador por-empresa existente ─────────
-async def _handle_leadgen(db: Session, entry: dict, change: dict, raw_body: bytes, req: Request):
-    """La suscripción del objeto 'page' apunta a este webhook unificado; los
-    leadgen se reenvían (mismo body + firma) al endpoint por-empresa que ya
-    hace el procesamiento real. Página→empresa vía metaLeadAdsPageId."""
-    page_id = str(entry.get("id", ""))
-    company_id = None
+# ── Lead Ads: leads de formulario ─────────────────────────────────
+def _empresa_de_pagina(db: Session, page_id: str) -> int | None:
+    """La página que manda el formulario es la misma que ya está conectada como
+    canal de Messenger/Instagram. Antes esto dependía de un ajuste aparte
+    (metaLeadAdsPageId) que casi nadie tenía cargado, así que los leads de
+    formulario se descartaban por "no company mapped"."""
+    fila = db.execute(
+        text("SELECT company_id FROM channels WHERE external_id = :p ORDER BY id DESC LIMIT 1"),
+        {"p": page_id},
+    ).scalar()
+    if fila:
+        return int(fila)
+    # Respaldo: instalaciones viejas que sí tenían el ajuste cargado.
     try:
-        rows = db.execute(text("SELECT company_id, settings_json FROM company_runtime_settings")).mappings().all()
-        for row in rows:
+        for row in db.execute(text("SELECT company_id, settings_json FROM company_runtime_settings")).mappings():
             s = row["settings_json"]
             if isinstance(s, str):
                 try:
@@ -621,24 +653,28 @@ async def _handle_leadgen(db: Session, entry: dict, change: dict, raw_body: byte
                 except Exception:
                     continue
             if str((s or {}).get("metaLeadAdsPageId", "")).strip() == page_id:
-                company_id = int(row["company_id"])
-                break
+                return int(row["company_id"])
     except Exception as e:
         log.warning("leadgen company lookup failed: %s", e)
+    return None
+
+
+async def _handle_leadgen(db: Session, entry: dict, change: dict, raw_body: bytes, req: Request):
+    """Lead de un formulario de Meta. La firma del pedido ya se validó en el
+    webhook unificado, así que acá se procesa directo."""
+    page_id = str(entry.get("id", ""))
+    company_id = _empresa_de_pagina(db, page_id)
     if not company_id:
         log.info("leadgen event from page %s: no company mapped", page_id)
         return {"channel": "leadgen", "ignored": True, "reason": "no_company_for_page"}
 
-    sig = req.headers.get("x-hub-signature-256", "")
+    value = change.get("value", {}) or {}
+    leadgen_id = str(value.get("leadgen_id") or (value.get("lead") or {}).get("id", "")).strip()
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"http://127.0.0.1:4010/api/ai/meta-leads/webhook/{company_id}",
-                content=raw_body,
-                headers={"Content-Type": "application/json", "x-hub-signature-256": sig},
-                timeout=30,
-            )
-        return {"channel": "leadgen", "forwarded_to": company_id, "status": resp.status_code}
+        from app.services import lead_ads
+        res = lead_ads.ingest(db, company_id, page_id, leadgen_id)
+        return {"channel": "leadgen", "company_id": company_id, **res}
     except Exception as e:
-        log.error("leadgen forward failed company=%s: %s", company_id, str(e)[:150])
-        return {"channel": "leadgen", "error": str(e)[:150]}
+        log.error("leadgen company=%s: %s", company_id, str(e)[:200])
+        db.rollback()
+        return {"channel": "leadgen", "error": str(e)[:200]}

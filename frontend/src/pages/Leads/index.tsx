@@ -24,6 +24,9 @@ interface Lead {
   channel_type?: string;
   lead_score?: number;
   last_message?: string;
+  campaign_name?: string;
+  ad_name?: string;
+  ad_id?: string;
 }
 interface Stage {
   id: number;
@@ -121,7 +124,7 @@ const Leads = () => {
       });
       const c = data?.conversion;
       if (c?.status === 'enviado') toast.success('Venta registrada y avisada al píxel de Meta');
-      else if (c?.status === 'sin_pixel') toast.info('Venta registrada. Falta configurar el píxel en Integraciones');
+      else if (c?.status === 'sin_pixel') toast.info('Venta registrada. Falta configurar el píxel en Canales');
       else if (c?.status === 'error') toast.warning('Venta registrada, pero Meta rechazó el aviso: ' + (c.detail || ''));
     } catch {
       toast.error('No se pudo mover el lead');
@@ -299,6 +302,14 @@ const Leads = () => {
                       <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, color: '#E8EBF2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.name}</Typography>
                       {l.last_message && (
                         <Typography sx={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.last_message}</Typography>
+                      )}
+                      {(l.campaign_name || l.ad_name) && (
+                        <Typography
+                          title={[l.campaign_name, l.ad_name].filter(Boolean).join(' · ')}
+                          sx={{ fontSize: '0.62rem', color: '#60A5FA', mt: 0.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                        >
+                          ◈ {l.campaign_name || l.ad_name}
+                        </Typography>
                       )}
                       <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.4 }}>
                         {l.number && <Typography sx={{ fontSize: '0.62rem', color: 'rgba(255,255,255,0.3)', fontFamily: '"JetBrains Mono", monospace' }}>{l.number}</Typography>}

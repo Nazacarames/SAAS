@@ -720,148 +720,27 @@ async def meta_leads_webhook(
         print("[meta-webhook] WARN: no company_id in URL or body, dropping events")
         return {"ok": True, "ingested": False, "events": 0, "results": [], "reason": "no_company"}
 
-    import httpx as _httpx
     company_id = int(resolved_company_id)
     results = []
     ingested_count = 0
 
+    # La ingesta vive en app/services/lead_ads.py: este endpoint por-empresa y
+    # el webhook unificado tienen que hacer exactamente lo mismo con el lead.
+    from app.services import lead_ads
     if isinstance(body, dict) and body.get("object") == "page" and isinstance(body.get("entry"), list):
         for entry in body["entry"]:
             page_id = str(entry.get("id", "")).strip()
             for change in entry.get("changes", []):
                 if change.get("field") != "leadgen":
                     continue
-                value = change.get("value", {})
-                leadgen_id = str(value.get("leadgen_id") or value.get("lead", {}).get("id", "")).strip()
+                value = change.get("value", {}) or {}
+                leadgen_id = str(value.get("leadgen_id") or (value.get("lead") or {}).get("id", "")).strip()
                 if not leadgen_id:
                     continue
-
-                replay_key = f"{company_id}:{leadgen_id}"
-                try:
-                    db.execute(text("INSERT INTO meta_lead_replay_guard (replay_key) VALUES (:k)"), {"k": replay_key})
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    results.append({"leadgen_id": leadgen_id, "ok": True, "ingested": False, "reason": "duplicate"})
-                    continue
-
-                token_row = db.execute(
-                    text("SELECT access_token FROM meta_connections WHERE company_id = :cid AND page_id = :pid ORDER BY id DESC LIMIT 1"),
-                    {"cid": company_id, "pid": page_id},
-                ).mappings().first()
-                if not token_row:
-                    print(f"[meta-webhook] no page token for company={company_id} page={page_id}")
-                    results.append({"leadgen_id": leadgen_id, "ok": False, "reason": "no_page_token"})
-                    continue
-                page_token = token_row["access_token"]
-
-                lead_data = None
-                try:
-                    resp = _httpx.get(
-                        f"https://graph.facebook.com/{GRAPH_API_VERSION}/{leadgen_id}",
-                        params={
-                            "access_token": page_token,
-                            "fields": "field_data,form_id,ad_id,campaign_id,adset_id,created_time",
-                        },
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        lead_data = resp.json()
-                    else:
-                        print(f"[meta-webhook] graph {leadgen_id} -> {resp.status_code} {resp.text[:200]}")
-                except Exception as e:
-                    print(f"[meta-webhook] graph error {leadgen_id}: {e}")
-
-                if not lead_data:
-                    results.append({"leadgen_id": leadgen_id, "ok": False, "reason": "graph_no_data"})
-                    continue
-
-                fields = {}
-                for f in lead_data.get("field_data", []):
-                    fname = str(f.get("name", "")).lower().strip()
-                    vals = f.get("values") or []
-                    if fname and vals:
-                        fields[fname] = vals[0]
-
-                contact_phone = str(
-                    fields.get("phone_number") or fields.get("phone") or fields.get("telefono") or ""
-                ).strip()
-                contact_email = str(fields.get("email") or fields.get("correo") or "").strip()
-                contact_name = str(
-                    fields.get("full_name")
-                    or fields.get("name")
-                    or fields.get("nombre")
-                    or f"{fields.get('first_name', '')} {fields.get('last_name', '')}".strip()
-                ).strip()
-
-                db.execute(
-                    text(
-                        """INSERT INTO meta_lead_events
-                        (company_id, page_id, form_id, leadgen_id, ad_id, campaign_id, adset_id,
-                         form_fields_json, payload_json, contact_phone, contact_email, contact_name)
-                        VALUES (:cid, :pid, :fid, :lid, :aid, :camp, :adset, :ff, :pl, :cp, :ce, :cn)"""
-                    ),
-                    {
-                        "cid": company_id,
-                        "pid": page_id,
-                        "fid": str(lead_data.get("form_id") or value.get("form_id") or "")[:120],
-                        "lid": leadgen_id,
-                        "aid": str(lead_data.get("ad_id") or value.get("ad_id") or "")[:120],
-                        "camp": str(lead_data.get("campaign_id") or value.get("campaign_id") or "")[:120],
-                        "adset": str(lead_data.get("adset_id") or "")[:120],
-                        "ff": json.dumps(fields, ensure_ascii=False),
-                        "pl": json.dumps(lead_data, ensure_ascii=False),
-                        "cp": contact_phone[:60],
-                        "ce": contact_email[:160],
-                        "cn": (contact_name or "Lead Meta")[:180],
-                    },
-                )
-
-                if contact_phone or contact_email:
-                    existing = None
-                    if contact_phone:
-                        clean_phone = re.sub(r"\D", "", contact_phone)
-                        existing = db.execute(
-                            text(
-                                r"""SELECT id FROM contacts
-                                WHERE "companyId" = :cid
-                                AND REGEXP_REPLACE(COALESCE(number,''), '\D', '', 'g') = :phone
-                                LIMIT 1"""
-                            ),
-                            {"cid": company_id, "phone": clean_phone},
-                        ).mappings().first()
-                    if not existing and contact_email:
-                        existing = db.execute(
-                            text(
-                                'SELECT id FROM contacts WHERE "companyId" = :cid AND LOWER(COALESCE(email,\'\')) = :em LIMIT 1'
-                            ),
-                            {"cid": company_id, "em": contact_email.lower()},
-                        ).mappings().first()
-                    if not existing:
-                        db.execute(
-                            text(
-                                """INSERT INTO contacts
-                                (name, number, email, source, "leadStatus", "companyId", "createdAt", "updatedAt")
-                                VALUES (:n, :ph, :em, 'meta_lead_ads', 'new', :cid, NOW(), NOW())"""
-                            ),
-                            {
-                                "n": (contact_name or "Lead Meta")[:180],
-                                "ph": contact_phone or None,
-                                "em": contact_email or None,
-                                "cid": company_id,
-                            },
-                        )
-
-                db.commit()
-                ingested_count += 1
-                results.append({
-                    "leadgen_id": leadgen_id,
-                    "ok": True,
-                    "ingested": True,
-                    "name": contact_name,
-                    "phone": contact_phone,
-                    "email": contact_email,
-                })
+                res = lead_ads.ingest(db, company_id, page_id, leadgen_id)
+                if res.get("ingested"):
+                    ingested_count += 1
+                results.append({"leadgen_id": leadgen_id, **res})
 
     return {"ok": True, "ingested": ingested_count > 0, "events": ingested_count, "results": results}
 
