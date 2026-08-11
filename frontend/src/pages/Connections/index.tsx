@@ -211,6 +211,63 @@ const Connections = () => {
 
   // Estado real contra Meta: un canal "activo" sin webhooks suscriptos no
   // recibe ningún mensaje, y eso antes no se veía en ningún lado
+  // ── Pixel de Meta ──
+  const [pixel, setPixel] = useState<any>({ pixel_id: '', currency: 'ARS', enabled: true });
+  const [pixelId, setPixelId] = useState('');
+  const [pixelToken, setPixelToken] = useState('');
+  const [pixelTestCode, setPixelTestCode] = useState('');
+  const [pixelOpciones, setPixelOpciones] = useState<any[]>([]);
+  const [pixelBusy, setPixelBusy] = useState(false);
+
+  const loadPixel = async () => {
+    try {
+      const { data } = await api.get('/integrations/pixel');
+      setPixel(data);
+      setPixelId(data.pixel_id || '');
+    } catch { /* la tarjeta queda vacia */ }
+  };
+  useEffect(() => { loadPixel(); }, []);
+
+  const buscarPixeles = async () => {
+    setPixelBusy(true);
+    try {
+      const { data } = await api.get('/integrations/pixel/disponibles');
+      setPixelOpciones(data.pixeles || []);
+      if (!data.ok) toast.warning(data.detail || 'No se pudieron listar los píxeles');
+      else if (!(data.pixeles || []).length) toast.info('El token de esta empresa no ve ningún píxel');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudieron buscar los píxeles');
+    } finally { setPixelBusy(false); }
+  };
+
+  const guardarPixel = async () => {
+    setPixelBusy(true);
+    try {
+      const { data } = await api.put('/integrations/pixel', {
+        pixel_id: pixelId.trim(),
+        token: pixelToken.trim() || undefined,
+        currency: pixel.currency || 'ARS',
+        enabled: pixel.enabled,
+      });
+      setPixel(data);
+      setPixelToken('');
+      if (data.verificacion?.ok) toast.success(`Píxel "${data.verificacion.name}" verificado`);
+      else toast.warning(data.verificacion?.detail || 'Guardado, pero no se pudo verificar el píxel');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudo guardar');
+    } finally { setPixelBusy(false); }
+  };
+
+  const probarPixel = async () => {
+    setPixelBusy(true);
+    try {
+      await api.post('/integrations/pixel/probar', { test_event_code: pixelTestCode.trim() });
+      toast.success('Evento enviado. Miralo en Events Manager, pestaña "Eventos de prueba"');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'No se pudo enviar el evento de prueba');
+    } finally { setPixelBusy(false); }
+  };
+
   const [diag, setDiag] = useState<Record<number, { token_ok: boolean; webhooks_ok: boolean; problem: string; display?: string }>>({});
   const [checking, setChecking] = useState(false);
   const [repairing, setRepairing] = useState<number | null>(null);
@@ -663,6 +720,73 @@ const Connections = () => {
           })}
         </Stack>
       )}
+
+      {/* Pixel de Meta: es una conexion mas con Meta, va junto a los canales */}
+      <Paper sx={{ p: 2, mt: 3, borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5 }}>
+          <Typography sx={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.5)', fontWeight: 600 }}>Píxel de Meta</Typography>
+          {pixel.verificacion?.ok && <Chip size="small" label="Verificado" sx={{ height: 20, fontSize: '0.65rem', bgcolor: 'rgba(52,211,153,0.14)', color: '#34D399' }} />}
+        </Stack>
+        <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.35)', mb: 2 }}>
+          Cuando un lead pasa a una etapa de cierre en el Pipeline, el CRM le avisa al píxel que esa
+          persona compró. Así las campañas aprenden a buscar gente parecida a la que realmente
+          compra, y no solo a la que escribe.
+        </Typography>
+
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ alignItems: 'flex-start' }}>
+          <TextField
+            size="small" label="ID del píxel" value={pixelId}
+            onChange={e => setPixelId(e.target.value.replace(/[^0-9]/g, ''))}
+            sx={{ minWidth: 200 }}
+          />
+          <TextField
+            size="small" label="Token propio (opcional)" type="password" value={pixelToken}
+            onChange={e => setPixelToken(e.target.value)}
+            placeholder={pixel.token_propio ? 'Ya hay uno cargado' : 'Se usa el de la conexión'}
+            sx={{ minWidth: 220 }}
+          />
+          <Button variant="contained" disabled={pixelBusy} onClick={guardarPixel} sx={{ fontSize: '0.82rem' }}>Guardar</Button>
+          <Button variant="outlined" disabled={pixelBusy} onClick={buscarPixeles} sx={{ fontSize: '0.82rem' }}>Buscar píxeles</Button>
+        </Stack>
+
+        {pixelOpciones.length > 0 && (
+          <Box sx={{ mt: 2 }}>
+            <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.35)' }}>
+              Elegí el píxel de esta empresa. Mirá la cuenta publicitaria: el token puede ver píxeles de otras cuentas.
+            </Typography>
+            {pixelOpciones.map(p => (
+              <Stack key={p.id} direction="row" alignItems="center" spacing={1} sx={{ py: 1, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                  <Typography sx={{ fontSize: '0.8rem', color: '#E8EBF2' }}>{p.name}</Typography>
+                  <Typography sx={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.35)', fontFamily: '"JetBrains Mono", monospace' }}>
+                    {p.cuenta} · {p.id}
+                    {p.last_fired_time ? ` · último evento ${new Date(p.last_fired_time).toLocaleString('es-AR')}` : ' · sin eventos'}
+                  </Typography>
+                </Box>
+                <Button size="small" onClick={() => setPixelId(p.id)} sx={{ fontSize: '0.75rem' }}>Usar este</Button>
+              </Stack>
+            ))}
+          </Box>
+        )}
+
+        {pixel.pixel_id && (
+          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: 'center' }} flexWrap="wrap" useFlexGap>
+            <TextField
+              size="small" label="Código de prueba" value={pixelTestCode}
+              onChange={e => setPixelTestCode(e.target.value)}
+              helperText="Events Manager → Eventos de prueba (ej: TEST12345)"
+              sx={{ minWidth: 200 }}
+            />
+            <Button disabled={pixelBusy || !pixelTestCode.trim()} onClick={probarPixel} sx={{ fontSize: '0.82rem' }}>
+              Enviar evento de prueba
+            </Button>
+          </Stack>
+        )}
+
+        {pixel.verificacion && !pixel.verificacion.ok && (
+          <Typography sx={{ fontSize: '0.75rem', color: '#FB923C', mt: 2 }}>{pixel.verificacion.detail}</Typography>
+        )}
+      </Paper>
 
       {/* Wizard "Conectar con Meta" */}
       <Dialog open={wizardOpen} onClose={() => !wizConnecting && setWizardOpen(false)} maxWidth="sm" fullWidth>
