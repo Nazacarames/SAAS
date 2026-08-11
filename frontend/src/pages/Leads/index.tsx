@@ -61,6 +61,11 @@ const Leads = () => {
   const [leadEmail, setLeadEmail] = useState('');
   const [savingLead, setSavingLead] = useState(false);
 
+  // Cierre de venta
+  const [venta, setVenta] = useState<{ id: number; from: number; to: number; etapa: string } | null>(null);
+  const [ventaMonto, setVentaMonto] = useState('');
+  const [ventaMoneda, setVentaMoneda] = useState('ARS');
+
   const load = useCallback(async () => {
     try {
       const { data } = await api.get('/pipeline/board');
@@ -75,12 +80,25 @@ const Leads = () => {
   useEffect(() => { load(); }, [load]);
 
   // ── Drag & drop ──
-  const onDrop = async (toStageId: number) => {
+  const onDrop = (toStageId: number) => {
     setDragOver(null);
     if (!dragLead || dragLead.from === toStageId) { setDragLead(null); return; }
     const { id, from } = dragLead;
     setDragLead(null);
 
+    // Al cerrar una venta se pregunta el monto: es lo que se le informa al
+    // pixel de Meta. Volver a mover un lead ya cerrado no vuelve a preguntar.
+    const destino = stages.find((s) => s.id === toStageId);
+    const origen = stages.find((s) => s.id === from);
+    if (destino?.is_won && !origen?.is_won) {
+      setVenta({ id, from, to: toStageId, etapa: destino.name });
+      setVentaMonto('');
+      return;
+    }
+    moverLead(id, from, toStageId);
+  };
+
+  const moverLead = async (id: number, from: number, toStageId: number, monto?: number) => {
     // optimistic move
     setStages((prev) => {
       const next = prev.map((s) => ({ ...s, leads: [...s.leads] }));
@@ -96,11 +114,27 @@ const Leads = () => {
     });
 
     try {
-      await api.put(`/pipeline/leads/${id}/stage`, { stage_id: toStageId });
+      const { data } = await api.put(`/pipeline/leads/${id}/stage`, {
+        stage_id: toStageId,
+        value: typeof monto === 'number' ? monto : undefined,
+        currency: typeof monto === 'number' ? ventaMoneda : undefined,
+      });
+      const c = data?.conversion;
+      if (c?.status === 'enviado') toast.success('Venta registrada y avisada al píxel de Meta');
+      else if (c?.status === 'sin_pixel') toast.info('Venta registrada. Falta configurar el píxel en Integraciones');
+      else if (c?.status === 'error') toast.warning('Venta registrada, pero Meta rechazó el aviso: ' + (c.detail || ''));
     } catch {
       toast.error('No se pudo mover el lead');
       load();
     }
+  };
+
+  const confirmarVenta = async () => {
+    if (!venta) return;
+    const monto = Number(String(ventaMonto).replace(',', '.')) || 0;
+    const v = venta;
+    setVenta(null);
+    await moverLead(v.id, v.from, v.to, monto);
   };
 
   // ── Stage CRUD ──
@@ -308,6 +342,35 @@ const Leads = () => {
         <DialogActions>
           <Button onClick={() => setLeadDialogOpen(false)}>Cancelar</Button>
           <Button variant="contained" onClick={saveLead} disabled={savingLead}>{savingLead ? <CircularProgress size={18} /> : 'Guardar'}</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Cierre de venta: el monto es lo que se le informa al pixel de Meta */}
+      <Dialog open={!!venta} onClose={() => setVenta(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700 }}>Cerrar venta</DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)', mb: 2 }}>
+            Pasás el lead a "{venta?.etapa}". El monto se le informa al píxel de Meta para que
+            la campaña sepa qué aviso terminó en venta.
+          </Typography>
+          <Stack direction="row" spacing={1}>
+            <TextField
+              autoFocus fullWidth size="small" label="Monto de la venta" value={ventaMonto}
+              onChange={(e) => setVentaMonto(e.target.value.replace(/[^0-9.,]/g, ''))}
+              onKeyDown={(e) => { if (e.key === 'Enter') confirmarVenta(); }}
+              helperText="Dejalo vacío si no querés informar el monto"
+            />
+            <TextField
+              select size="small" label="Moneda" value={ventaMoneda}
+              onChange={(e) => setVentaMoneda(e.target.value)} sx={{ minWidth: 96 }}
+            >
+              {['ARS', 'USD'].map((m) => <MenuItem key={m} value={m}>{m}</MenuItem>)}
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setVenta(null)}>Cancelar</Button>
+          <Button variant="contained" onClick={confirmarVenta}>Cerrar venta</Button>
         </DialogActions>
       </Dialog>
 

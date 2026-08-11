@@ -57,6 +57,10 @@ class ReorderRequest(BaseModel):
 
 class MoveLeadRequest(BaseModel):
     stage_id: int
+    # solo se usan al pasar a una etapa ganada: es el monto de la venta que se
+    # le informa al pixel de Meta
+    value: float | None = None
+    currency: str | None = None
 
 
 # ── GET /pipeline/stages ──────────────────────────────────────────
@@ -270,6 +274,18 @@ def reorder_stages(
     return {"ok": True}
 
 
+# ── GET /pipeline/conversions ─────────────────────────────────────
+@router.get("/conversions")
+def conversions_stats(
+    dias: int = 30,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Ventas cerradas y estado del aviso al pixel: lo que muestra el panel."""
+    from app.services import meta_pixel
+    return meta_pixel.stats(db, payload.get("companyId"), max(1, min(dias, 365)))
+
+
 # ── PUT /pipeline/leads/{contact_id}/stage ────────────────────────
 @router.put("/leads/{contact_id}/stage")
 def move_lead(
@@ -287,8 +303,12 @@ def move_lead(
     if not stage:
         raise HTTPException(status_code=404, detail="Etapa no encontrada")
 
+    # La etapa de la que viene decide si esto es una venta nueva: mover un lead
+    # ya cerrado de un lado a otro no vuelve a contar la venta ni la reenvia.
     contact = db.execute(
-        text('SELECT id FROM contacts WHERE id = :id AND "companyId" = :cid'),
+        text('SELECT c.id, COALESCE(s.is_won, false) AS venia_ganado '
+             'FROM contacts c LEFT JOIN lead_stages s ON s.id = c.stage_id '
+             'WHERE c.id = :id AND c."companyId" = :cid'),
         {"id": contact_id, "cid": company_id},
     ).mappings().first()
     if not contact:
@@ -308,4 +328,20 @@ def move_lead(
             {"id": contact_id},
         )
     db.commit()
-    return {"ok": True}
+
+    conversion = None
+    if stage["is_won"] and not contact["venia_ganado"]:
+        # Best effort: si Meta no contesta, la venta igual queda registrada y el
+        # lead igual queda movido. Nunca se le devuelve un error al usuario por
+        # esto.
+        try:
+            from app.services import meta_pixel
+            conversion = meta_pixel.send_conversion(
+                db, company_id, contact_id,
+                stage_id=stage["id"], user_id=payload.get("id"),
+                value=float(body.value or 0), currency=body.currency,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("pixel: no se pudo registrar la conversion (%s)", e)
+
+    return {"ok": True, "conversion": conversion}

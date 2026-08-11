@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user_payload
+from app.api.deps import get_current_user_payload, require_admin
 from app.core.db import get_db
 from app.core.config import settings
 
@@ -459,4 +459,83 @@ def carousel_create(
     res = wa_carousel.create_template(db, company_id, img)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "Meta rechazó la plantilla")[:400])
+    return res
+
+
+# ── Pixel de Meta: avisar las ventas cerradas ─────────────────────────
+
+class PixelBody(BaseModel):
+    pixel_id: Optional[str] = None
+    token: Optional[str] = None
+    currency: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@router.get("/pixel")
+def pixel_status(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    from app.services import meta_pixel
+    company_id = int(payload.get("companyId") or 0)
+    cfg = meta_pixel.get_config(db, company_id)
+    return {**cfg, "verificacion": meta_pixel.check_pixel(db, company_id) if cfg["pixel_id"] else None}
+
+
+@router.get("/pixel/disponibles")
+def pixel_list(
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Pixeles que ve el token de la empresa. Se muestran con el nombre de la
+    cuenta publicitaria porque la eleccion la tiene que confirmar una persona:
+    el token no alcanza para saber de quien es el pixel."""
+    from app.services import meta_pixel
+    return meta_pixel.list_pixels(db, int(payload.get("companyId") or 0))
+
+
+@router.put("/pixel")
+def pixel_save(
+    body: PixelBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    require_admin(payload)
+    from app.services import meta_pixel
+    company_id = int(payload.get("companyId") or 0)
+    cfg = meta_pixel.save_config(db, company_id, body.pixel_id, body.token, body.currency, body.enabled)
+    return {**cfg, "verificacion": meta_pixel.check_pixel(db, company_id) if cfg["pixel_id"] else None}
+
+
+class PixelTestBody(BaseModel):
+    test_event_code: str
+    contact_id: Optional[int] = None
+
+
+@router.post("/pixel/probar")
+def pixel_test(
+    body: PixelTestBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """Manda un evento de prueba al pixel. Con el codigo de Events Manager el
+    evento aparece en "Eventos de prueba" y Meta no lo usa para optimizar, asi
+    que sirve para confirmar la conexion sin ensuciar la cuenta."""
+    from app.services import meta_pixel
+    company_id = int(payload.get("companyId") or 0)
+    codigo = (body.test_event_code or "").strip()
+    if not codigo:
+        raise HTTPException(status_code=400, detail="Falta el código de prueba de Events Manager")
+
+    contact_id = body.contact_id or db.execute(
+        text('SELECT id FROM contacts WHERE "companyId" = :c ORDER BY id DESC LIMIT 1'),
+        {"c": company_id},
+    ).scalar()
+    if not contact_id:
+        raise HTTPException(status_code=400, detail="La empresa todavía no tiene ningún contacto")
+
+    res = meta_pixel.send_conversion(db, company_id, int(contact_id), value=1,
+                                     test_event_code=codigo)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("detail") or res.get("status"))
     return res

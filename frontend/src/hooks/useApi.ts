@@ -43,6 +43,16 @@ export const useFunnelStats = () => {
     });
 };
 
+export const useConversions = () => {
+    return useQuery({
+        queryKey: ['conversions'],
+        queryFn: async () => {
+            const { data } = await api.get('/pipeline/conversions');
+            return data;
+        },
+    });
+};
+
 export const useUsers = () => {
     return useQuery({
         queryKey: ['users'],

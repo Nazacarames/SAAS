@@ -5,7 +5,7 @@ import {
   CheckCircle as CheckCircleIcon, TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
 import { useQueryClient } from '@tanstack/react-query';
-import { useConversations, useContacts, useChannels, useFunnelStats } from '../../hooks/useApi';
+import { useConversations, useContacts, useChannels, useFunnelStats, useConversions } from '../../hooks/useApi';
 import { socketConnection } from '../../services/socket';
 
 function useCountUp(target: number, duration = 900) {
@@ -74,6 +74,13 @@ const FunnelBar = ({ title, value, total, color, delay }: {
   );
 };
 
+const ESTADO_VENTA: Record<string, { label: string; color: string }> = {
+  enviado: { label: 'avisada', color: '#34D399' },
+  error: { label: 'rechazada por Meta', color: '#EF5350' },
+  sin_pixel: { label: 'sin píxel', color: '#FB923C' },
+  pendiente: { label: 'pendiente', color: 'rgba(255,255,255,0.35)' },
+};
+
 const systemServices = [
   { label: 'API Backend',   color: '#34D399', status: 'operational' },
   { label: 'Agente IA',     color: '#34D399', status: 'operational' },
@@ -86,6 +93,8 @@ const Dashboard = () => {
   const { data: contactsRaw } = useContacts();
   const { data: connectionsRaw } = useChannels();
   const { data: funnel } = useFunnelStats();
+  const { data: ventasRaw } = useConversions();
+  const ventas = (ventasRaw as any) || null;
 
   const tickets    = Array.isArray(ticketsRaw) ? ticketsRaw : Array.isArray((ticketsRaw as any)?.data) ? (ticketsRaw as any).data : [];
   const contacts   = Array.isArray(contactsRaw) ? contactsRaw : Array.isArray((contactsRaw as any)?.data) ? (contactsRaw as any).data : [];
@@ -98,6 +107,7 @@ const Dashboard = () => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
       queryClient.invalidateQueries({ queryKey: ['funnel-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['conversions'] });
     };
     if (socket) { socket.on('newMessage', refresh); socket.on('ticketUpdate', refresh); }
     return () => { if (socket) { socket.off('newMessage', refresh); socket.off('ticketUpdate', refresh); } };
@@ -135,6 +145,13 @@ const Dashboard = () => {
   });
   const todayStr = new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
 
+  // Estado del pixel: lo importante es que se vea cuando las ventas se estan
+  // registrando pero no llegan a Meta, que es la falla silenciosa.
+  const pixelEstado = !ventas?.pixel?.pixel_id ? 'píxel sin configurar'
+    : ventas.con_error > 0 ? `${ventas.con_error} con error`
+    : 'píxel conectado';
+  const pixelColor = !ventas?.pixel?.pixel_id ? '#FB923C' : ventas.con_error > 0 ? '#EF5350' : '#34D399';
+
   return (
     <Box>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} sx={{ mb: 3, gap: 1 }} className="anim-fade-up">
@@ -156,6 +173,67 @@ const Dashboard = () => {
         <Grid item xs={6} lg={3}><StatCard title="Canales"           value={activeChannels.length} icon={<WhatsAppIcon sx={{ fontSize: '1.1rem' }} />} color="#34D399" delay={3} /></Grid>
         <Grid item xs={6} lg={3}><StatCard title="Resueltos hoy"     value={closedToday}    icon={<CheckCircleIcon sx={{ fontSize: '1.1rem' }} />}   color="#A78BFA" delay={4} /></Grid>
       </Grid>
+
+      {/* Ventas cerradas + estado del aviso al pixel de Meta */}
+      <Paper sx={{ p: 2.5, mb: 3 }} className="anim-fade-up anim-fade-up-5">
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} sx={{ mb: 2, gap: 1 }}>
+          <Box>
+            <Typography sx={{ fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: '0.95rem', color: '#E8EBF2' }}>
+              Ventas cerradas
+            </Typography>
+            <Typography sx={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.35)', mt: 0.25 }}>
+              últimos {ventas?.dias || 30} días · se avisan al píxel de Meta al mover el lead a la etapa de cierre
+            </Typography>
+          </Box>
+          {ventas && (
+            <Stack direction="row" spacing={0.75} alignItems="center">
+              <Box sx={{ width: 6, height: 6, borderRadius: '50%', background: pixelColor }} />
+              <Typography sx={{ fontSize: '0.75rem', color: pixelColor, fontWeight: 500 }}>{pixelEstado}</Typography>
+            </Stack>
+          )}
+        </Stack>
+
+        <Stack direction="row" spacing={4} sx={{ mb: ventas?.ultimas?.length ? 2 : 0, flexWrap: 'wrap', gap: 2 }}>
+          <Box>
+            <Typography sx={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600 }}>Facturado</Typography>
+            <Typography sx={{ fontSize: '1.9rem', fontWeight: 700, fontFamily: '"JetBrains Mono", monospace', color: '#34D399', lineHeight: 1.2 }}>
+              {(ventas?.monto || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })}
+              <span style={{ fontSize: '0.85rem', opacity: 0.5, marginLeft: 6 }}>{ventas?.moneda || 'ARS'}</span>
+            </Typography>
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600 }}>Ventas</Typography>
+            <Typography sx={{ fontSize: '1.9rem', fontWeight: 700, fontFamily: '"JetBrains Mono", monospace', color: '#E8EBF2', lineHeight: 1.2 }}>{ventas?.ventas || 0}</Typography>
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600 }}>Avisadas al píxel</Typography>
+            <Typography sx={{ fontSize: '1.9rem', fontWeight: 700, fontFamily: '"JetBrains Mono", monospace', color: '#60A5FA', lineHeight: 1.2 }}>{ventas?.enviadas || 0}</Typography>
+          </Box>
+        </Stack>
+
+        {(ventas?.ultimas || []).map((u: any) => (
+          <Stack key={u.id} direction="row" alignItems="center" justifyContent="space-between" sx={{ py: 0.9, borderTop: '1px solid rgba(255,255,255,0.05)', gap: 1 }}>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.75)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.contacto}</Typography>
+              {u.detail && <Typography sx={{ fontSize: '0.66rem', color: '#FB923C' }}>{u.detail}</Typography>}
+            </Box>
+            <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexShrink: 0 }}>
+              <Typography sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace', color: '#E8EBF2' }}>
+                {u.value > 0 ? `${u.value.toLocaleString('es-AR', { maximumFractionDigits: 0 })} ${u.currency}` : 'sin monto'}
+              </Typography>
+              <Typography sx={{ fontSize: '0.66rem', color: ESTADO_VENTA[u.status]?.color || 'rgba(255,255,255,0.3)' }}>
+                {ESTADO_VENTA[u.status]?.label || u.status}
+              </Typography>
+            </Stack>
+          </Stack>
+        ))}
+
+        {ventas && ventas.ventas === 0 && (
+          <Typography sx={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)', py: 1 }}>
+            Todavía no se cerró ninguna venta en el pipeline.
+          </Typography>
+        )}
+      </Paper>
 
       <Grid container spacing={2}>
         <Grid item xs={12} md={6}>
