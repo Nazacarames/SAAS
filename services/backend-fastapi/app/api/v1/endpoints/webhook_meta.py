@@ -371,6 +371,16 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     if await burst_superseded(db, int(contact["id"])):
         return {"ignored": True, "reason": "burst_superseded"}
 
+    # Respuesta al seguimiento del asesor, antes del corte por ai_paused
+    try:
+        from app.services import followup_asesor
+        _fu = await followup_asesor.handle_reply(db, company_id, int(contact["id"]), inbound.text or "")
+        if _fu:
+            return {"ignored": False, "reason": "followup_asesor"}
+    except Exception as e:
+        log.warning("followup asesor: %s", str(e)[:150])
+        db.rollback()
+
     # Handoff a humano: sin esto el agente seguía contestando en IG/Messenger
     # aunque el lead ya estuviera derivado o el operador hubiera apagado el bot
     try:

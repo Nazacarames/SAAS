@@ -808,6 +808,19 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
     if await burst_superseded(db, int(contact["id"])):
         return {"ok": True, "ignored": True, "reason": "burst_superseded", "ai_reply": None}
 
+    # Respuesta al seguimiento del asesor. Va ANTES del corte por ai_paused:
+    # el lead derivado está pausado justamente porque lo atiende una persona, y
+    # sin esto su «sí pude / no pude» no se leería nunca.
+    try:
+        from app.services import followup_asesor
+        _fu = await followup_asesor.handle_reply(db, company_id, int(contact["id"]), message_text)
+        if _fu:
+            return {"ok": True, "ignored": False, "reason": "followup_asesor",
+                    "ai_reply": _fu.get("respuesta")}
+    except Exception as e:
+        print(f"[webhook] followup asesor: {e}")
+        db.rollback()
+
     # Handoff a humano: la IA queda pausada para este contacto
     # (se relee DESPUÉS de la espera: la derivación puede haberla activado recién)
     try:

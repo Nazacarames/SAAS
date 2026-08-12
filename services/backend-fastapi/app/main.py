@@ -37,6 +37,17 @@ async def _start_lead_reengagement():
     _reengagement_task = asyncio.create_task(reengagement_loop())
 
 
+_followup_task = None
+
+
+@app.on_event("startup")
+async def _start_followup_asesor():
+    global _followup_task
+    import asyncio
+    from app.services.followup_asesor import followup_loop
+    _followup_task = asyncio.create_task(followup_loop())
+
+
 _learning_task = None
 
 
