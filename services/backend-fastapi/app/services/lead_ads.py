@@ -12,6 +12,7 @@ endpoint por-empresa viejo.
 import json
 import logging
 import re
+import unicodedata
 
 import httpx
 from sqlalchemy import text
@@ -41,11 +42,32 @@ def _page_token(db: Session, company_id: int, page_id: str) -> str:
     return decrypt(fila or "")
 
 
-def _campo(campos: dict, *nombres: str) -> str:
-    for n in nombres:
-        if campos.get(n):
-            return str(campos[n]).strip()
+def _sin_acentos(s: str) -> str:
+    return unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+
+
+def _campo(campos: dict, *claves: str) -> str:
+    """Busca por PEDAZO de nombre, no por nombre exacto.
+
+    Cada cliente arma su formulario con las etiquetas que quiere y Meta las
+    manda tal cual: "numero_de_telefono", "correo_electronico", "tu_celular".
+    Con una lista de nombres exactos en ingles no coincidia ninguno y el lead
+    entraba sin telefono ni mail, o sea invisible en el CRM.
+    """
+    for clave in claves:
+        for nombre, valor in campos.items():
+            if valor and clave in _sin_acentos(nombre):
+                return str(valor).strip()
     return ""
+
+
+def _parece_email(v: str) -> bool:
+    return "@" in v and "." in v.split("@")[-1]
+
+
+def _parece_telefono(v: str) -> bool:
+    digitos = re.sub(r"\D", "", v)
+    return len(digitos) >= 8 and len(digitos) <= 15 and len(digitos) >= len(v) - 5
 
 
 def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
@@ -91,10 +113,19 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
         if nombre and vals:
             campos[nombre] = vals[0]
 
-    telefono = _campo(campos, "phone_number", "phone", "telefono", "teléfono", "celular")
-    email = _campo(campos, "email", "correo", "correo_electronico")
-    nombre = _campo(campos, "full_name", "name", "nombre", "nombre_completo") or \
+    telefono = _campo(campos, "telefono", "phone", "celular", "movil", "whatsapp", "contacto")
+    email = _campo(campos, "email", "mail", "correo")
+    nombre = _campo(campos, "nombre", "name") or \
         ("%s %s" % (campos.get("first_name", ""), campos.get("last_name", ""))).strip()
+
+    # Ultimo recurso: si el cliente puso etiquetas que no se parecen a nada, se
+    # reconoce el dato por su forma. Un lead sin telefono ni mail no sirve.
+    for valor in campos.values():
+        v = str(valor or "").strip()
+        if not email and _parece_email(v):
+            email = v
+        elif not telefono and _parece_telefono(v):
+            telefono = v
 
     ad_id = str(datos.get("ad_id") or "")
     adset_id = str(datos.get("adset_id") or "")
@@ -135,14 +166,24 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
             {"c": company_id, "e": email.lower()},
         ).mappings().first()
 
+    # Lo que el lead respondio en el formulario (proyecto, presupuesto, etapa) es
+    # la mejor informacion que hay de el. Sin esto queda solo el nombre y el
+    # asesor tiene que volver a preguntar todo.
+    usados = {telefono, email, nombre}
+    resumen = " | ".join(
+        "%s: %s" % (k.replace("_", " ").strip(" :?¿"), v)
+        for k, v in campos.items() if v and str(v).strip() not in usados
+    )[:1000]
+
     if contacto:
         contact_id = contacto["id"]
         # Ya escribio por WhatsApp y ademas dejo el formulario: se completa lo
         # que falte, sin pisar lo que el contacto ya tiene cargado.
         db.execute(
             text('UPDATE contacts SET email = COALESCE(NULLIF(email, \'\'), :e), '
-                 'name = COALESCE(NULLIF(name, \'\'), :n), "updatedAt" = NOW() WHERE id = :i'),
-            {"e": email or None, "n": (nombre or None), "i": contact_id},
+                 'name = COALESCE(NULLIF(name, \'\'), :n), '
+                 'needs = COALESCE(NULLIF(needs, \'\'), :r), "updatedAt" = NOW() WHERE id = :i'),
+            {"e": email or None, "n": (nombre or None), "r": resumen or None, "i": contact_id},
         )
     else:
         etapa = db.execute(
@@ -152,11 +193,11 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
         contact_id = db.execute(
             text("""INSERT INTO contacts
                     (name, number, email, source, "leadStatus", "companyId", stage_id,
-                     "createdAt", "updatedAt")
-                    VALUES (:n, :ph, :em, 'meta_lead_ads', 'new', :cid, :st, NOW(), NOW())
+                     needs, "createdAt", "updatedAt")
+                    VALUES (:n, :ph, :em, 'meta_lead_ads', 'new', :cid, :st, :r, NOW(), NOW())
                     RETURNING id"""),
             {"n": (nombre or "Lead de formulario")[:180], "ph": telefono or None,
-             "em": email or None, "cid": company_id, "st": etapa},
+             "em": email or None, "cid": company_id, "st": etapa, "r": resumen or None},
         ).scalar()
     db.commit()
 
