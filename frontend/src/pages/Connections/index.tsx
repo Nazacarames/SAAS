@@ -83,24 +83,77 @@ const Connections = () => {
   // ref (no variable de render): el listener se registra una sola vez y el
   // callback de FB.login corre en otro render — con una variable local el
   // waba_id capturado se perdía (stale closure) y el canal nunca se creaba
-  const esSession = useRef({ waba_id: '', phone_number_id: '' });
+  const esSession = useRef({ waba_id: '', phone_number_id: '', event: '', step: '' });
+  // una sola conexión por intento: el registro puede terminar por el mensaje de
+  // Meta o por el callback de FB.login, y sin esto se dispararían las dos
+  const esEnviado = useRef(false);
+  const esTimer = useRef<any>(null);
+  // el listener se registra una sola vez, así que llama por ref a la versión
+  // actual de conectarES en vez de a la del primer render (stale closure)
+  const conectarRef = useRef<(code: string, s: any) => void>(() => {});
 
   useEffect(() => {
     api.get('/channels/embedded-signup/config').then(({ data }) => setEsConfig(data)).catch(() => {});
     const onMsg = (event: MessageEvent) => {
       if (!String(event.origin).includes('facebook.com')) return;
-      try {
-        const d = JSON.parse(event.data);
-        if (d.type === 'WA_EMBEDDED_SIGNUP' && d.data) {
-          esSession.current.waba_id = d.data.waba_id || esSession.current.waba_id;
-          esSession.current.phone_number_id = d.data.phone_number_id || esSession.current.phone_number_id;
-        }
-      } catch { /* mensajes no-JSON de la SDK */ }
+      // Meta manda el session info como string JSON, pero según la versión de la
+      // SDK puede llegar ya parseado. Con JSON.parse a secas ese caso explotaba
+      // y el dato se perdía en silencio: el registro terminaba bien y el CRM
+      // igual decía que Meta no había devuelto nada.
+      let d: any = event.data;
+      if (typeof d === 'string') {
+        try { d = JSON.parse(d); } catch { return; }
+      }
+      if (!d || d.type !== 'WA_EMBEDDED_SIGNUP' || !d.data) return;
+      const s = esSession.current;
+      s.waba_id = d.data.waba_id || s.waba_id;
+      s.phone_number_id = d.data.phone_number_id || s.phone_number_id;
+      s.event = d.data.event || s.event;
+      s.step = d.data.current_step || s.step;
+
+      // El registro terminó. Se le da un margen al callback de FB.login para que
+      // traiga el code (es el camino bueno: da también las páginas e Instagram);
+      // si no llega —cookies de terceros bloqueadas, popup cerrado a mano— se
+      // conecta igual con el WABA que ya mandó Meta.
+      if (s.event === 'FINISH' && s.waba_id) {
+        clearTimeout(esTimer.current);
+        esTimer.current = setTimeout(() => conectarRef.current('', { ...s }), 2500);
+      }
     };
     window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
+    return () => { window.removeEventListener('message', onMsg); clearTimeout(esTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const conectarES = (code: string, s: { waba_id: string; phone_number_id: string }) => {
+    if (esEnviado.current) return;
+    esEnviado.current = true;
+    clearTimeout(esTimer.current);
+    setEsConnecting(true);
+    api.post('/channels/embedded-signup', {
+      code, waba_id: s.waba_id, phone_number_id: s.phone_number_id,
+    }).then(({ data }) => {
+      toast.success(`WhatsApp ${data.phone || ''} conectado`);
+      (data.warnings || []).forEach((w: string) => toast.warning(w, { autoClose: 10000 }));
+      load();
+      // El mismo permiso da acceso a sus páginas e Instagram: ofrecer conectarlos
+      const extra = data.extra_assets || {};
+      if ((extra.instagram || []).length || (extra.messenger || []).length) {
+        setWizToken(extra.token || '');
+        setWizAssets({
+          token_info: { type: 'business', expires_at: 0, never_expires: true },
+          whatsapp: [], instagram: extra.instagram || [], messenger: extra.messenger || [],
+          warnings: [],
+        });
+        setWizSelected(new Set());
+        setWizardOpen(true);
+        toast.info('Encontramos Instagram/Facebook de tu negocio — elegí cuáles conectar', { autoClose: 8000 });
+      }
+    }).catch((e: any) => {
+      toast.error(e?.response?.data?.detail || 'No se pudo conectar');
+    }).finally(() => setEsConnecting(false));
+  };
+  conectarRef.current = conectarES;
 
   const withFbSdk = (fn: () => void) => {
     if ((window as any).FB) { fn(); return; }
@@ -122,6 +175,12 @@ const Connections = () => {
       toast.info('Falta configurar el Embedded Signup en la app de Meta (config_id)');
       return;
     }
+    // Cada intento arranca limpio: si no, el WABA que quedó de un intento
+    // anterior se manda en el siguiente y se conecta la cuenta equivocada.
+    esSession.current = { waba_id: '', phone_number_id: '', event: '', step: '' };
+    esEnviado.current = false;
+    clearTimeout(esTimer.current);
+
     withFbSdk(() => {
       (window as any).FB.login((response: any) => {
         const code = response?.authResponse?.code || '';
@@ -130,32 +189,16 @@ const Connections = () => {
         // el backend usa el token de sistema del proveedor. Sin nada, fue cancelado
         // o el navegador bloqueó la respuesta de Meta.
         if (!code && !s.waba_id) {
-          toast.error('Meta no devolvió la autorización. Si completaste el registro, permití las cookies de terceros y probá de nuevo.');
+          if (s.event === 'CANCEL') {
+            toast.warning(s.step
+              ? `Quedó a medias el registro en Meta (paso: ${s.step}). Volvé a intentarlo y completá todos los pasos.`
+              : 'Cerraste la ventana de Meta antes de terminar el registro.');
+          } else {
+            toast.error('Meta no devolvió la autorización. Si completaste el registro, permití las cookies de terceros y probá de nuevo.');
+          }
           return;
         }
-        setEsConnecting(true);
-        api.post('/channels/embedded-signup', {
-          code, waba_id: s.waba_id, phone_number_id: s.phone_number_id,
-        }).then(({ data }) => {
-          toast.success(`WhatsApp ${data.phone || ''} conectado`);
-          (data.warnings || []).forEach((w: string) => toast.warning(w, { autoClose: 10000 }));
-          load();
-          // El mismo permiso da acceso a sus páginas e Instagram: ofrecer conectarlos
-          const extra = data.extra_assets || {};
-          if ((extra.instagram || []).length || (extra.messenger || []).length) {
-            setWizToken(extra.token || '');
-            setWizAssets({
-              token_info: { type: 'business', expires_at: 0, never_expires: true },
-              whatsapp: [], instagram: extra.instagram || [], messenger: extra.messenger || [],
-              warnings: [],
-            });
-            setWizSelected(new Set());
-            setWizardOpen(true);
-            toast.info('Encontramos Instagram/Facebook de tu negocio — elegí cuáles conectar', { autoClose: 8000 });
-          }
-        }).catch((e: any) => {
-          toast.error(e?.response?.data?.detail || 'No se pudo conectar');
-        }).finally(() => setEsConnecting(false));
+        conectarES(code, s);
       }, {
         config_id: esConfig.config_id,
         response_type: 'code',
