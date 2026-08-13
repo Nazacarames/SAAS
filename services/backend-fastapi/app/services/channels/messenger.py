@@ -53,16 +53,39 @@ class MessengerAdapter(ChannelAdapter):
         return await _send(config, recipient, {"attachment": attachment})
 
     async def fetch_profile(self, config: dict, recipient_id: str) -> ContactProfile:
+        """Nombre real del contacto de Messenger.
+
+        La API de perfil (GET /{psid}) sigue sin devolver nada aunque el permiso
+        pages_messaging esté con acceso avanzado: contesta "Object with ID ...
+        does not exist". El nombre sí viene por las conversaciones de la página,
+        que es el camino que se usa como respaldo.
+        """
         token = config.get("token", "")
+        page_id = str(config.get("external_id") or "")
         if not token:
             return ContactProfile()
+        base = f"https://graph.facebook.com/{GRAPH_VERSION}"
         try:
-            url = f"https://graph.facebook.com/{GRAPH_VERSION}/{recipient_id}"
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params={"fields": "name,profile_pic", "access_token": token}, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                return ContactProfile(name=data.get("name", ""), profile_pic=data.get("profile_pic", ""))
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{base}/{recipient_id}",
+                                        params={"fields": "name,profile_pic", "access_token": token})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("name"):
+                        return ContactProfile(name=data["name"], profile_pic=data.get("profile_pic", ""))
+
+                if not page_id:
+                    return ContactProfile()
+                # el hilo del cliente con la página: participants trae el nombre
+                resp = await client.get(f"{base}/{page_id}/conversations",
+                                        params={"access_token": token, "user_id": recipient_id,
+                                                "fields": "participants", "limit": 1})
+                if resp.status_code != 200:
+                    return ContactProfile()
+                for conv in (resp.json().get("data") or []):
+                    for p in ((conv.get("participants") or {}).get("data") or []):
+                        if str(p.get("id")) == str(recipient_id) and p.get("name"):
+                            return ContactProfile(name=p["name"])
         except Exception as e:
             log.warning("msg fetch_profile err=%s", str(e)[:100])
         return ContactProfile()
