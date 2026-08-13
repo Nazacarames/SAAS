@@ -121,7 +121,10 @@ def _tags(db, contact_id: int, agregar: list[str] = (), quitar: list[str] = ()) 
 def _candidatos(db, company_id: int, horas: int) -> list:
     return db.execute(
         text('''
-            SELECT c.id, c.name, c.number, c.channel_id, m.last_at
+            -- psid/igsid: en Messenger e Instagram el destinatario no es un
+            -- numero. Sin estos campos el envio moria con "no_recipient" y el
+            -- lead se reintentaba cada 10 minutos sin salir nunca.
+            SELECT c.id, c.name, c.number, c.psid, c.igsid, c.channel_id, m.last_at
             FROM contacts c
             JOIN LATERAL (
                 SELECT MAX(msg."createdAt") AS last_at FROM messages msg
@@ -165,7 +168,7 @@ async def _enviar(db, company_id: int, lead: dict, cuerpo: str) -> bool:
     from app.services.channels.sender import send_via_channel
     from app.api.v1.endpoints.webhook_whatsapp import save_message
     r = await send_via_channel(db, company_id=company_id, contact=dict(lead),
-                               recipient_id=str(lead.get("number") or ""), text_body=cuerpo)
+                               recipient_id=str(lead.get("number") or "") or None, text_body=cuerpo)
     if not getattr(r, "ok", False):
         log.info("followup: no se pudo enviar a contacto %s (%s)", lead["id"], getattr(r, "error", ""))
         return False
@@ -227,7 +230,7 @@ async def handle_reply(db, company_id: int, contact_id: int, texto: str) -> dict
     porque lo atiende una persona, y sin esto su respuesta no se leería nunca.
     """
     fila = db.execute(
-        text('SELECT id, name, number, channel_id, progress_tags FROM contacts '
+        text('SELECT id, name, number, psid, igsid, channel_id, progress_tags FROM contacts '
              'WHERE id = :i AND "companyId" = :c'),
         {"i": contact_id, "c": company_id},
     ).mappings().first()

@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 
 import httpx
 from sqlalchemy import text
@@ -361,6 +363,28 @@ def _is_new_session(db: Session, contact_id: int, reopen_hours: int) -> bool:
         return False
 
 
+_SALUDOS = (
+    "hola", "holaa", "ola", "buenas", "buen", "buenos", "dia", "dias", "tarde", "tardes",
+    "noche", "noches", "que", "tal", "como", "estan", "estas", "andan", "va", "hey", "ey",
+    "saludos", "disculpa", "disculpen", "perdon", "consulta", "una", "el", "la", "les",
+    "por", "favor", "gracias", "info", "informacion", "hi", "buendia",
+)
+
+
+def _solo_saludo(texto: str) -> bool:
+    """True si el mensaje es apenas un saludo o un 'hola, consulta'.
+
+    El menú tiene sentido cuando el cliente todavía no dijo qué necesita. Si el
+    primer mensaje ya trae la consulta concreta ("qué llantas 14 tienen para un
+    Gol Power 1.4"), mandarle el menú es hacerlo empezar de nuevo: esa pregunta
+    la tiene que contestar el agente.
+    """
+    limpio = unicodedata.normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode().lower()
+    limpio = re.sub(r"[^a-z0-9 ]", " ", limpio)
+    restantes = [p for p in limpio.split() if p and p not in _SALUDOS]
+    return len(restantes) < 3
+
+
 async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: str,
                          interactive_id: str, wa: dict, channel_id: int | None = None) -> dict:
     """Devuelve {"handled": bool}. handled=True → el webhook NO llama al agente IA."""
@@ -426,6 +450,13 @@ async def handle_inbound(db: Session, company_id: int, contact: dict, msg_text: 
 
     # Texto libre
     if _is_new_session(db, contact_id, int(flow.get("reopen_hours", 24))):
+        # El cliente que arranca con una consulta concreta pasa derecho al
+        # agente. Se puede desactivar por empresa (menu_siempre = true) para
+        # las que quieran el menú sí o sí.
+        if not flow.get("menu_siempre") and not _solo_saludo(msg_text):
+            log.info("menu_bot: consulta concreta, la atiende el agente (company=%s contacto=%s)",
+                     company_id, contact_id)
+            return {"handled": False}
         await _send_menu(db, wa, to, flow, company_id, contact_id)
         return {"handled": True}
     if str(flow.get("no_match", "ai")) == "menu":
