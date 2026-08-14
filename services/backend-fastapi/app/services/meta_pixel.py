@@ -112,32 +112,90 @@ def _token(db: Session, company_id: int) -> str:
 
 
 # ── deteccion de pixeles (solo para llenar el selector) ───────────
+def _negocios_de(db: Session, company_id: int, cli: httpx.Client, token: str) -> dict:
+    """Negocios (portfolios) dueños de los activos YA CONECTADOS de la empresa.
+
+    Es el unico anclaje confiable: preguntarle al token que ve (/me/adaccounts)
+    devuelve lo que ve su dueño, y hoy varias empresas comparten el mismo token
+    de system user, asi que a un cliente le aparecian los pixeles de OTRO.
+    """
+    negocios: dict[str, str] = {}
+    filas = db.execute(
+        text("SELECT channel_type, external_id, config_json FROM channels "
+             "WHERE company_id = :c AND status = 'active'"),
+        {"c": company_id},
+    ).mappings().all()
+    for f in filas:
+        try:
+            cfg = json.loads(f["config_json"]) if isinstance(f["config_json"], str) else (f["config_json"] or {})
+        except Exception:
+            cfg = {}
+        if f["channel_type"] == "whatsapp":
+            waba = str(cfg.get("wabaId") or "")
+            if not waba:
+                # los canales viejos no guardaron el WABA: se resuelve desde el
+                # numero, igual que hace el diagnostico de canales
+                waba = str(db.execute(
+                    text("SELECT waba_id FROM meta_connections WHERE company_id = :c "
+                         "AND waba_id IS NOT NULL ORDER BY id DESC LIMIT 1"),
+                    {"c": company_id},
+                ).scalar() or "")
+            if not waba:
+                try:
+                    from app.api.v1.endpoints.channels_routes import _resolve_waba_for_phone
+                    waba = str(_resolve_waba_for_phone(cli, str(f["external_id"] or ""), token) or "")
+                except Exception:
+                    waba = ""
+            if not waba:
+                continue
+            r = cli.get(f"{GRAPH}/{waba}", params={"access_token": token,
+                                                   "fields": "owner_business_info"}).json()
+            info = r.get("owner_business_info") or {}
+            if info.get("id"):
+                negocios[str(info["id"])] = str(info.get("name") or info["id"])
+        else:
+            page = str(f["external_id"] or "")
+            if not page:
+                continue
+            r = cli.get(f"{GRAPH}/{page}", params={"access_token": token,
+                                                   "fields": "business"}).json()
+            biz = r.get("business") or {}
+            if biz.get("id"):
+                negocios[str(biz["id"])] = str(biz.get("name") or biz["id"])
+    return negocios
+
+
 def list_pixels(db: Session, company_id: int) -> dict:
-    """Pixeles visibles con el token de la empresa, con el nombre de la cuenta
-    publicitaria de cada uno. El nombre importa: es lo unico que deja ver a ojo
-    que el pixel es del cliente correcto y no de otra cuenta."""
+    """Pixeles del portfolio de ESTA empresa, sacados de sus propios activos."""
     token = _token(db, company_id)
     if not token:
         return {"ok": False, "pixeles": [], "detail": "La empresa no tiene ninguna conexion de Meta"}
     try:
         with httpx.Client(timeout=30) as cli:
-            acc = cli.get(f"{GRAPH}/me/adaccounts",
-                          params={"access_token": token, "fields": "id,name", "limit": 50}).json()
-            if acc.get("error"):
+            negocios = _negocios_de(db, company_id, cli, token)
+            if not negocios:
                 return {"ok": False, "pixeles": [],
-                        "detail": acc["error"].get("message", "")[:200]}
+                        "detail": "No se pudo identificar el portfolio de esta empresa. "
+                                  "Conectá primero un canal (WhatsApp, Instagram o Messenger) "
+                                  "o cargá el ID del píxel a mano."}
             pixeles = []
-            for a in (acc.get("data") or []):
-                r = cli.get(f"{GRAPH}/{a['id']}/adspixels",
-                            params={"access_token": token,
-                                    "fields": "id,name,last_fired_time", "limit": 50}).json()
-                for p in (r.get("data") or []):
-                    pixeles.append({
-                        "id": p["id"],
-                        "name": p.get("name") or p["id"],
-                        "cuenta": a.get("name") or a["id"],
-                        "last_fired_time": p.get("last_fired_time"),
-                    })
+            for biz_id, biz_nombre in negocios.items():
+                for edge in ("owned_pixels", "client_pixels"):
+                    r = cli.get(f"{GRAPH}/{biz_id}/{edge}",
+                                params={"access_token": token,
+                                        "fields": "id,name,last_fired_time", "limit": 50}).json()
+                    for p in (r.get("data") or []):
+                        pixeles.append({
+                            "id": p["id"],
+                            "name": p.get("name") or p["id"],
+                            "cuenta": biz_nombre,
+                            "last_fired_time": p.get("last_fired_time"),
+                        })
+        if not pixeles:
+            return {"ok": True, "pixeles": [],
+                    "detail": "El portfolio de %s no tiene ningún píxel visible. Si existe, "
+                              "cargá el ID a mano o un token con permiso sobre esa cuenta."
+                              % ", ".join(negocios.values())}
         return {"ok": True, "pixeles": pixeles}
     except Exception as e:
         log.warning("pixel: no se pudieron listar (%s)", e)
