@@ -13,6 +13,7 @@ campo mas de esa fila.
 
 import hashlib
 import json
+import os
 import logging
 import time
 
@@ -192,6 +193,16 @@ def list_pixels(db: Session, company_id: int) -> dict:
                             "last_fired_time": p.get("last_fired_time"),
                         })
         if not pixeles:
+            # Caso tipico: el canal se conecto por el camino de respaldo y quedo
+            # guardado el token del proveedor, que no tiene permiso sobre los
+            # activos del cliente aunque el cliente los haya compartido.
+            if token == os.getenv("META_SYSTEM_TOKEN", "").strip():
+                return {"ok": True, "pixeles": [],
+                        "detail": "Esta empresa quedó conectada con el token del proveedor, que no "
+                                  "tiene permiso sobre los píxeles de %s aunque te los hayan "
+                                  "compartido. Cargá el ID del píxel a mano y, en «Token propio», "
+                                  "uno generado en el Business Manager del cliente."
+                                  % ", ".join(negocios.values())}
             return {"ok": True, "pixeles": [],
                     "detail": "El portfolio de %s no tiene ningún píxel visible. Si existe, "
                               "cargá el ID a mano o un token con permiso sobre esa cuenta."

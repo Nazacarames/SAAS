@@ -276,8 +276,11 @@ const Connections = () => {
     try {
       const { data } = await api.get('/integrations/pixel/disponibles');
       setPixelOpciones(data.pixeles || []);
-      if (!data.ok) toast.warning(data.detail || 'No se pudieron listar los píxeles');
-      else if (!(data.pixeles || []).length) toast.info('El token de esta empresa no ve ningún píxel');
+      // el backend explica POR QUE no hay pixeles y que hacer: mostrarlo tal cual,
+      // el mensaje generico dejaba al usuario sin saber como seguir
+      if (!(data.pixeles || []).length) {
+        toast.warning(data.detail || 'No se encontraron píxeles para esta empresa', { autoClose: 15000 });
+      }
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'No se pudieron buscar los píxeles');
     } finally { setPixelBusy(false); }
