@@ -442,7 +442,23 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
             recipient = adapter.recipient_id_of(dict(contact))
             if recipient:
                 config = get_send_config(channel)
-                await adapter.send_text(config, recipient, ai_reply)
+                # Las propiedades vienen en UN solo texto, separadas por ||| y con
+                # marcadores [FOTO:...]. WhatsApp ya las partia en fichas; acá se
+                # mandaba el bundle crudo, que ademas se pasa del limite de
+                # caracteres de Instagram: el cliente no veia NINGUNA propiedad.
+                from app.api.v1.endpoints.webhook_whatsapp import _parse_property_items
+                fichas = _parse_property_items(ai_reply)
+                if fichas:
+                    for ficha in fichas:
+                        # La foto va aparte: en Instagram y Messenger el adjunto
+                        # no lleva epigrafe, asi que el texto de la ficha se
+                        # perderia si se mandara como caption.
+                        if ficha.get("photo"):
+                            await adapter.send_media(config, recipient, ficha["photo"])
+                        await adapter.send_text(config, recipient, ficha["text"])
+                        log.info("[%s] ficha enviada contacto=%s", channel_type, contact["id"])
+                else:
+                    await adapter.send_text(config, recipient, ai_reply)
 
             ai_followup = ai_result.get("followup", "")
             if ai_followup and recipient:
