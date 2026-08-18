@@ -760,6 +760,20 @@ async def process_whatsapp_payload(db: Session, payload: dict, response: Respons
             {"i": contact["id"]}).scalar() or 0) <= len(new_messages)
     except Exception:
         db.rollback()
+    # De donde entro el lead: aviso, web del cliente u organico. Corre en CADA
+    # mensaje mientras siga siendo "organico": el cliente saluda primero y recien
+    # despues pega el link del producto, asi que mirar solo el primero se pierde
+    # la mitad de los leads que venian navegando la web.
+    if True:
+        try:
+            from app.services import ad_attribution as _atr
+            from app.services import ad_referral as _aref
+            _ad = (_aref.extract_referral({"referral": _ref_raw}) or {}).get("ad_id", "") if _ref_raw else ""
+            _atr.registrar_entrada(db, company_id, int(contact["id"]), message_text, _ad)
+        except Exception as _e:
+            print(f"[webhook] origen del lead: {_e}")
+            db.rollback()
+
     if _ref_raw or _es_primero:
         try:
             from app.services import ad_referral

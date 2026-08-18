@@ -70,6 +70,20 @@ def _parece_telefono(v: str) -> bool:
     return len(digitos) >= 8 and len(digitos) <= 15 and len(digitos) >= len(v) - 5
 
 
+def _nombre_form(db: Session, company_id: int, page_id: str, form_id: str) -> str:
+    """Nombre del formulario. Es lo mas parecido a la campaña que se puede leer
+    con el token de la pagina cuando la cuenta publicitaria no esta compartida."""
+    if not form_id:
+        return ""
+    try:
+        r = httpx.get(f"{GRAPH}/{form_id}", params={
+            "access_token": _page_token(db, company_id, page_id), "fields": "name"}, timeout=15).json()
+        nombre = str(r.get("name") or "")
+        return "" if nombre.lower().startswith("formulario sin") else nombre[:120]
+    except Exception:
+        return ""
+
+
 def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
     """Trae el lead de Graph, lo guarda y lo deja como contacto en el CRM."""
     from app.api.v1.endpoints._ai_shared import _ensure_meta_lead_tables
@@ -95,7 +109,11 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
     try:
         r = httpx.get(f"{GRAPH}/{leadgen_id}", params={
             "access_token": token,
-            "fields": "field_data,form_id,ad_id,adset_id,campaign_id,created_time",
+            # is_organic/platform: Meta NO devuelve ad_id sin permiso sobre la
+            # cuenta publicitaria, pero si dice si el lead vino de un aviso pago
+            # y de que red. Es lo unico atribuible con el token de la pagina.
+            "fields": ("field_data,form_id,ad_id,adset_id,campaign_id,created_time,"
+                       "is_organic,platform"),
         }, timeout=20)
         datos = r.json()
     except Exception as e:
@@ -204,6 +222,12 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
     try:
         ad_attribution.save(db, company_id, contact_id, ad_id,
                             adset_id=adset_id, campaign_id=campaign_id)
+        red = {"fb": "Facebook", "ig": "Instagram"}.get(str(datos.get("platform") or ""), "Meta")
+        pago = "" if datos.get("is_organic") else " (pago)"
+        detalle = _nombre_form(db, company_id, page_id, str(datos.get("form_id") or "")) or ""
+        ad_attribution.set_origen(db, company_id, contact_id, ad_attribution.ORIGEN_FORMULARIO,
+                                  ("%s · %s%s" % (detalle, red, pago)).strip(" ·") if detalle
+                                  else "%s%s" % (red, pago))
     except Exception as e:  # noqa: BLE001
         log.warning("lead ads: no se pudo guardar la atribucion (%s)", str(e)[:120])
         db.rollback()

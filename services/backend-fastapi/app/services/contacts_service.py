@@ -10,6 +10,8 @@ _CONTACT_COLS = (
     # ai_paused viaja siempre: sin esto el panel releia el contacto sin el dato
     # y el switch del bot volvia solo a encendido despues de apagarlo
     'lead_score, business_type, needs, progress_tags, ai_paused, '
+    # de donde vino el lead: la tabla de Leads lo muestra por fila
+    'origen, origen_detalle, campaign_name, ad_name, '
     # Stage thresholds owned by the backend: the frontend renders lead_stage
     # as-is instead of re-deriving it from score thresholds client-side.
     "CASE WHEN COALESCE(lead_score, 0) >= 75 THEN 'interesado' "
@@ -26,7 +28,7 @@ def _qualified_cols(alias: str) -> str:
         "id", "name", "number", "email", '"whatsappId"', "source", '"leadStatus"',
         '"assignedUserId"', '"companyId"', '"inactivityMinutes"', '"inactivityWebhookId"',
         '"createdAt"', '"updatedAt"', "lead_score", "business_type", "needs", "progress_tags",
-        "ai_paused",
+        "ai_paused", "origen", "origen_detalle", "campaign_name", "ad_name",
     ]
     cols = ", ".join(f"{alias}.{c}" for c in plain)
     cols += (

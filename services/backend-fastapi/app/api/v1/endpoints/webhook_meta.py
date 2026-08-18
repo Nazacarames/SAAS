@@ -308,15 +308,15 @@ async def _process_inbound(db: Session, channel_type: str, inbound: InboundMessa
     if not contact:
         return {"ignored": True, "reason": "contact_resolve_failed"}
 
-    # De qué aviso vino, si vino de uno
+    # De dónde vino el lead: aviso, web del cliente u orgánico
     _ad = (avisos or {}).get(str(getattr(inbound, "sender_id", "") or ""), "")
-    if _ad:
-        try:
-            from app.services import ad_attribution
-            ad_attribution.save(db, company_id, int(contact["id"]), _ad)
-        except Exception as e:
-            log.warning("atribucion: %s", str(e)[:120])
-            db.rollback()
+    try:
+        from app.services import ad_attribution
+        ad_attribution.registrar_entrada(db, company_id, int(contact["id"]),
+                                         inbound.text or "", _ad)
+    except Exception as e:
+        log.warning("atribucion: %s", str(e)[:120])
+        db.rollback()
 
     # Instagram y Messenger también reparten por round-robin: el asesor ve el
     # lead en su usuario apenas entra, sin importar por dónde llegó

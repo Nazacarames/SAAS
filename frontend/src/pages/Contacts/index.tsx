@@ -35,6 +35,10 @@ interface Lead {
   number: string;
   email: string;
   source?: string;
+  origen?: string;
+  origen_detalle?: string;
+  campaign_name?: string;
+  ad_name?: string;
   leadStatus?: LeadStatus;
   business_type?: string;
   needs?: string;
@@ -79,6 +83,15 @@ const statusColor: Record<string, any> = {
   propuesta: 'warning',
   cierre: 'error',
   concretado: 'success'
+};
+
+// De dónde vino el lead. El canal (WhatsApp/Instagram) dice por dónde entró;
+// el origen dice qué lo trajo, que es lo que sirve para medir la pauta.
+const ORIGEN: Record<string, { label: string; color: string }> = {
+  pauta:      { label: 'Pauta',      color: '#34D399' },
+  formulario: { label: 'Formulario', color: '#60A5FA' },
+  web:        { label: 'Web',        color: '#A78BFA' },
+  organico:   { label: 'Orgánico',   color: '#8A8FA0' },
 };
 
 const formatSourceLabel = (source?: string) => {
@@ -380,7 +393,35 @@ const Leads = () => {
                           <Typography variant='caption'>{score}%</Typography>
                         </Stack>
                       </TableCell>
-                      <TableCell>{formatSourceLabel(l.source)}</TableCell>
+                      <TableCell>
+                        <Stack spacing={0.4} sx={{ minWidth: 0 }}>
+                          <Stack direction="row" spacing={0.6} alignItems="center">
+                            {l.origen && (
+                              <Chip
+                                size="small"
+                                label={ORIGEN[l.origen]?.label || l.origen}
+                                sx={{
+                                  height: 18, fontSize: '0.62rem', fontWeight: 600,
+                                  backgroundColor: (ORIGEN[l.origen]?.color || '#8A8FA0') + '22',
+                                  color: ORIGEN[l.origen]?.color || '#8A8FA0',
+                                }}
+                              />
+                            )}
+                            <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.45)' }}>
+                              {formatSourceLabel(l.source)}
+                            </Typography>
+                          </Stack>
+                          {(l.campaign_name || l.origen_detalle) && (
+                            <Typography
+                              title={[l.campaign_name, l.ad_name, l.origen_detalle].filter(Boolean).join(' · ')}
+                              sx={{ fontSize: '0.66rem', color: 'rgba(255,255,255,0.35)', maxWidth: 190,
+                                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                            >
+                              {l.campaign_name || l.origen_detalle}
+                            </Typography>
+                          )}
+                        </Stack>
+                      </TableCell>
                       <TableCell>{l.assignedUser?.name || 'Sin asignar'}</TableCell>
                       <TableCell>{new Date(l.updatedAt).toLocaleString()}</TableCell>
                       <TableCell align='right'>

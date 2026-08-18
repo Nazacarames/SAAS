@@ -59,6 +59,10 @@ class ContactOut(BaseModel):
     progress_tags: list[str] | None = None
     lead_stage: str | None = None
     ai_paused: bool | None = None
+    origen: str | None = None
+    origen_detalle: str | None = None
+    campaign_name: str | None = None
+    ad_name: str | None = None
 
     class Config:
         from_attributes = True
