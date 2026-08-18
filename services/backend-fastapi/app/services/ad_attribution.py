@@ -53,7 +53,14 @@ def _ensure(db: Session) -> None:
 
 
 def _token(db: Session, company_id: int) -> str:
+    """Mismo criterio que el pixel: primero el token que autorizo el cliente por
+    OAuth sobre SU cuenta publicitaria. El de la conexion puede ser el del
+    proveedor, que no ve las campañas del cliente y devuelve los nombres vacios."""
     from app.services.crypto import decrypt
+    from app.services.meta_pixel import _read_settings
+    ads = decrypt(str((_read_settings(db, company_id) or {}).get("metaAdsToken") or ""))
+    if ads:
+        return ads
     row = db.execute(
         text("SELECT access_token FROM meta_connections WHERE company_id = :c "
              "AND access_token IS NOT NULL ORDER BY id DESC LIMIT 1"),

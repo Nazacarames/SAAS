@@ -94,16 +94,35 @@ def get_config(db: Session, company_id: int) -> dict:
         "currency": str(cfg.get("metaPixelCurrency") or "ARS"),
         # el token propio es opcional: si no hay, se usa el de la conexion de Meta
         "token_propio": bool(cfg.get("metaPixelToken")),
+        "ads_conectado": bool(cfg.get("metaAdsToken")),
         "enabled": bool(cfg.get("metaPixelEnabled", True)),
     }
 
 
+def guardar_token_ads(db: Session, company_id: int, token: str) -> None:
+    """Token de la cuenta publicitaria del cliente, obtenido por OAuth."""
+    cfg = _read_settings(db, company_id)
+    cfg["metaAdsToken"] = encrypt(token.strip())
+    db.execute(
+        text("INSERT INTO company_runtime_settings (company_id, settings_json, updated_at) "
+             "VALUES (:c, :s, NOW()) ON CONFLICT (company_id) DO UPDATE "
+             "SET settings_json = :s, updated_at = NOW()"),
+        {"c": company_id, "s": json.dumps(cfg)},
+    )
+    db.commit()
+
+
 def _token(db: Session, company_id: int) -> str:
-    """Token para hablar con Graph: el cargado a mano, si no el de la conexion."""
+    """Token para hablar con Graph, en orden de confianza: el cargado a mano, el
+    que autorizo el cliente por OAuth, y recien al final el de la conexion (que
+    puede ser el del proveedor y no ve los activos del cliente)."""
     cfg = _read_settings(db, company_id)
     propio = decrypt(str(cfg.get("metaPixelToken") or ""))
     if propio:
         return propio
+    ads = decrypt(str(cfg.get("metaAdsToken") or ""))
+    if ads:
+        return ads
     row = db.execute(
         text("SELECT access_token FROM meta_connections WHERE company_id = :c "
              "AND access_token IS NOT NULL ORDER BY id DESC LIMIT 1"),

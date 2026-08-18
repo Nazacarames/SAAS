@@ -286,6 +286,33 @@ const Connections = () => {
     } finally { setPixelBusy(false); }
   };
 
+  // El cliente autoriza SU cuenta publicitaria desde el CRM. Es lo unico que
+  // destraba ver su pixel y la campaña de la que vino cada lead: el token del
+  // proveedor no alcanza los activos del cliente.
+  const conectarAds = () => {
+    if (!esConfig?.app_id) { toast.info('Falta configurar el login de Meta'); return; }
+    withFbSdk(() => {
+      (window as any).FB.login((response: any) => {
+        const code = response?.authResponse?.code;
+        const accessToken = response?.authResponse?.accessToken;
+        if (!code && !accessToken) { toast.info('Conexión cancelada'); return; }
+        setPixelBusy(true);
+        api.post('/integrations/pixel/oauth', code ? { code } : { access_token: accessToken })
+          .then(({ data }) => {
+            setPixelOpciones(data.pixeles || []);
+            if ((data.pixeles || []).length) {
+              toast.success(`Cuenta conectada — ${data.pixeles.length} píxel(es) encontrados`);
+            } else {
+              toast.warning(data.detail || 'Cuenta conectada, pero no se encontraron píxeles', { autoClose: 12000 });
+            }
+            loadPixel();
+          })
+          .catch((e: any) => toast.error(e?.response?.data?.detail || 'No se pudo conectar la cuenta'))
+          .finally(() => setPixelBusy(false));
+      }, { scope: 'ads_read,business_management' });
+    });
+  };
+
   const guardarPixel = async () => {
     setPixelBusy(true);
     try {
@@ -793,6 +820,14 @@ const Connections = () => {
           />
           <Button variant="contained" disabled={pixelBusy} onClick={guardarPixel} sx={{ fontSize: '0.82rem' }}>Guardar</Button>
           <Button variant="outlined" disabled={pixelBusy} onClick={buscarPixeles} sx={{ fontSize: '0.82rem' }}>Buscar píxeles</Button>
+          <Tooltip title="El cliente autoriza su cuenta publicitaria: habilita ver su píxel y la campaña de cada lead">
+            <Button
+              variant="outlined" disabled={pixelBusy} onClick={conectarAds}
+              sx={{ fontSize: '0.82rem', borderColor: 'rgba(96,165,250,0.4)', color: '#60A5FA' }}
+            >
+              {pixel.ads_conectado ? 'Reconectar cuenta publicitaria' : 'Conectar cuenta publicitaria'}
+            </Button>
+          </Tooltip>
         </Stack>
 
         {pixelOpciones.length > 0 && (

@@ -539,3 +539,37 @@ def pixel_test(
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("detail") or res.get("status"))
     return res
+
+
+class PixelOAuthBody(BaseModel):
+    access_token: Optional[str] = None
+    code: Optional[str] = None
+
+
+@router.post("/pixel/oauth")
+async def pixel_oauth(
+    body: PixelOAuthBody,
+    payload: dict = Depends(get_current_user_payload),
+    db: Session = Depends(get_db),
+):
+    """El cliente autoriza su cuenta publicitaria desde el CRM.
+
+    Sin esto, el unico token disponible es el del proveedor, que no ve los
+    activos del cliente: ni el pixel ni la campaña de la que vino cada lead.
+    """
+    require_admin(payload)
+    from app.api.v1.endpoints.channels_routes import _extend_user_token, _exchange_meta_code
+    from app.services import meta_pixel
+
+    company_id = int(payload.get("companyId") or 0)
+    if (body.access_token or "").strip():
+        token = await _extend_user_token(body.access_token.strip())
+    elif (body.code or "").strip():
+        token = await _exchange_meta_code(body.code.strip())
+    else:
+        raise HTTPException(status_code=400, detail="Meta no devolvió la autorización")
+
+    meta_pixel.guardar_token_ads(db, company_id, token)
+    encontrados = meta_pixel.list_pixels(db, company_id)
+    return {"ok": True, "pixeles": encontrados.get("pixeles") or [],
+            "detail": encontrados.get("detail") or ""}
