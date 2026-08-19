@@ -73,18 +73,28 @@ const isInternalMedia = (value?: string) => String(value || '').trim().startsWit
 // desde un blob local.
 const AuthedMedia = ({ url, kind }: { url: string; kind: 'image' | 'video' | 'audio' }) => {
   const [src, setSrc] = useState('');
+  const [fallo, setFallo] = useState(false);
   useEffect(() => {
     let vivo = true;
+    setFallo(false);
     let objectUrl = '';
     if (!isInternalMedia(url)) { setSrc(isHttpUrl(url) ? url : ''); return; }
-    api.get(url, { responseType: 'blob' })
+    // La URL guardada ya viene con /api, y axios le antepone su baseURL (/api):
+    // sin sacarlo se pedia /api/api/media/... , que da 404, y el adjunto quedaba
+    // para siempre en "Cargando adjunto…".
+    const ruta = url.replace(/^\/api(?=\/)/, '');
+    api.get(ruta, { responseType: 'blob' })
       .then(({ data }) => { if (!vivo) return; objectUrl = URL.createObjectURL(data); setSrc(objectUrl); })
-      .catch(() => { if (vivo) setSrc(''); });
+      .catch(() => { if (vivo) { setSrc(''); setFallo(true); } });
     return () => { vivo = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [url]);
 
   if (!src) {
-    return <Typography variant='caption' sx={{ color: '#7A7872', display: 'block', mb: 0.6 }}>Cargando adjunto…</Typography>;
+    return (
+      <Typography variant='caption' sx={{ color: fallo ? '#EF5350' : '#7A7872', display: 'block', mb: 0.6 }}>
+        {fallo ? 'No se pudo cargar el adjunto' : 'Cargando adjunto…'}
+      </Typography>
+    );
   }
   if (kind === 'image') {
     return (
