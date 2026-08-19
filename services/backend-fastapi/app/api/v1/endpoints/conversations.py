@@ -23,6 +23,11 @@ def conversations_list(
     limit: int | None = Query(default=None, ge=1, le=500),
 ):
     company_id = int(payload.get("companyId") or 0)
+    # Los asesores (perfil user) ven solo las conversaciones que tienen
+    # asignadas; admin y super siguen viendo todo el equipo.
+    solo_mias = None
+    if str(payload.get("profile", "")).lower() not in {"admin", "super"}:
+        solo_mias = int(payload.get("id") or 0) or None
 
     # If page or limit provided → paginated mode
     if page is not None or limit is not None:
@@ -33,6 +38,7 @@ def conversations_list(
             contact_id=contactId,
             page=page or 1,
             limit=limit or 50,
+            assigned_user_id=solo_mias,
         )
 
     # Legacy mode — plain array
@@ -42,6 +48,7 @@ def conversations_list(
         status=status,
         contact_id=contactId,
         limit=200,
+        assigned_user_id=solo_mias,
     )
 
 

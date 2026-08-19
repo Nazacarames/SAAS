@@ -103,6 +103,13 @@ def get_board(
 
     first_stage_id = stages[0]["id"]
 
+    # Mismo criterio que Leads y Conversaciones: el asesor ve su propio tablero
+    solo_mias = ""
+    params = {"cid": company_id}
+    if str(payload.get("profile", "")).lower() not in {"admin", "super"}:
+        solo_mias = 'AND c."assignedUserId" = :uid'
+        params["uid"] = int(payload.get("id") or 0) or -1
+
     leads = db.execute(
         text(
             """SELECT c.id, c.name, c.number, c.email, c.source, c.lead_score,
@@ -117,11 +124,11 @@ def get_board(
                       c."updatedAt" AS updated_at
                FROM contacts c
                LEFT JOIN channels ch ON ch.id = c.channel_id
-               WHERE c."companyId" = :cid
+               WHERE c."companyId" = :cid %s
                ORDER BY c."updatedAt" DESC NULLS LAST
-               LIMIT 1000"""
+               LIMIT 1000""" % solo_mias
         ),
-        {"cid": company_id},
+        params,
     ).mappings().all()
 
     by_stage: dict[int, list] = {s["id"]: [] for s in stages}

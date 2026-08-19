@@ -29,6 +29,10 @@ def contacts_list(
     assigned_user_id = None
     if assigned_user_id_raw is not None and assigned_user_id_raw != "null":
         assigned_user_id = int(assigned_user_id_raw)
+    # Un asesor ve solo sus leads. No es un filtro que pueda sacar desde el
+    # navegador: se impone acá, sobre lo que haya pedido el cliente.
+    if str(payload.get("profile", "")).lower() not in {"admin", "super"}:
+        assigned_user_id = int(payload.get("id") or 0) or -1
 
     return list_contacts(
         db,

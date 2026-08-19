@@ -12,9 +12,15 @@ _CONV_COLS = (
 )
 
 
-def _build_where(company_id: int, status: str | None, contact_id: int | None):
+def _build_where(company_id: int, status: str | None, contact_id: int | None,
+                 assigned_user_id: int | None = None):
     where = ['c."companyId" = :company_id']
     params: dict = {"company_id": company_id}
+    # Un asesor ve SOLO lo suyo. Sin esto, cada usuario abria el CRM y tenia
+    # delante las conversaciones de todos sus compañeros.
+    if assigned_user_id:
+        where.append('c."assignedUserId" = :assigned_user_id')
+        params["assigned_user_id"] = int(assigned_user_id)
     if status:
         where.append('c."leadStatus" = :status')
         params["status"] = status
@@ -31,9 +37,10 @@ def list_conversations(
     status: str | None = None,
     contact_id: int | None = None,
     limit: int = 200,
+    assigned_user_id: int | None = None,
 ):
     """Legacy mode — returns plain list (no pagination metadata)."""
-    where_clause, params = _build_where(company_id, status, contact_id)
+    where_clause, params = _build_where(company_id, status, contact_id, assigned_user_id)
     params["limit"] = max(1, min(limit, 500))
     rows = db.execute(
         text(
@@ -53,9 +60,10 @@ def list_conversations_paginated(
     contact_id: int | None = None,
     page: int = 1,
     limit: int = 50,
+    assigned_user_id: int | None = None,
 ):
     """Paginated mode — returns {data, total, page, limit, totalPages}."""
-    where_clause, params = _build_where(company_id, status, contact_id)
+    where_clause, params = _build_where(company_id, status, contact_id, assigned_user_id)
 
     page = max(1, page)
     limit = max(1, min(limit, 500))
