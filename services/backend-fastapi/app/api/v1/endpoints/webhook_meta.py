@@ -699,6 +699,18 @@ async def _handle_leadgen(db: Session, entry: dict, change: dict, raw_body: byte
     try:
         from app.services import lead_ads
         res = lead_ads.ingest(db, company_id, page_id, leadgen_id)
+        # Primer contacto automatico al lead, por plantilla: nunca escribio, asi
+        # que no hay ventana de 24 h y el texto libre no entra.
+        if res.get("contact_id") and res.get("telefono"):
+            try:
+                from app.services import form_followup
+                res["contacto"] = await form_followup.contactar(
+                    db, company_id, int(res["contact_id"]), res.get("nombre") or "",
+                    res.get("telefono") or "", res.get("campos") or {})
+            except Exception as e:
+                log.warning("form followup: %s", str(e)[:150])
+                db.rollback()
+        res.pop("campos", None)
         return {"channel": "leadgen", "company_id": company_id, **res}
     except Exception as e:
         log.error("leadgen company=%s: %s", company_id, str(e)[:200])

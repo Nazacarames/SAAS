@@ -79,9 +79,13 @@ def _nombre_form(db: Session, company_id: int, page_id: str, form_id: str) -> st
         r = httpx.get(f"{GRAPH}/{form_id}", params={
             "access_token": _page_token(db, company_id, page_id), "fields": "name"}, timeout=15).json()
         nombre = str(r.get("name") or "")
-        return "" if nombre.lower().startswith("formulario sin") else nombre[:120]
+        if nombre and not nombre.lower().startswith("formulario sin"):
+            return nombre[:120]
     except Exception:
-        return ""
+        pass
+    # Sin permiso para leer el nombre (o el cliente no se lo puso), igual hay que
+    # poder distinguir un formulario de otro: el id corto alcanza y es estable.
+    return "Formulario ...%s" % form_id[-6:]
 
 
 def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
@@ -219,6 +223,15 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
         ).scalar()
     db.commit()
 
+    # Reparto por turnos, igual que un lead que escribe: sin esto quedaba sin
+    # asesor y, con el filtro por asignado, no lo veia nadie salvo un admin.
+    try:
+        from app.services.handoff import ensure_assigned
+        ensure_assigned(db, company_id, int(contact_id))
+    except Exception as e:
+        log.warning("lead ads: no se pudo asignar (%s)", str(e)[:120])
+        db.rollback()
+
     try:
         ad_attribution.save(db, company_id, contact_id, ad_id,
                             adset_id=adset_id, campaign_id=campaign_id)
@@ -233,5 +246,7 @@ def ingest(db: Session, company_id: int, page_id: str, leadgen_id: str) -> dict:
         db.rollback()
 
     log.info("lead ads: lead %s de la empresa %s -> contacto %s", leadgen_id, company_id, contact_id)
+    # El primer contacto al lead lo dispara el webhook (que si es async); aca
+    # se devuelve lo que necesita para armar el mensaje.
     return {"ok": True, "ingested": True, "contact_id": contact_id,
-            "nombre": nombre, "telefono": telefono, "email": email}
+            "nombre": nombre, "telefono": telefono, "email": email, "campos": campos}
