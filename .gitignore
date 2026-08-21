@@ -40,3 +40,6 @@ Thumbs.db
 *.bak
 *.bak.*
 data/
+
+# Adjuntos de clientes (fotos, audios, videos). Nunca al repo.
+media/
