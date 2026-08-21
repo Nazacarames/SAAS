@@ -66,6 +66,13 @@ const scoreFromStage = (stage: string) => {
   }
 };
 
+const ORIGEN_LABEL: Record<string, string> = {
+  pauta: 'Pauta', formulario: 'Formulario', web: 'Web', organico: 'Organico',
+};
+const ORIGEN_COLOR: Record<string, string> = {
+  pauta: '#34D399', formulario: '#60A5FA', web: '#A78BFA', organico: '#8A8FA0',
+};
+
 const isInternalMedia = (value?: string) => String(value || '').trim().startsWith('/api/media/');
 
 // Los adjuntos del cliente se sirven con sesion, no como archivos publicos, asi
@@ -1043,6 +1050,34 @@ const Conversations = () => {
               <Typography variant='caption' display='block'>Teléfono: {contactData?.number || selectedConv.number}</Typography>
               <Typography variant='caption' display='block'>Rubro: {contactData?.business_type || '-'}</Typography>
               <Typography variant='caption' display='block'>Necesidad: {contactData?.needs || '-'}</Typography>
+              {/* De donde vino: es lo primero que el asesor necesita saber para
+                  no arrancar preguntando algo que el lead ya contesto. */}
+              {(contactData?.origen || contactData?.campaign_name) && (
+                <Box sx={{ mt: 1, pt: 1, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                  <Stack direction='row' spacing={0.7} alignItems='center' sx={{ mb: 0.3 }}>
+                    <Chip
+                      size='small'
+                      label={ORIGEN_LABEL[contactData?.origen || ''] || contactData?.origen}
+                      sx={{ height: 18, fontSize: '0.62rem', fontWeight: 600,
+                            backgroundColor: (ORIGEN_COLOR[contactData?.origen || ''] || '#8A8FA0') + '22',
+                            color: ORIGEN_COLOR[contactData?.origen || ''] || '#8A8FA0' }}
+                    />
+                    <Typography variant='caption' sx={{ color: '#7A7872' }}>
+                      {contactData?.source || ''}
+                    </Typography>
+                  </Stack>
+                  {(contactData?.campaign_name || contactData?.origen_detalle) && (
+                    <Typography variant='caption' display='block' sx={{ color: '#E8A020' }}>
+                      {contactData?.campaign_name || contactData?.origen_detalle}
+                    </Typography>
+                  )}
+                  {contactData?.ad_name && contactData?.campaign_name && (
+                    <Typography variant='caption' display='block' sx={{ color: '#7A7872' }}>
+                      Aviso: {contactData.ad_name}
+                    </Typography>
+                  )}
+                </Box>
+              )}
             </Paper>
 
             <Paper sx={{ p: 1.2, mb: 1.2, bgcolor: '#1A1D24', color: '#E8E6E1' }}>

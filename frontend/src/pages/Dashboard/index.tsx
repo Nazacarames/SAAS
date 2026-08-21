@@ -249,7 +249,7 @@ const Dashboard = () => {
           </Typography>
           <Stack direction="row" sx={{ pb: 0.75, borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
             <Typography sx={{ flexGrow: 1, fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 1 }}>Campaña</Typography>
-            {['Leads', 'Ventas', 'Monto'].map((h) => (
+            {['Leads', 'Score', 'Ventas', 'Monto'].map((h) => (
               <Typography key={h} sx={{ width: h === 'Monto' ? 110 : 60, textAlign: 'right', fontSize: '0.65rem', color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: 1 }}>{h}</Typography>
             ))}
           </Stack>
@@ -259,6 +259,15 @@ const Dashboard = () => {
                 {c.campana}
               </Typography>
               <Typography sx={{ width: 60, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: 'rgba(255,255,255,0.7)' }}>{c.leads}</Typography>
+              {/* score promedio: dos campanas con los mismos leads no valen lo
+                  mismo si una los trae tibios */}
+              <Typography
+                title="Score promedio de los leads de esta campana"
+                sx={{ width: 60, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace',
+                      color: c.score >= 60 ? '#34D399' : c.score >= 30 ? '#E8A020' : 'rgba(255,255,255,0.4)' }}
+              >
+                {c.score > 0 ? c.score : '-'}
+              </Typography>
               <Typography sx={{ width: 60, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: c.ventas > 0 ? '#34D399' : 'rgba(255,255,255,0.25)' }}>{c.ventas}</Typography>
               <Typography sx={{ width: 110, textAlign: 'right', fontSize: '0.8rem', fontFamily: '"JetBrains Mono", monospace', color: c.monto > 0 ? '#34D399' : 'rgba(255,255,255,0.25)' }}>
                 {c.monto > 0 ? c.monto.toLocaleString('es-AR', { maximumFractionDigits: 0 }) : '—'}

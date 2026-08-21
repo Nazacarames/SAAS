@@ -174,18 +174,23 @@ def por_campana(db: Session, company_id: int, dias: int = 30) -> list[dict]:
                         'Sin pauta identificada') AS campana,
                        COUNT(DISTINCT c.id) AS leads,
                        COUNT(DISTINCT lc.contact_id) AS ventas,
-                       COALESCE(SUM(lc.value), 0) AS monto
+                       COALESCE(SUM(lc.value), 0) AS monto,
+                       -- calidad de lo que trae cada pauta: dos campañas con la
+                       -- misma cantidad de leads no valen lo mismo si una los
+                       -- trae tibios
+                       COALESCE(AVG(c.lead_score), 0) AS score
                 FROM contacts c
                 LEFT JOIN lead_conversions lc ON lc.contact_id = c.id
                 WHERE c."companyId" = :c
                   AND c."createdAt" >= NOW() - (:d || ' days')::interval
                 GROUP BY 1
-                ORDER BY ventas DESC, leads DESC
+                ORDER BY ventas DESC, score DESC, leads DESC
                 LIMIT 12"""),
         {"c": company_id, "d": str(dias)},
     ).mappings().all()
     return [{"campana": f["campana"], "leads": int(f["leads"] or 0),
-             "ventas": int(f["ventas"] or 0), "monto": float(f["monto"] or 0)} for f in filas]
+             "ventas": int(f["ventas"] or 0), "monto": float(f["monto"] or 0),
+             "score": round(float(f["score"] or 0))} for f in filas]
 
 
 # ── de donde vino el lead ─────────────────────────────────────────
